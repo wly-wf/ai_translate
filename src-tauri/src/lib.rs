@@ -595,11 +595,14 @@ fn initialize_selection_float(app: &tauri::App) -> Result<(), String> {
     let window =
         WebviewWindowBuilder::new(app, "selection-float", WebviewUrl::App("index.html".into()))
             .inner_size(FLOAT_SIZE as f64, FLOAT_SIZE as f64)
+            .title("")
             .decorations(false)
             .transparent(true)
             .always_on_top(true)
             .skip_taskbar(true)
             .resizable(false)
+            .focused(false)
+            .focusable(false)
             .visible(false)
             .build()
             .map_err(|error| error.to_string())?;
