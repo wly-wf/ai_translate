@@ -13,6 +13,7 @@ use std::{
     time::Duration,
 };
 use tauri::{
+    menu::{Menu, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, PhysicalPosition, Position, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
@@ -554,11 +555,21 @@ fn initialize_tray_icon(app: &tauri::App) -> Result<(), String> {
         .default_window_icon()
         .cloned()
         .ok_or_else(|| "AI Translate does not have a tray icon asset.".to_string())?;
+    let quit_item = MenuItemBuilder::with_id("quit", "退出")
+        .build(app)
+        .map_err(|error| error.to_string())?;
+    let menu = Menu::with_items(app, &[&quit_item]).map_err(|error| error.to_string())?;
 
     TrayIconBuilder::with_id("ai-translate-tray")
         .icon(icon)
         .tooltip("AI Translate")
+        .menu(&menu)
         .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| {
+            if event.id() == "quit" {
+                app.exit(0);
+            }
+        })
         .on_tray_icon_event(|tray, event| {
             if matches!(
                 event,
