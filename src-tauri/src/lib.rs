@@ -1,3 +1,5 @@
+mod selection_state;
+
 use keyring::Entry;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
