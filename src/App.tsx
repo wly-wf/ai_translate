@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { SelectionFloat } from "./SelectionFloat";
 import "./App.css";
 
 type Translation = { source: string; translation: string };
@@ -15,6 +17,10 @@ async function nativeInvoke<T>(command: string, args?: Record<string, unknown>):
 }
 
 function App() {
+  if (getCurrentWebviewWindow().label === "selection-float") {
+    return <SelectionFloat />;
+  }
+
   const [result, setResult] = useState<Translation | null>(null);
   const [text, setText] = useState("");
   const [apiKey, setApiKey] = useState("");
