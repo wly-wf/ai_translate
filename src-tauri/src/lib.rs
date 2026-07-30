@@ -3,11 +3,15 @@ pub mod mouse_hook;
 pub mod windows_selection;
 
 use selection_state::{Anchor, SelectionController, StateChange};
-use windows_selection::{capture_selection, CapturedSelection};
+use windows_selection::{capture_selection, CaptureOutcome};
 use keyring::Entry;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::{sync::Mutex, time::Duration};
+use std::{
+    sync::{Arc, Condvar, Mutex},
+    thread,
+    time::Duration,
+};
 use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, Position, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
@@ -22,6 +26,20 @@ const KEYRING_ACCOUNT: &str = "deepseek-api-key";
 const DEEPSEEK_URL: &str = "https://api.deepseek.com/chat/completions";
 const FLOAT_SIZE: i32 = 36;
 
+// MinGW links Muda's unused About-dialog object into the unit-test executable,
+// but that executable does not receive Tauri's Common Controls v6 manifest.
+// The production application is unaffected; tests never invoke this entry point.
+#[cfg(test)]
+#[no_mangle]
+unsafe extern "system" fn TaskDialogIndirect(
+    _config: *const std::ffi::c_void,
+    _button: *mut i32,
+    _radio_button: *mut i32,
+    _verification_checked: *mut i32,
+) -> i32 {
+    0x8000_4001_u32 as i32
+}
+
 #[cfg(test)]
 mod selection_float_tests {
     use super::*;
@@ -32,7 +50,8 @@ mod selection_float_tests {
 
     fn visible_controller(text: &str) -> SelectionController {
         let mut controller = SelectionController::default();
-        controller.replace_selection(text.into(), Anchor { x: 0, y: 0 });
+        let generation = controller.begin_mouse_up();
+        controller.replace_selection(generation, text.into(), Anchor { x: 0, y: 0 });
         controller
     }
 
@@ -47,22 +66,104 @@ mod selection_float_tests {
     #[test]
     fn plain_click_after_a_visible_selection_hides_the_float() {
         let mut controller = visible_controller("one");
+        let generation = controller.begin_mouse_up();
 
-        assert_eq!(handle_mouse_up(&mut controller, None, false), StateChange::Hide);
+        assert_eq!(
+            handle_mouse_up(&mut controller, generation, CaptureOutcome::Empty, false),
+            StateChange::Hide
+        );
     }
 
     #[test]
     fn replacement_selection_keeps_the_float_visible() {
         let mut controller = visible_controller("one");
+        let generation = controller.begin_mouse_up();
         let captured = CapturedSelection {
             text: "two".into(),
             anchor: Anchor { x: 20, y: 30 },
         };
 
         assert!(matches!(
-            handle_mouse_up(&mut controller, Some(captured), false),
+            handle_mouse_up(
+                &mut controller,
+                generation,
+                CaptureOutcome::Detected(captured),
+                false,
+            ),
             StateChange::Show(_)
         ));
+    }
+
+    #[test]
+    fn optional_selection_startup_failure_does_not_abort_shortcut_setup() {
+        let steps = Mutex::new(Vec::new());
+
+        let result = initialize_required_then_optional(
+            || {
+                steps.lock().unwrap().push("shortcut");
+                Ok(())
+            },
+            || {
+                steps.lock().unwrap().push("selection-float");
+                Err("hook unavailable".to_string())
+            },
+        );
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            *steps.lock().unwrap(),
+            vec!["shortcut", "selection-float"]
+        );
+    }
+
+    #[test]
+    fn newest_capture_request_replaces_an_older_pending_request() {
+        let pending = PendingCapture::default();
+        pending.submit(CaptureRequest {
+            generation: 1,
+            point: windows::Win32::Foundation::POINT { x: 1, y: 2 },
+        });
+        pending.submit(CaptureRequest {
+            generation: 2,
+            point: windows::Win32::Foundation::POINT { x: 3, y: 4 },
+        });
+
+        let request = pending.take().unwrap();
+        assert_eq!(request.generation, 2);
+        assert_eq!((request.point.x, request.point.y), (3, 4));
+    }
+
+    #[test]
+    fn over_limit_capture_hides_a_visible_float() {
+        let mut controller = visible_controller("one");
+        let generation = controller.begin_mouse_up();
+
+        assert_eq!(
+            handle_mouse_up(
+                &mut controller,
+                generation,
+                CaptureOutcome::TooLong { characters: 12_001 },
+                false,
+            ),
+            StateChange::Hide
+        );
+    }
+
+    #[test]
+    fn capture_failure_keeps_the_last_valid_selection() {
+        let mut controller = visible_controller("one");
+        let generation = controller.begin_mouse_up();
+
+        assert_eq!(
+            handle_mouse_up(
+                &mut controller,
+                generation,
+                CaptureOutcome::Failed("UIA unavailable".into()),
+                false,
+            ),
+            StateChange::Unchanged
+        );
+        assert_eq!(controller.take_for_translation(), Some("one".into()));
     }
 }
 
@@ -108,45 +209,143 @@ fn clamp_float_position(
 
 fn handle_mouse_up(
     controller: &mut SelectionController,
-    captured: Option<CapturedSelection>,
+    generation: u64,
+    captured: CaptureOutcome,
     clicked_float: bool,
 ) -> StateChange {
+    if clicked_float {
+        return controller.clear_after_plain_click(generation, true);
+    }
     match captured {
-        Some(captured) => controller.replace_selection(captured.text, captured.anchor),
-        None => controller.clear_after_plain_click(clicked_float),
+        CaptureOutcome::Detected(captured) => {
+            controller.replace_selection(generation, captured.text, captured.anchor)
+        }
+        CaptureOutcome::Empty | CaptureOutcome::TooLong { .. } => {
+            controller.clear_after_plain_click(generation, false)
+        }
+        CaptureOutcome::Failed(_) => StateChange::Unchanged,
     }
 }
 
-fn clicked_selection_float(app: &AppHandle, point: windows::Win32::Foundation::POINT) -> bool {
-    let Some(window) = app.get_webview_window("selection-float") else {
-        return false;
-    };
-    let (Ok(true), Ok(position), Ok(size)) = (
-        window.is_visible(),
-        window.outer_position(),
-        window.outer_size(),
-    ) else {
-        return false;
-    };
-    let right = position.x.saturating_add(size.width as i32);
-    let bottom = position.y.saturating_add(size.height as i32);
-
-    point.x >= position.x && point.x < right && point.y >= position.y && point.y < bottom
+#[derive(Clone, Copy, Debug)]
+struct CaptureRequest {
+    generation: u64,
+    point: windows::Win32::Foundation::POINT,
 }
 
-fn apply_mouse_up(app: &AppHandle, captured: Option<CapturedSelection>, clicked_float: bool) {
-    let change = {
+#[derive(Default)]
+struct PendingCapture {
+    request: Mutex<Option<CaptureRequest>>,
+    ready: Condvar,
+}
+
+impl PendingCapture {
+    fn submit(&self, request: CaptureRequest) {
+        let mut pending = self
+            .request
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *pending = Some(request);
+        self.ready.notify_one();
+    }
+
+    #[cfg(test)]
+    fn take(&self) -> Option<CaptureRequest> {
+        self.request
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    }
+
+    fn wait(&self) -> CaptureRequest {
+        let mut pending = self
+            .request
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            if let Some(request) = pending.take() {
+                return request;
+            }
+            pending = self
+                .ready
+                .wait(pending)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CaptureScheduler {
+    pending: Arc<PendingCapture>,
+}
+
+impl CaptureScheduler {
+    fn start(app: AppHandle) -> Result<Self, String> {
+        let pending = Arc::new(PendingCapture::default());
+        let worker_pending = Arc::clone(&pending);
+        thread::Builder::new()
+            .name("selection-capture".into())
+            .spawn(move || loop {
+                let request = worker_pending.wait();
+                thread::sleep(Duration::from_millis(120));
+                if !is_latest_generation(&app, request.generation) {
+                    continue;
+                }
+                let outcome = capture_selection(request.point);
+                apply_mouse_up(&app, request.generation, outcome, false);
+            })
+            .map_err(|error| format!("could not start selection capture worker: {error}"))?;
+        Ok(Self { pending })
+    }
+
+    fn submit(&self, request: CaptureRequest) {
+        self.pending.submit(request);
+    }
+}
+
+fn is_latest_generation(app: &AppHandle, generation: u64) -> bool {
+    let controller = app.state::<Mutex<SelectionController>>();
+    let controller = controller
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    controller.is_latest_generation(generation)
+}
+
+fn apply_mouse_up(
+    app: &AppHandle,
+    generation: u64,
+    captured: CaptureOutcome,
+    clicked_float: bool,
+) {
+    let (change, current) = {
         let controller = app.state::<Mutex<SelectionController>>();
         let mut controller = controller.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        handle_mouse_up(&mut controller, captured, clicked_float)
+        let current = controller.is_latest_generation(generation);
+        let change = handle_mouse_up(&mut controller, generation, captured.clone(), clicked_float);
+        (change, current)
     };
+
+    if !current {
+        return;
+    }
+    match captured {
+        CaptureOutcome::TooLong { characters } => eprintln!(
+            "Selection ignored: {characters} characters exceeds the 12,000-character limit."
+        ),
+        CaptureOutcome::Failed(error) => eprintln!("Selection capture failed: {error}"),
+        CaptureOutcome::Detected(_) | CaptureOutcome::Empty => {}
+    }
 
     match change {
         StateChange::Show(selection) => {
-            let _ = show_float(app, selection.anchor, selection.generation);
+            if let Err(error) = show_float(app, selection.anchor, selection.generation) {
+                eprintln!("Selection float show failed: {error}");
+            }
         }
         StateChange::Hide => {
-            let _ = hide_float(app);
+            if let Err(error) = hide_float(app) {
+                eprintln!("Selection float hide failed: {error}");
+            }
         }
         StateChange::Unchanged => {}
     }
@@ -195,6 +394,20 @@ pub fn hide_float(app: &AppHandle) -> Result<(), String> {
         .ok_or_else(|| "Selection float window is unavailable.".to_string())?;
     window.hide().map_err(|error| error.to_string())?;
     window.emit("selection-float:hide", ()).map_err(|error| error.to_string())
+}
+
+fn report_translation_error(app: &AppHandle, error: &str) {
+    match app.get_webview_window("main") {
+        Some(window) => {
+            if let Err(show_error) = window.show() {
+                eprintln!("Translation error window show failed: {show_error}");
+            }
+        }
+        None => eprintln!("Translation error window is unavailable."),
+    }
+    if let Err(emit_error) = app.emit("translation-error", error) {
+        eprintln!("Translation error event emission failed: {emit_error}");
+    }
 }
 
 fn keyring_entry() -> Result<Entry, String> {
@@ -282,11 +495,79 @@ async fn translate_selection_float(app: AppHandle) -> Result<(), String> {
         let controller = app.state::<Mutex<SelectionController>>();
         let mut controller = controller.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         controller.take_for_translation()
-    }
-    .ok_or_else(|| "没有待翻译的选中文本。".to_string())?;
+    };
+    let Some(text) = text else {
+        let error = "没有待翻译的选中文本。".to_string();
+        report_translation_error(&app, &error);
+        return Err(error);
+    };
 
-    hide_float(&app)?;
-    translate_and_display(app, text).await.map(|_| ())
+    if let Err(error) = hide_float(&app) {
+        eprintln!("Selection float hide failed before translation: {error}");
+    }
+    match translate_and_display(app.clone(), text).await {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            report_translation_error(&app, &error);
+            Err(error)
+        }
+    }
+}
+
+fn initialize_required_then_optional(
+    required: impl FnOnce() -> Result<(), String>,
+    optional: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    required()?;
+    if let Err(error) = optional() {
+        eprintln!("Selection float disabled: {error}");
+    }
+    Ok(())
+}
+
+fn initialize_selection_float(app: &tauri::App) -> Result<(), String> {
+    let window =
+        WebviewWindowBuilder::new(app, "selection-float", WebviewUrl::App("index.html".into()))
+            .inner_size(FLOAT_SIZE as f64, FLOAT_SIZE as f64)
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .resizable(false)
+            .visible(false)
+            .build()
+            .map_err(|error| error.to_string())?;
+
+    let result = (|| {
+        let float_window = window.hwnd().map_err(|error| error.to_string())?;
+        let mouse_app = app.handle().clone();
+        let scheduler = CaptureScheduler::start(mouse_app.clone())?;
+        mouse_hook::start_mouse_hook(float_window, move |event| {
+            let generation = {
+                let controller = mouse_app.state::<Mutex<SelectionController>>();
+                let mut controller = controller
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                controller.begin_mouse_up()
+            };
+            if event.clicked_float {
+                return;
+            }
+            scheduler.submit(CaptureRequest {
+                generation,
+                point: event.point,
+            });
+        })
+        .map_err(|error| error.to_string())
+    })();
+
+    if let Err(error) = result {
+        if let Err(close_error) = window.close() {
+            eprintln!("Partially initialized selection float could not be closed: {close_error}");
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -301,37 +582,20 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     let text = app.clipboard().read_text().unwrap_or_default();
                     if let Err(error) = translate_and_display(app.clone(), text).await {
-                        let _ = app.emit("translation-error", error);
-                        if let Some(window) = app.get_webview_window("main") { let _ = window.show(); }
+                        report_translation_error(&app, &error);
                     }
                 });
             }
         }).build())
         .setup(move |app| {
-            WebviewWindowBuilder::new(app, "selection-float", WebviewUrl::App("index.html".into()))
-                .inner_size(FLOAT_SIZE as f64, FLOAT_SIZE as f64)
-                .decorations(false)
-                .transparent(true)
-                .always_on_top(true)
-                .skip_taskbar(true)
-                .resizable(false)
-                .visible(false)
-                .build()
-                .map_err(|error| error.to_string())?;
-            let mouse_app = app.handle().clone();
-            mouse_hook::start_mouse_hook(move |point| {
-                let clicked_float = clicked_selection_float(&mouse_app, point);
-                let app = mouse_app.clone();
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(120)).await;
-                    let captured = (!clicked_float)
-                        .then(|| capture_selection(point).ok().flatten())
-                        .flatten();
-                    apply_mouse_up(&app, captured, clicked_float);
-                });
-            })
-            .map_err(|error| error.to_string())?;
-            app.global_shortcut().register(shortcut).map_err(|error| format!("无法注册 Alt+T：{error}"))?;
+            initialize_required_then_optional(
+                || {
+                    app.global_shortcut()
+                        .register(shortcut)
+                        .map_err(|error| format!("无法注册 Alt+T：{error}"))
+                },
+                || initialize_selection_float(app),
+            )?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

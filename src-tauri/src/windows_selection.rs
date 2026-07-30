@@ -65,28 +65,60 @@ pub struct CapturedSelection {
     pub anchor: Anchor,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CaptureOutcome {
+    Detected(CapturedSelection),
+    Empty,
+    TooLong { characters: usize },
+    Failed(String),
+}
+
+enum UiaAttempt {
+    Outcome(CaptureOutcome),
+    Unavailable,
+    Failed(String),
+}
+
 impl CapturedSelection {
-    fn from_parts(text: String, rectangles: Vec<RECT>) -> Option<Self> {
-        if !is_usable_text(&text) {
-            return None;
+    fn from_parts(text: String, rectangles: Vec<RECT>) -> CaptureOutcome {
+        match classify_text(&text) {
+            TextClassification::Empty => return CaptureOutcome::Empty,
+            TextClassification::TooLong(characters) => {
+                return CaptureOutcome::TooLong { characters };
+            }
+            TextClassification::Usable => {}
         }
 
-        let rectangle = rectangles.into_iter().rev().find(is_visible_rectangle)?;
-        Some(Self {
+        let Some(rectangle) = rectangles.into_iter().rev().find(is_visible_rectangle) else {
+            return CaptureOutcome::Empty;
+        };
+        CaptureOutcome::Detected(Self {
             text,
             anchor: Anchor { x: rectangle.right, y: rectangle.top },
         })
     }
 
-    fn from_text_at_point(text: String, point: POINT) -> Option<Self> {
-        is_usable_text(&text).then_some(Self {
-            text,
-            anchor: Anchor { x: point.x, y: point.y },
-        })
+    fn from_text_at_point(text: String, point: POINT) -> CaptureOutcome {
+        match classify_text(&text) {
+            TextClassification::Empty => CaptureOutcome::Empty,
+            TextClassification::TooLong(characters) => CaptureOutcome::TooLong { characters },
+            TextClassification::Usable => CaptureOutcome::Detected(Self {
+                text,
+                anchor: Anchor { x: point.x, y: point.y },
+            }),
+        }
     }
 }
 
-pub fn capture_selection(point: POINT) -> Result<Option<CapturedSelection>, CaptureError> {
+pub fn capture_selection(point: POINT) -> CaptureOutcome {
+    let attempt = match capture_with_uia(point) {
+        Ok(attempt) => attempt,
+        Err(error) => UiaAttempt::Failed(error.to_string()),
+    };
+    resolve_uia_attempt(attempt, || copy_fallback(point))
+}
+
+fn capture_with_uia(point: POINT) -> Result<UiaAttempt, CaptureError> {
     let _apartment = ComApartment::initialize()?;
     let automation: IUIAutomation = unsafe {
         CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)?
@@ -96,7 +128,7 @@ pub fn capture_selection(point: POINT) -> Result<Option<CapturedSelection>, Capt
         element.GetCurrentPatternAs(UIA_TextPatternId)
     } {
         Ok(pattern) => pattern,
-        Err(_) => return Ok(copy_fallback(point)),
+        Err(_) => return Ok(UiaAttempt::Unavailable),
     };
 
     let ranges = unsafe { text_pattern.GetSelection()? };
@@ -109,11 +141,53 @@ pub fn capture_selection(point: POINT) -> Result<Option<CapturedSelection>, Capt
         rectangles.extend(rectangles_for_range(&automation, &range)?);
     }
 
-    Ok(CapturedSelection::from_parts(text, rectangles))
+    Ok(UiaAttempt::Outcome(CapturedSelection::from_parts(
+        text,
+        rectangles,
+    )))
 }
 
-fn is_usable_text(text: &str) -> bool {
-    !text.trim().is_empty() && text.chars().count() <= MAX_SELECTION_CHARACTERS
+enum TextClassification {
+    Empty,
+    Usable,
+    TooLong(usize),
+}
+
+fn classify_text(text: &str) -> TextClassification {
+    if text.trim().is_empty() {
+        return TextClassification::Empty;
+    }
+    let characters = text.chars().count();
+    if characters > MAX_SELECTION_CHARACTERS {
+        TextClassification::TooLong(characters)
+    } else {
+        TextClassification::Usable
+    }
+}
+
+fn resolve_uia_attempt(
+    attempt: UiaAttempt,
+    fallback: impl FnOnce() -> CaptureOutcome,
+) -> CaptureOutcome {
+    match attempt {
+        UiaAttempt::Outcome(CaptureOutcome::Detected(captured)) => {
+            CaptureOutcome::Detected(captured)
+        }
+        UiaAttempt::Outcome(CaptureOutcome::TooLong { characters }) => {
+            CaptureOutcome::TooLong { characters }
+        }
+        UiaAttempt::Outcome(CaptureOutcome::Failed(error)) => CaptureOutcome::Failed(error),
+        UiaAttempt::Outcome(CaptureOutcome::Empty) | UiaAttempt::Unavailable => fallback(),
+        UiaAttempt::Failed(uia_error) => match fallback() {
+            CaptureOutcome::Empty => CaptureOutcome::Failed(format!(
+                "UI Automation failed ({uia_error}); clipboard fallback found no selection"
+            )),
+            CaptureOutcome::Failed(fallback_error) => CaptureOutcome::Failed(format!(
+                "UI Automation failed ({uia_error}); clipboard fallback failed ({fallback_error})"
+            )),
+            outcome => outcome,
+        },
+    }
 }
 
 fn is_visible_rectangle(rectangle: &RECT) -> bool {
@@ -144,11 +218,13 @@ fn rectangles_for_range(
     Ok(rectangles)
 }
 
-fn copy_fallback(point: POINT) -> Option<CapturedSelection> {
+fn copy_fallback(point: POINT) -> CaptureOutcome {
     let before_sequence = unsafe { GetClipboardSequenceNumber() };
     let original_text = read_plain_text();
     if !send_copy_shortcut() {
-        return None;
+        return CaptureOutcome::Failed(
+            "could not send Ctrl+C for clipboard fallback".to_string(),
+        );
     }
 
     for _ in 0..CLIPBOARD_RETRIES {
@@ -159,15 +235,25 @@ fn copy_fallback(point: POINT) -> Option<CapturedSelection> {
         }
 
         let copied_text = read_plain_text();
-        if unsafe { GetClipboardSequenceNumber() } == copied_sequence {
-            if let Some(original_text) = original_text.as_deref() {
-                let _ = write_plain_text(original_text);
+        if let Some(original_text) = original_text.as_deref() {
+            match restore_plain_text_if_unchanged(copied_sequence, original_text) {
+                Ok(true) => {}
+                Ok(false) => {
+                    eprintln!(
+                        "Selection clipboard restore skipped because the clipboard changed."
+                    );
+                }
+                Err(error) => {
+                    eprintln!("Selection clipboard restore failed: {error}");
+                }
             }
         }
-        return copied_text.and_then(|text| CapturedSelection::from_text_at_point(text, point));
+        return copied_text
+            .map(|text| CapturedSelection::from_text_at_point(text, point))
+            .unwrap_or(CaptureOutcome::Empty);
     }
 
-    None
+    CaptureOutcome::Empty
 }
 
 fn send_copy_shortcut() -> bool {
@@ -239,34 +325,163 @@ fn read_plain_text() -> Option<String> {
     text
 }
 
-fn write_plain_text(text: &str) -> Option<()> {
-    let _clipboard = ClipboardGuard::open()?;
-    unsafe { EmptyClipboard().ok()? };
+fn should_restore_clipboard(expected_sequence: u32, observed_sequence: u32) -> bool {
+    expected_sequence == observed_sequence
+}
 
+fn restore_plain_text_if_unchanged(
+    expected_sequence: u32,
+    text: &str,
+) -> Result<bool, String> {
+    let _clipboard =
+        ClipboardGuard::open().ok_or_else(|| "could not open the clipboard".to_string())?;
+    let observed_sequence = unsafe { GetClipboardSequenceNumber() };
+    if !should_restore_clipboard(expected_sequence, observed_sequence) {
+        return Ok(false);
+    }
+
+    write_plain_text_to_open_clipboard(text)?;
+    Ok(true)
+}
+
+fn write_plain_text_to_open_clipboard(text: &str) -> Result<(), String> {
     let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-    let bytes = wide.len().checked_mul(size_of::<u16>())?;
-    let global = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes).ok()? };
+    let bytes = wide
+        .len()
+        .checked_mul(size_of::<u16>())
+        .ok_or_else(|| "clipboard text allocation overflowed".to_string())?;
+    let global =
+        unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes) }.map_err(|error| error.to_string())?;
     let data = unsafe { GlobalLock(global) }.cast::<u16>();
     if data.is_null() {
         let _ = unsafe { GlobalFree(global) };
-        return None;
+        return Err("could not lock clipboard text memory".to_string());
     }
     unsafe { copy_nonoverlapping(wide.as_ptr(), data, wide.len()) };
     let _ = unsafe { GlobalUnlock(global) };
 
-    if unsafe { SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(global.0))).is_err() } {
+    if let Err(error) = unsafe { EmptyClipboard() } {
         let _ = unsafe { GlobalFree(global) };
-        return None;
+        return Err(error.to_string());
     }
-    Some(())
+    if let Err(error) =
+        unsafe { SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(global.0))) }
+    {
+        let _ = unsafe { GlobalFree(global) };
+        return Err(error.to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[test]
     fn empty_selection_is_not_a_capture() {
-        assert!(CapturedSelection::from_parts("  ".into(), vec![]).is_none());
+        assert_eq!(
+            CapturedSelection::from_parts("  ".into(), vec![]),
+            CaptureOutcome::Empty
+        );
+    }
+
+    #[test]
+    fn uia_empty_selection_uses_clipboard_fallback() {
+        let fallback_called = Cell::new(false);
+        let fallback_capture = CapturedSelection {
+            text: "clipboard".into(),
+            anchor: Anchor { x: 5, y: 6 },
+        };
+
+        let outcome = resolve_uia_attempt(UiaAttempt::Outcome(CaptureOutcome::Empty), || {
+            fallback_called.set(true);
+            CaptureOutcome::Detected(fallback_capture.clone())
+        });
+
+        assert!(fallback_called.get());
+        assert_eq!(outcome, CaptureOutcome::Detected(fallback_capture));
+    }
+
+    #[test]
+    fn uia_error_uses_clipboard_fallback() {
+        let fallback_capture = CapturedSelection {
+            text: "clipboard".into(),
+            anchor: Anchor { x: 5, y: 6 },
+        };
+
+        let outcome = resolve_uia_attempt(UiaAttempt::Failed("UIA failed".into()), || {
+            CaptureOutcome::Detected(fallback_capture.clone())
+        });
+
+        assert_eq!(outcome, CaptureOutcome::Detected(fallback_capture));
+    }
+
+    #[test]
+    fn uia_error_remains_visible_when_clipboard_fallback_is_empty() {
+        let outcome = resolve_uia_attempt(UiaAttempt::Failed("UIA failed".into()), || {
+            CaptureOutcome::Empty
+        });
+
+        assert!(matches!(outcome, CaptureOutcome::Failed(message) if message.contains("UIA failed")));
+    }
+
+    #[test]
+    fn last_visible_rectangle_sets_the_anchor() {
+        let outcome = CapturedSelection::from_parts(
+            "selected".into(),
+            vec![
+                RECT {
+                    left: 1,
+                    top: 2,
+                    right: 11,
+                    bottom: 12,
+                },
+                RECT {
+                    left: 20,
+                    top: 30,
+                    right: 20,
+                    bottom: 40,
+                },
+                RECT {
+                    left: 50,
+                    top: 60,
+                    right: 70,
+                    bottom: 80,
+                },
+            ],
+        );
+
+        assert_eq!(
+            outcome,
+            CaptureOutcome::Detected(CapturedSelection {
+                text: "selected".into(),
+                anchor: Anchor { x: 70, y: 60 },
+            })
+        );
+    }
+
+    #[test]
+    fn capture_classifies_the_character_limit_boundary() {
+        assert!(matches!(
+            CapturedSelection::from_text_at_point(
+                "x".repeat(12_000),
+                POINT { x: 1, y: 2 },
+            ),
+            CaptureOutcome::Detected(_)
+        ));
+        assert_eq!(
+            CapturedSelection::from_text_at_point(
+                "x".repeat(12_001),
+                POINT { x: 1, y: 2 },
+            ),
+            CaptureOutcome::TooLong { characters: 12_001 }
+        );
+    }
+
+    #[test]
+    fn clipboard_restore_is_skipped_after_an_external_change() {
+        assert!(should_restore_clipboard(41, 41));
+        assert!(!should_restore_clipboard(41, 42));
     }
 }

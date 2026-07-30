@@ -6,10 +6,10 @@ use std::{
 use windows::{
     core::Error,
     Win32::{
-        Foundation::{LPARAM, LRESULT, POINT, WPARAM},
+        Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         UI::WindowsAndMessaging::{
-            CallNextHookEx, GetMessageW, SetWindowsHookExW, UnhookWindowsHookEx,
-            MSLLHOOKSTRUCT, MSG, WH_MOUSE_LL, WM_LBUTTONUP,
+            CallNextHookEx, GetMessageW, GetWindowRect, IsWindowVisible, SetWindowsHookExW,
+            UnhookWindowsHookEx, MSLLHOOKSTRUCT, MSG, WH_MOUSE_LL, WM_LBUTTONUP,
         },
     },
 };
@@ -44,10 +44,23 @@ impl std::fmt::Display for HookError {
 
 impl std::error::Error for HookError {}
 
+#[derive(Clone, Copy, Debug)]
+pub struct MouseUpEvent {
+    pub point: POINT,
+    pub clicked_float: bool,
+}
+
 pub fn start_mouse_hook(
-    on_mouse_up: impl Fn(POINT) + Send + Sync + 'static,
+    float_window: HWND,
+    on_mouse_up: impl Fn(MouseUpEvent) + Send + Sync + 'static,
 ) -> Result<(), HookError> {
-    let callback = Arc::new(on_mouse_up);
+    let float_window = float_window.0 as isize;
+    let callback = Arc::new(move |point| {
+        on_mouse_up(MouseUpEvent {
+            point,
+            clicked_float: clicked_float_at_event(HWND(float_window as *mut _), point),
+        });
+    });
     let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
 
     thread::Builder::new()
@@ -83,6 +96,24 @@ fn callback_slot() -> &'static CallbackSlot {
     CALLBACK.get_or_init(|| Mutex::new(None))
 }
 
+fn clicked_float_at_event(float_window: HWND, point: POINT) -> bool {
+    if !unsafe { IsWindowVisible(float_window) }.as_bool() {
+        return false;
+    }
+    let mut rectangle = RECT::default();
+    if unsafe { GetWindowRect(float_window, &mut rectangle) }.is_err() {
+        return false;
+    }
+    point_inside_rectangle(point, rectangle)
+}
+
+fn point_inside_rectangle(point: POINT, rectangle: RECT) -> bool {
+    point.x >= rectangle.left
+        && point.x < rectangle.right
+        && point.y >= rectangle.top
+        && point.y < rectangle.bottom
+}
+
 fn reserve_callback<'a>(
     slot: &'a CallbackSlot,
     callback: Arc<MouseUpCallback>,
@@ -115,9 +146,7 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
             .as_ref()
             .map(Arc::clone);
         if let Some(callback) = callback {
-            tauri::async_runtime::spawn(async move {
-                callback(point);
-            });
+            callback(point);
         }
     }
 
@@ -139,5 +168,20 @@ mod tests {
 
         let second_callback: Arc<MouseUpCallback> = Arc::new(|_| {});
         assert!(reserve_callback(&slot, second_callback).is_ok());
+    }
+
+    #[test]
+    fn point_hit_test_uses_the_float_rectangle_at_event_time() {
+        let rectangle = windows::Win32::Foundation::RECT {
+            left: 10,
+            top: 20,
+            right: 46,
+            bottom: 56,
+        };
+
+        assert!(point_inside_rectangle(POINT { x: 10, y: 20 }, rectangle));
+        assert!(point_inside_rectangle(POINT { x: 45, y: 55 }, rectangle));
+        assert!(!point_inside_rectangle(POINT { x: 46, y: 55 }, rectangle));
+        assert!(!point_inside_rectangle(POINT { x: 45, y: 56 }, rectangle));
     }
 }
