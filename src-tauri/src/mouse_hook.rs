@@ -1,5 +1,5 @@
 use std::{
-    sync::{mpsc, Arc, OnceLock},
+    sync::{mpsc, Arc, Mutex, OnceLock},
     thread,
     time::Duration,
 };
@@ -16,8 +16,9 @@ use windows::{
 };
 
 type MouseUpCallback = dyn Fn(POINT) + Send + Sync + 'static;
+type CallbackSlot = Mutex<Option<Arc<MouseUpCallback>>>;
 
-static CALLBACK: OnceLock<Arc<MouseUpCallback>> = OnceLock::new();
+static CALLBACK: OnceLock<CallbackSlot> = OnceLock::new();
 
 #[derive(Debug)]
 pub enum HookError {
@@ -53,10 +54,13 @@ pub fn start_mouse_hook(
     thread::Builder::new()
         .name("selection-mouse-hook".into())
         .spawn(move || {
-            if CALLBACK.set(callback).is_err() {
-                let _ = ready_sender.send(Err(HookError::AlreadyStarted));
-                return;
-            }
+            let _callback_reservation = match reserve_callback(callback_slot(), callback) {
+                Ok(reservation) => reservation,
+                Err(error) => {
+                    let _ = ready_sender.send(Err(error));
+                    return;
+                }
+            };
 
             let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), None, 0) };
             match hook {
@@ -76,17 +80,66 @@ pub fn start_mouse_hook(
     ready_receiver.recv().map_err(|_| HookError::StartupChannelClosed)?
 }
 
+fn callback_slot() -> &'static CallbackSlot {
+    CALLBACK.get_or_init(|| Mutex::new(None))
+}
+
+fn reserve_callback<'a>(
+    slot: &'a CallbackSlot,
+    callback: Arc<MouseUpCallback>,
+) -> Result<CallbackReservation<'a>, HookError> {
+    let mut stored_callback = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if stored_callback.is_some() {
+        return Err(HookError::AlreadyStarted);
+    }
+    *stored_callback = Some(callback);
+    Ok(CallbackReservation { slot })
+}
+
+struct CallbackReservation<'a> {
+    slot: &'a CallbackSlot,
+}
+
+impl Drop for CallbackReservation<'_> {
+    fn drop(&mut self) {
+        let mut stored_callback = self.slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *stored_callback = None;
+    }
+}
+
 unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 && wparam.0 as u32 == WM_LBUTTONUP && lparam.0 != 0 {
         let point = unsafe { (*(lparam.0 as *const MSLLHOOKSTRUCT)).pt };
-        if let Some(callback) = CALLBACK.get() {
-            let callback = Arc::clone(callback);
+        let callback = callback_slot()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(Arc::clone);
+        if let Some(callback) = callback {
             tauri::async_runtime::spawn(async move {
-                thread::sleep(Duration::from_millis(120));
+                tokio::time::sleep(Duration::from_millis(120)).await;
                 callback(point);
             });
         }
     }
 
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[test]
+    fn callback_slot_can_retry_after_failed_startup() {
+        let slot = Mutex::new(None);
+        let first_callback: Arc<MouseUpCallback> = Arc::new(|_| {});
+
+        let reservation = reserve_callback(&slot, first_callback).unwrap();
+        drop(reservation);
+
+        let second_callback: Arc<MouseUpCallback> = Arc::new(|_| {});
+        assert!(reserve_callback(&slot, second_callback).is_ok());
+    }
 }
