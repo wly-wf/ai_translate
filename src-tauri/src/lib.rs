@@ -26,6 +26,29 @@ const KEYRING_ACCOUNT: &str = "deepseek-api-key";
 const DEEPSEEK_URL: &str = "https://api.deepseek.com/chat/completions";
 const FLOAT_SIZE: i32 = 24;
 
+fn shape_float_window_as_circle(hwnd: windows::Win32::Foundation::HWND) -> Result<(), String> {
+    use windows::Win32::{
+        Foundation::RECT,
+        Graphics::Gdi::{CreateEllipticRgn, DeleteObject, HGDIOBJ, SetWindowRgn},
+        UI::WindowsAndMessaging::GetClientRect,
+    };
+
+    let mut client = RECT::default();
+    unsafe { GetClientRect(hwnd, &mut client) }.map_err(|error| error.to_string())?;
+
+    let region = unsafe { CreateEllipticRgn(client.left, client.top, client.right, client.bottom) };
+    if region.is_invalid() {
+        return Err("Could not create the circular selection-float region.".into());
+    }
+
+    if unsafe { SetWindowRgn(hwnd, Some(region), true) } == 0 {
+        let _ = unsafe { DeleteObject(HGDIOBJ(region.0)) };
+        return Err("Could not apply the circular selection-float region.".into());
+    }
+
+    Ok(())
+}
+
 // MinGW links Muda's unused About-dialog object into the unit-test executable,
 // but that executable does not receive Tauri's Common Controls v6 manifest.
 // The production application is unaffected; tests never invoke this entry point.
@@ -540,6 +563,7 @@ fn initialize_selection_float(app: &tauri::App) -> Result<(), String> {
 
     let result = (|| {
         let float_window = window.hwnd().map_err(|error| error.to_string())?;
+        shape_float_window_as_circle(float_window)?;
         let mouse_app = app.handle().clone();
         let scheduler = CaptureScheduler::start(mouse_app.clone())?;
         mouse_hook::start_mouse_hook(float_window, move |event| {

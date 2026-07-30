@@ -104,14 +104,21 @@ fn clicked_float_at_event(float_window: HWND, point: POINT) -> bool {
     if unsafe { GetWindowRect(float_window, &mut rectangle) }.is_err() {
         return false;
     }
-    point_inside_rectangle(point, rectangle)
+    point_inside_circle(point, rectangle)
 }
 
-fn point_inside_rectangle(point: POINT, rectangle: RECT) -> bool {
-    point.x >= rectangle.left
-        && point.x < rectangle.right
-        && point.y >= rectangle.top
-        && point.y < rectangle.bottom
+fn point_inside_circle(point: POINT, rectangle: RECT) -> bool {
+    let radius_x = (rectangle.right - rectangle.left) as i64;
+    let radius_y = (rectangle.bottom - rectangle.top) as i64;
+    if radius_x <= 0 || radius_y <= 0 {
+        return false;
+    }
+
+    let offset_x = (point.x - rectangle.left) as i64 * 2 - radius_x;
+    let offset_y = (point.y - rectangle.top) as i64 * 2 - radius_y;
+
+    offset_x * offset_x * radius_y * radius_y + offset_y * offset_y * radius_x * radius_x
+        <= radius_x * radius_x * radius_y * radius_y
 }
 
 fn reserve_callback<'a>(
@@ -171,17 +178,16 @@ mod tests {
     }
 
     #[test]
-    fn point_hit_test_uses_the_float_rectangle_at_event_time() {
+    fn point_hit_test_excludes_transparent_corners_of_the_float_window() {
         let rectangle = windows::Win32::Foundation::RECT {
             left: 10,
             top: 20,
-            right: 46,
-            bottom: 56,
+            right: 34,
+            bottom: 44,
         };
 
-        assert!(point_inside_rectangle(POINT { x: 10, y: 20 }, rectangle));
-        assert!(point_inside_rectangle(POINT { x: 45, y: 55 }, rectangle));
-        assert!(!point_inside_rectangle(POINT { x: 46, y: 55 }, rectangle));
-        assert!(!point_inside_rectangle(POINT { x: 45, y: 56 }, rectangle));
+        assert!(point_inside_circle(POINT { x: 22, y: 32 }, rectangle));
+        assert!(!point_inside_circle(POINT { x: 10, y: 20 }, rectangle));
+        assert!(!point_inside_circle(POINT { x: 33, y: 43 }, rectangle));
     }
 }
