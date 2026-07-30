@@ -1,7 +1,6 @@
 use std::{
     sync::{mpsc, Arc, Mutex, OnceLock},
     thread,
-    time::Duration,
 };
 
 use windows::{
@@ -117,7 +116,6 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
             .map(Arc::clone);
         if let Some(callback) = callback {
             tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(120)).await;
                 callback(point);
             });
         }

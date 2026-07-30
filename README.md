@@ -1,5 +1,9 @@
 # AI Translate
 
+## 鼠标选中文本翻译
+
+鼠标选中文本后，应用会显示一个悬浮的翻译按钮。它优先使用 Windows UI Automation 读取选区；如果当前窗口不支持 UI Automation，则使用 `Ctrl + C` 复制作为兜底。由于安全限制，以更高权限运行的（如管理员权限）窗口可能无法获取选区或显示悬浮按钮。
+
 Windows 11 上的轻量级 DeepSeek 快捷翻译工具。使用 Tauri 2、Rust 与 React 构建。
 
 ## 已实现

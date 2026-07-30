@@ -2,11 +2,12 @@ mod selection_state;
 pub mod mouse_hook;
 pub mod windows_selection;
 
-use selection_state::Anchor;
+use selection_state::{Anchor, SelectionController, StateChange};
+use windows_selection::{capture_selection, CapturedSelection};
 use keyring::Entry;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::{sync::Mutex, time::Duration};
 use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, Position, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
@@ -24,6 +25,16 @@ const FLOAT_SIZE: i32 = 36;
 #[cfg(test)]
 mod selection_float_tests {
     use super::*;
+    use crate::{
+        selection_state::{SelectionController, StateChange},
+        windows_selection::CapturedSelection,
+    };
+
+    fn visible_controller(text: &str) -> SelectionController {
+        let mut controller = SelectionController::default();
+        controller.replace_selection(text.into(), Anchor { x: 0, y: 0 });
+        controller
+    }
 
     #[test]
     fn float_position_stays_inside_the_monitor_work_area() {
@@ -31,6 +42,27 @@ mod selection_float_tests {
             clamp_float_position(Anchor { x: 188, y: 4 }, 0, 0, 200, 100),
             Anchor { x: 164, y: 0 },
         );
+    }
+
+    #[test]
+    fn plain_click_after_a_visible_selection_hides_the_float() {
+        let mut controller = visible_controller("one");
+
+        assert_eq!(handle_mouse_up(&mut controller, None, false), StateChange::Hide);
+    }
+
+    #[test]
+    fn replacement_selection_keeps_the_float_visible() {
+        let mut controller = visible_controller("one");
+        let captured = CapturedSelection {
+            text: "two".into(),
+            anchor: Anchor { x: 20, y: 30 },
+        };
+
+        assert!(matches!(
+            handle_mouse_up(&mut controller, Some(captured), false),
+            StateChange::Show(_)
+        ));
     }
 }
 
@@ -71,6 +103,52 @@ fn clamp_float_position(
     Anchor {
         x: anchor.x.saturating_add(8).clamp(work_x, max_x),
         y: anchor.y.saturating_sub(8).clamp(work_y, max_y),
+    }
+}
+
+fn handle_mouse_up(
+    controller: &mut SelectionController,
+    captured: Option<CapturedSelection>,
+    clicked_float: bool,
+) -> StateChange {
+    match captured {
+        Some(captured) => controller.replace_selection(captured.text, captured.anchor),
+        None => controller.clear_after_plain_click(clicked_float),
+    }
+}
+
+fn clicked_selection_float(app: &AppHandle, point: windows::Win32::Foundation::POINT) -> bool {
+    let Some(window) = app.get_webview_window("selection-float") else {
+        return false;
+    };
+    let (Ok(true), Ok(position), Ok(size)) = (
+        window.is_visible(),
+        window.outer_position(),
+        window.outer_size(),
+    ) else {
+        return false;
+    };
+    let right = position.x.saturating_add(size.width as i32);
+    let bottom = position.y.saturating_add(size.height as i32);
+
+    point.x >= position.x && point.x < right && point.y >= position.y && point.y < bottom
+}
+
+fn apply_mouse_up(app: &AppHandle, captured: Option<CapturedSelection>, clicked_float: bool) {
+    let change = {
+        let controller = app.state::<Mutex<SelectionController>>();
+        let mut controller = controller.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        handle_mouse_up(&mut controller, captured, clicked_float)
+    };
+
+    match change {
+        StateChange::Show(selection) => {
+            let _ = show_float(app, selection.anchor, selection.generation);
+        }
+        StateChange::Hide => {
+            let _ = hide_float(app);
+        }
+        StateChange::Unchanged => {}
     }
 }
 
@@ -199,14 +277,23 @@ fn hide_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn translate_selection_float(app: AppHandle) -> Result<(), String> {
-    hide_float(&app)
+async fn translate_selection_float(app: AppHandle) -> Result<(), String> {
+    let text = {
+        let controller = app.state::<Mutex<SelectionController>>();
+        let mut controller = controller.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        controller.take_for_translation()
+    }
+    .ok_or_else(|| "没有待翻译的选中文本。".to_string())?;
+
+    hide_float(&app)?;
+    translate_and_display(app, text).await.map(|_| ())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let shortcut = Shortcut::new(Some(Modifiers::ALT), Code::KeyT);
     tauri::Builder::default()
+        .manage(Mutex::<SelectionController>::default())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(GlobalShortcutBuilder::new().with_handler(move |app, pressed, event| {
             if pressed == &shortcut && event.state() == ShortcutState::Pressed {
@@ -231,6 +318,19 @@ pub fn run() {
                 .visible(false)
                 .build()
                 .map_err(|error| error.to_string())?;
+            let mouse_app = app.handle().clone();
+            mouse_hook::start_mouse_hook(move |point| {
+                let clicked_float = clicked_selection_float(&mouse_app, point);
+                let app = mouse_app.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(120)).await;
+                    let captured = (!clicked_float)
+                        .then(|| capture_selection(point).ok().flatten())
+                        .flatten();
+                    apply_mouse_up(&app, captured, clicked_float);
+                });
+            })
+            .map_err(|error| error.to_string())?;
             app.global_shortcut().register(shortcut).map_err(|error| format!("无法注册 Alt+T：{error}"))?;
             Ok(())
         })
