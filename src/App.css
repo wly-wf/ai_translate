@@ -1,8 +1,8 @@
 * { box-sizing: border-box; }
 :root { color: #e9edff; background: transparent; font-family: Inter, "Microsoft YaHei", system-ui, sans-serif; }
-body { margin: 0; min-width: 320px; min-height: 100vh; background: transparent; }
+body { margin: 0; min-width: 0; min-height: 100vh; background: transparent; }
 button, input, textarea { font: inherit; } button { cursor: pointer; border: 0; }
-.app-shell { min-height: 100vh; overflow: hidden; border: 1px solid rgba(151, 163, 255, .24); border-radius: 14px; background: linear-gradient(145deg, #171a33, #0e1022 70%); box-shadow: 0 18px 55px rgba(0, 0, 0, .38); }
+.app-shell { min-width: 320px; min-height: 100vh; overflow: hidden; border: 1px solid rgba(151, 163, 255, .24); border-radius: 14px; background: linear-gradient(145deg, #171a33, #0e1022 70%); box-shadow: 0 18px 55px rgba(0, 0, 0, .38); }
 .titlebar { height: 44px; display: flex; justify-content: space-between; align-items: center; padding: 0 8px 0 16px; background: rgba(255,255,255,.035); border-bottom: 1px solid rgba(255,255,255,.07); }
 .brand { font-size: 13px; font-weight: 700; letter-spacing: .3px; } .brand span { color: #9b8cff; font-size: 17px; margin-right: 5px; }
 .window-actions { display: flex; gap: 2px; } .icon-button { width: 30px; height: 28px; color: #b6bedf; background: transparent; border-radius: 7px; } .icon-button:hover { color: white; background: rgba(255,255,255,.1); }
@@ -11,3 +11,6 @@ button, input, textarea { font: inherit; } button { cursor: pointer; border: 0; 
 .warning { margin-top: 14px; color: #ffcf79; font-size: 13px; } textarea, input { width: 100%; margin: 17px 0 10px; color: #f2f4ff; background: #11142a; border: 1px solid #353a63; border-radius: 9px; outline: none; padding: 10px 11px; } textarea { height: 78px; resize: vertical; } textarea:focus, input:focus { border-color: #8e80ff; }
 .primary, .secondary { padding: 9px 13px; border-radius: 8px; font-weight: 700; font-size: 13px; } .primary { color: white; background: linear-gradient(120deg, #7868ed, #9b65ec); } .primary:hover { filter: brightness(1.12); } .primary:disabled { opacity: .55; cursor: not-allowed; } .secondary { margin-left: 8px; color: #c6cce9; background: #292d49; }
 .label { margin-top: 1px; color: #929bbd; font-size: 11px; font-weight: 700; letter-spacing: .8px; text-transform: uppercase; }.source { max-height: 56px; margin: 5px 0 15px; overflow: auto; color: #c3c9e2; font-size: 13px; white-space: pre-wrap; }.translation { min-height: 64px; max-height: 126px; margin: 6px 0 16px; overflow: auto; color: #fff; font-size: 16px; white-space: pre-wrap; }.notice { margin-top: 12px; color: #aeb6d5; font-size: 12px; }.settings input { margin-top: 17px; }
+.selection-float { width: 36px; height: 36px; padding: 2px; border-radius: 10px; background: rgba(23, 26, 51, .96); box-shadow: 0 5px 16px rgba(0, 0, 0, .28); }
+.selection-float-button { width: 32px; height: 32px; border-radius: 8px; color: #f6f4ff; background: linear-gradient(135deg, #7868ed, #9b65ec); font-weight: 700; font-size: 15px; }
+.selection-float-button:hover:not(:disabled) { filter: brightness(1.12); }.selection-float-button:disabled { cursor: wait; opacity: .68; }
