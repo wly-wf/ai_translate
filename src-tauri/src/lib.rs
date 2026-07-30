@@ -24,7 +24,7 @@ use tauri_plugin_global_shortcut::{
 const KEYRING_SERVICE: &str = "ai-translate";
 const KEYRING_ACCOUNT: &str = "deepseek-api-key";
 const DEEPSEEK_URL: &str = "https://api.deepseek.com/chat/completions";
-const FLOAT_SIZE: i32 = 36;
+const FLOAT_SIZE: i32 = 24;
 
 // MinGW links Muda's unused About-dialog object into the unit-test executable,
 // but that executable does not receive Tauri's Common Controls v6 manifest.
@@ -59,7 +59,7 @@ mod selection_float_tests {
     fn float_position_stays_inside_the_monitor_work_area() {
         assert_eq!(
             clamp_float_position(Anchor { x: 188, y: 4 }, 0, 0, 200, 100),
-            Anchor { x: 164, y: 0 },
+            Anchor { x: 176, y: 0 },
         );
     }
 

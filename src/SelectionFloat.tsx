@@ -31,17 +31,15 @@ export function SelectionFloat() {
   }
 
   return (
-    <div className="selection-float">
-      <button
-        className="selection-float-button"
-        type="button"
-        aria-label="翻译选中文本"
-        title="翻译选中文本"
-        disabled={translating}
-        onClick={() => void translateSelection()}
-      >
-        <span aria-hidden="true">文</span>
-      </button>
-    </div>
+    <button
+      className="selection-float-button"
+      type="button"
+      aria-label="翻译选中文本"
+      title="翻译选中文本"
+      disabled={translating}
+      onClick={() => void translateSelection()}
+    >
+      <span aria-hidden="true">文</span>
+    </button>
   );
 }

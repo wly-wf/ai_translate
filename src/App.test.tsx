@@ -31,7 +31,11 @@ describe("App", () => {
 
     render(<App />);
 
-    expect(screen.getByRole("button", { name: "翻译选中文本" })).toBeInTheDocument();
+    const button = screen.getByRole("button", { name: "翻译选中文本" });
+
+    expect(button).toBeInTheDocument();
+    expect(button).toHaveClass("selection-float-button");
+    expect(button.parentElement).not.toHaveClass("selection-float");
     expect(screen.queryByText("快速翻译")).not.toBeInTheDocument();
   });
 
