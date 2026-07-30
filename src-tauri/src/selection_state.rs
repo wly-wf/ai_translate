@@ -18,6 +18,8 @@ pub enum StateChange {
     Unchanged,
 }
 
+const MAX_SELECTION_CHARACTERS: usize = 12_000;
+
 #[derive(Default)]
 pub struct SelectionController {
     current: Option<Selection>,
@@ -26,6 +28,10 @@ pub struct SelectionController {
 
 impl SelectionController {
     pub fn replace_selection(&mut self, text: String, anchor: Anchor) -> StateChange {
+        if text.chars().count() > MAX_SELECTION_CHARACTERS {
+            return StateChange::Unchanged;
+        }
+
         self.next_generation += 1;
         let selection = Selection {
             text,
@@ -86,5 +92,30 @@ mod tests {
         let mut controller = visible_controller("selected");
         assert_eq!(controller.take_for_translation(), Some("selected".into()));
         assert_eq!(controller.take_for_translation(), None);
+    }
+
+    #[test]
+    fn selection_at_12000_characters_is_shown() {
+        let mut controller = SelectionController::default();
+        let text = "x".repeat(12_000);
+
+        let change = controller.replace_selection(text.clone(), Anchor { x: 1, y: 2 });
+
+        assert_eq!(change, StateChange::Show(Selection {
+            text,
+            anchor: Anchor { x: 1, y: 2 },
+            generation: 1,
+        }));
+    }
+
+    #[test]
+    fn selection_over_12000_characters_is_unchanged_and_keeps_visible_text() {
+        let mut controller = visible_controller("valid selection");
+        let over_limit_text = "x".repeat(12_001);
+
+        let change = controller.replace_selection(over_limit_text, Anchor { x: 1, y: 2 });
+
+        assert_eq!(change, StateChange::Unchanged);
+        assert_eq!(controller.take_for_translation(), Some("valid selection".into()));
     }
 }
