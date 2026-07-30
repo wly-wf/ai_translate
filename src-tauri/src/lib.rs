@@ -26,7 +26,7 @@ use tauri_plugin_global_shortcut::{
 const KEYRING_SERVICE: &str = "ai-translate";
 const KEYRING_ACCOUNT: &str = "deepseek-api-key";
 const DEEPSEEK_URL: &str = "https://api.deepseek.com/chat/completions";
-const FLOAT_SIZE: i32 = 24;
+const FLOAT_SIZE: i32 = 32;
 
 fn shape_float_window_as_circle(hwnd: windows::Win32::Foundation::HWND) -> Result<(), String> {
     use windows::Win32::{
@@ -84,7 +84,7 @@ mod selection_float_tests {
     fn float_position_stays_inside_the_monitor_work_area() {
         assert_eq!(
             clamp_float_position(Anchor { x: 188, y: 4 }, 0, 0, 200, 100),
-            Anchor { x: 176, y: 0 },
+            Anchor { x: 168, y: 0 },
         );
     }
 
