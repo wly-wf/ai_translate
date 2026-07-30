@@ -15,6 +15,7 @@ use std::{
 use tauri::{
     menu::{Menu, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    window::Color,
     AppHandle, Emitter, Manager, PhysicalPosition, Position, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
 };
@@ -598,6 +599,7 @@ fn initialize_selection_float(app: &tauri::App) -> Result<(), String> {
             .title("")
             .decorations(false)
             .transparent(true)
+            .background_color(Color(0, 0, 0, 0))
             .always_on_top(true)
             .skip_taskbar(true)
             .resizable(false)
