@@ -75,6 +75,7 @@ pub enum CaptureOutcome {
 
 enum UiaAttempt {
     Outcome(CaptureOutcome),
+    PointOutsideSelection,
     Unavailable,
     Failed(String),
 }
@@ -141,10 +142,17 @@ fn capture_with_uia(point: POINT) -> Result<UiaAttempt, CaptureError> {
         rectangles.extend(rectangles_for_range(&automation, &range)?);
     }
 
-    Ok(UiaAttempt::Outcome(CapturedSelection::from_parts(
-        text,
-        rectangles,
-    )))
+    let outcome = CapturedSelection::from_parts(text, rectangles.clone());
+    if matches!(outcome, CaptureOutcome::Detected(_))
+        && !point_is_on_selection(point, &rectangles)
+    {
+        // A plain click does not necessarily clear an application's previous
+        // selection.  In that case UI Automation still reports the old range;
+        // treating it as a new selection makes the float reappear at the click.
+        return Ok(UiaAttempt::PointOutsideSelection);
+    }
+
+    Ok(UiaAttempt::Outcome(outcome))
 }
 
 enum TextClassification {
@@ -177,6 +185,7 @@ fn resolve_uia_attempt(
             CaptureOutcome::TooLong { characters }
         }
         UiaAttempt::Outcome(CaptureOutcome::Failed(error)) => CaptureOutcome::Failed(error),
+        UiaAttempt::PointOutsideSelection => CaptureOutcome::Empty,
         UiaAttempt::Outcome(CaptureOutcome::Empty) | UiaAttempt::Unavailable => fallback(),
         UiaAttempt::Failed(uia_error) => match fallback() {
             CaptureOutcome::Empty => CaptureOutcome::Failed(format!(
@@ -188,6 +197,19 @@ fn resolve_uia_attempt(
             outcome => outcome,
         },
     }
+}
+
+fn point_is_on_selection(point: POINT, rectangles: &[RECT]) -> bool {
+    // UI Automation rounds selection rectangles while the low-level mouse hook
+    // reports physical pixels, so permit a small edge tolerance.
+    const EDGE_TOLERANCE: i32 = 3;
+
+    rectangles.iter().filter(|rectangle| is_visible_rectangle(rectangle)).any(|rectangle| {
+        point.x >= rectangle.left.saturating_sub(EDGE_TOLERANCE)
+            && point.x <= rectangle.right.saturating_add(EDGE_TOLERANCE)
+            && point.y >= rectangle.top.saturating_sub(EDGE_TOLERANCE)
+            && point.y <= rectangle.bottom.saturating_add(EDGE_TOLERANCE)
+    })
 }
 
 fn is_visible_rectangle(rectangle: &RECT) -> bool {
@@ -404,6 +426,22 @@ mod tests {
     }
 
     #[test]
+    fn retained_selection_away_from_the_click_does_not_use_clipboard_fallback() {
+        let fallback_called = Cell::new(false);
+
+        let outcome = resolve_uia_attempt(UiaAttempt::PointOutsideSelection, || {
+            fallback_called.set(true);
+            CaptureOutcome::Detected(CapturedSelection {
+                text: "stale clipboard text".into(),
+                anchor: Anchor { x: 5, y: 6 },
+            })
+        });
+
+        assert!(!fallback_called.get());
+        assert_eq!(outcome, CaptureOutcome::Empty);
+    }
+
+    #[test]
     fn uia_error_uses_clipboard_fallback() {
         let fallback_capture = CapturedSelection {
             text: "clipboard".into(),
@@ -459,6 +497,19 @@ mod tests {
                 anchor: Anchor { x: 70, y: 60 },
             })
         );
+    }
+
+    #[test]
+    fn point_hit_test_accepts_the_selection_and_rejects_a_nearby_click() {
+        let rectangles = [RECT {
+            left: 20,
+            top: 30,
+            right: 60,
+            bottom: 50,
+        }];
+
+        assert!(point_is_on_selection(POINT { x: 63, y: 53 }, &rectangles));
+        assert!(!point_is_on_selection(POINT { x: 64, y: 54 }, &rectangles));
     }
 
     #[test]

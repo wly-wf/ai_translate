@@ -33,8 +33,33 @@ fn shape_float_window_as_circle(hwnd: windows::Win32::Foundation::HWND) -> Resul
     use windows::Win32::{
         Foundation::RECT,
         Graphics::Gdi::{CreateEllipticRgn, DeleteObject, HGDIOBJ, SetWindowRgn},
-        UI::WindowsAndMessaging::GetClientRect,
+        UI::WindowsAndMessaging::{
+            GetClientRect, GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_STYLE,
+            SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+            WINDOW_STYLE, WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU,
+            WS_THICKFRAME,
+        },
     };
+
+    // Tauri already requests an undecorated window, but some Windows/WebView2
+    // combinations restore the normal non-client frame when this tiny window
+    // is shown. Strip it again at the native handle so the only visible and
+    // clickable surface is the icon's circular region.
+    let mut style = WINDOW_STYLE(unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32);
+    style &= !(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
+    unsafe { SetWindowLongW(hwnd, GWL_STYLE, style.0 as i32) };
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
+        )
+    }
+    .map_err(|error| error.to_string())?;
 
     let mut client = RECT::default();
     unsafe { GetClientRect(hwnd, &mut client) }.map_err(|error| error.to_string())?;
@@ -596,8 +621,11 @@ fn initialize_selection_float(app: &tauri::App) -> Result<(), String> {
     let window =
         WebviewWindowBuilder::new(app, "selection-float", WebviewUrl::App("index.html".into()))
             .inner_size(FLOAT_SIZE as f64, FLOAT_SIZE as f64)
+            .min_inner_size(FLOAT_SIZE as f64, FLOAT_SIZE as f64)
+            .max_inner_size(FLOAT_SIZE as f64, FLOAT_SIZE as f64)
             .title("")
             .decorations(false)
+            .shadow(false)
             .transparent(true)
             .background_color(Color(0, 0, 0, 0))
             .always_on_top(true)
@@ -623,6 +651,10 @@ fn initialize_selection_float(app: &tauri::App) -> Result<(), String> {
                 controller.begin_mouse_up()
             };
             if event.clicked_float {
+                return;
+            }
+            if !event.selection_gesture {
+                apply_mouse_up(&mouse_app, generation, CaptureOutcome::Empty, false);
                 return;
             }
             scheduler.submit(CaptureRequest {
