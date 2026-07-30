@@ -28,3 +28,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 keyring = "4.1.5"
 reqwest = { version = "0.13.4", features = ["json", "rustls"] }
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Com",
+  "Win32_System_DataExchange",
+  "Win32_System_Memory",
+  "Win32_System_Ole",
+  "Win32_UI_Accessibility",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging"
+] }

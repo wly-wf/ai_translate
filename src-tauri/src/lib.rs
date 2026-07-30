@@ -1,4 +1,6 @@
 mod selection_state;
+pub mod mouse_hook;
+pub mod windows_selection;
 
 use keyring::Entry;
 use reqwest::Client;

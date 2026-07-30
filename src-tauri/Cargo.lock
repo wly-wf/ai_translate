@@ -4677,6 +4677,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-clipboard-manager",
  "tauri-plugin-global-shortcut",
+ "windows",
 ]
 
 [[package]]
