@@ -13,6 +13,7 @@ use std::{
     time::Duration,
 };
 use tauri::{
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, PhysicalPosition, Position, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
 };
@@ -548,6 +549,37 @@ fn initialize_required_then_optional(
     Ok(())
 }
 
+fn initialize_tray_icon(app: &tauri::App) -> Result<(), String> {
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .ok_or_else(|| "AI Translate does not have a tray icon asset.".to_string())?;
+
+    TrayIconBuilder::with_id("ai-translate-tray")
+        .icon(icon)
+        .tooltip("AI Translate")
+        .show_menu_on_left_click(false)
+        .on_tray_icon_event(|tray, event| {
+            if matches!(
+                event,
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                }
+            ) {
+                if let Some(window) = tray.app_handle().get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        })
+        .build(app)
+        .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+
 fn initialize_selection_float(app: &tauri::App) -> Result<(), String> {
     let window =
         WebviewWindowBuilder::new(app, "selection-float", WebviewUrl::App("index.html".into()))
@@ -612,6 +644,7 @@ pub fn run() {
             }
         }).build())
         .setup(move |app| {
+            initialize_tray_icon(app)?;
             initialize_required_then_optional(
                 || {
                     app.global_shortcut()
