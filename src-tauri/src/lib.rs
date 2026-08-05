@@ -13,6 +13,7 @@ use std::{
     time::Duration,
 };
 use tauri::{
+    image::Image as TauriImage,
     menu::{Menu, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     window::Color,
@@ -27,12 +28,14 @@ use tauri_plugin_global_shortcut::{
 const KEYRING_SERVICE: &str = "ai-translate";
 const KEYRING_ACCOUNT: &str = "deepseek-api-key";
 const DEEPSEEK_URL: &str = "https://api.deepseek.com/chat/completions";
-const FLOAT_SIZE: i32 = 32;
+const DEEPSEEK_THINKING_DISABLED: &str = "disabled";
+const FLOAT_SIZE: i32 = 28;
+pub(crate) const FLOAT_CORNER_RADIUS: i32 = 10;
 
-fn shape_float_window_as_circle(hwnd: windows::Win32::Foundation::HWND) -> Result<(), String> {
+fn shape_float_window_as_round_rect(hwnd: windows::Win32::Foundation::HWND) -> Result<(), String> {
     use windows::Win32::{
         Foundation::RECT,
-        Graphics::Gdi::{CreateEllipticRgn, DeleteObject, HGDIOBJ, SetWindowRgn},
+        Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, HGDIOBJ, SetWindowRgn},
         UI::WindowsAndMessaging::{
             GetClientRect, GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_STYLE,
             SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
@@ -44,7 +47,7 @@ fn shape_float_window_as_circle(hwnd: windows::Win32::Foundation::HWND) -> Resul
     // Tauri already requests an undecorated window, but some Windows/WebView2
     // combinations restore the normal non-client frame when this tiny window
     // is shown. Strip it again at the native handle so the only visible and
-    // clickable surface is the icon's circular region.
+    // clickable surface is the icon's rounded-rectangle region.
     let mut style = WINDOW_STYLE(unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32);
     style &= !(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
     unsafe { SetWindowLongW(hwnd, GWL_STYLE, style.0 as i32) };
@@ -64,14 +67,23 @@ fn shape_float_window_as_circle(hwnd: windows::Win32::Foundation::HWND) -> Resul
     let mut client = RECT::default();
     unsafe { GetClientRect(hwnd, &mut client) }.map_err(|error| error.to_string())?;
 
-    let region = unsafe { CreateEllipticRgn(client.left, client.top, client.right, client.bottom) };
+    let region = unsafe {
+        CreateRoundRectRgn(
+            client.left,
+            client.top,
+            client.right,
+            client.bottom,
+            FLOAT_CORNER_RADIUS * 2,
+            FLOAT_CORNER_RADIUS * 2,
+        )
+    };
     if region.is_invalid() {
-        return Err("Could not create the circular selection-float region.".into());
+        return Err("Could not create the rounded selection-float region.".into());
     }
 
     if unsafe { SetWindowRgn(hwnd, Some(region), true) } == 0 {
         let _ = unsafe { DeleteObject(HGDIOBJ(region.0)) };
-        return Err("Could not apply the circular selection-float region.".into());
+        return Err("Could not apply the rounded selection-float region.".into());
     }
 
     Ok(())
@@ -110,8 +122,38 @@ mod selection_float_tests {
     fn float_position_stays_inside_the_monitor_work_area() {
         assert_eq!(
             clamp_float_position(Anchor { x: 188, y: 4 }, 0, 0, 200, 100),
-            Anchor { x: 168, y: 0 },
+            Anchor { x: 172, y: 10 },
         );
+    }
+
+    #[test]
+    fn translation_window_prefers_the_right_side_of_the_float() {
+        let placement = FloatPlacement {
+            x: 100,
+            y: 200,
+            width: 28,
+            work_x: 0,
+            work_y: 0,
+            work_width: 1200,
+            work_height: 800,
+        };
+
+        assert_eq!(translation_window_position(placement, 420, 330), Anchor { x: 136, y: 200 });
+    }
+
+    #[test]
+    fn translation_window_moves_left_when_the_right_side_is_too_small() {
+        let placement = FloatPlacement {
+            x: 1100,
+            y: 200,
+            width: 28,
+            work_x: 0,
+            work_y: 0,
+            work_width: 1200,
+            work_height: 800,
+        };
+
+        assert_eq!(translation_window_position(placement, 420, 330), Anchor { x: 672, y: 200 });
     }
 
     #[test]
@@ -216,6 +258,26 @@ mod selection_float_tests {
         );
         assert_eq!(controller.take_for_translation(), Some("one".into()));
     }
+
+    #[test]
+    fn translation_target_is_english_when_text_contains_chinese() {
+        assert_eq!(translation_target("Xilinx针对7系列FPGA"), "English");
+    }
+
+    #[test]
+    fn translation_target_is_simplified_chinese_for_non_chinese_text() {
+        assert_eq!(translation_target("Physical meaning of poles and zeros"), "Simplified Chinese");
+    }
+
+    #[test]
+    fn deepseek_thinking_is_explicitly_disabled() {
+        let payload = serde_json::to_value(ThinkingConfig {
+            mode: DEEPSEEK_THINKING_DISABLED,
+        })
+        .unwrap();
+
+        assert_eq!(payload, serde_json::json!({ "type": "disabled" }));
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -227,12 +289,13 @@ struct Translation {
 #[derive(Serialize)]
 struct ChatMessage<'a> { role: &'a str, content: &'a str }
 #[derive(Serialize)]
-struct Thinking { #[serde(rename = "type")] mode: &'static str }
+struct ThinkingConfig { #[serde(rename = "type")] mode: &'static str }
 #[derive(Serialize)]
 struct DeepSeekRequest<'a> {
     model: &'static str,
     messages: Vec<ChatMessage<'a>>,
-    thinking: Thinking,
+    // DeepSeek defaults thinking to enabled, so disable it explicitly for translation.
+    thinking: ThinkingConfig,
     stream: bool,
     temperature: f32,
 }
@@ -253,8 +316,44 @@ fn clamp_float_position(
     let max_x = (work_x + work_width as i32 - FLOAT_SIZE).max(work_x);
     let max_y = (work_y + work_height as i32 - FLOAT_SIZE).max(work_y);
     Anchor {
-        x: anchor.x.saturating_add(8).clamp(work_x, max_x),
-        y: anchor.y.saturating_sub(8).clamp(work_y, max_y),
+        x: anchor.x.saturating_add(6).clamp(work_x, max_x),
+        y: anchor.y.saturating_add(6).clamp(work_y, max_y),
+    }
+}
+
+const TRANSLATION_WINDOW_GAP: i32 = 8;
+
+#[derive(Clone, Copy, Debug)]
+struct FloatPlacement {
+    x: i32,
+    y: i32,
+    width: u32,
+    work_x: i32,
+    work_y: i32,
+    work_width: u32,
+    work_height: u32,
+}
+
+fn translation_window_position(placement: FloatPlacement, window_width: u32, window_height: u32) -> Anchor {
+    let work_right = placement.work_x + placement.work_width as i32;
+    let max_x = (work_right - window_width as i32).max(placement.work_x);
+    let max_y = (placement.work_y + placement.work_height as i32 - window_height as i32)
+        .max(placement.work_y);
+    let right_x = placement.x
+        .saturating_add(placement.width as i32)
+        .saturating_add(TRANSLATION_WINDOW_GAP);
+    let left_x = placement.x
+        .saturating_sub(window_width as i32)
+        .saturating_sub(TRANSLATION_WINDOW_GAP);
+    let x = if right_x.saturating_add(window_width as i32) <= work_right {
+        right_x
+    } else {
+        left_x
+    };
+
+    Anchor {
+        x: x.clamp(placement.work_x, max_x),
+        y: placement.y.clamp(placement.work_y, max_y),
     }
 }
 
@@ -471,8 +570,9 @@ fn api_key() -> Result<String, String> {
 
 async fn request_translation(text: &str) -> Result<String, String> {
     let key = api_key()?;
+    let target = translation_target(text);
     let prompt = format!(
-        "Translate the following text. Detect its language and translate it into natural Simplified Chinese if it is not Chinese; otherwise translate it into natural English. Return only the translation, without notes or quotation marks.\n\n{text}"
+        "Translate the following text into natural {target}. The target language is fixed by the application; do not answer in the source language, even when the input mixes Chinese and English terms. Preserve product names, model names, acronyms, and technical notation. Return only the translation, without notes or quotation marks.\n\n{text}"
     );
     let body = DeepSeekRequest {
         model: "deepseek-v4-flash",
@@ -480,7 +580,7 @@ async fn request_translation(text: &str) -> Result<String, String> {
             ChatMessage { role: "system", content: "You are a precise translation engine." },
             ChatMessage { role: "user", content: &prompt },
         ],
-        thinking: Thinking { mode: "disabled" },
+        thinking: ThinkingConfig { mode: DEEPSEEK_THINKING_DISABLED },
         stream: false,
         temperature: 0.2,
     };
@@ -502,7 +602,55 @@ async fn request_translation(text: &str) -> Result<String, String> {
         .ok_or_else(|| "DeepSeek 没有返回翻译结果。".to_string())
 }
 
-async fn translate_and_display(app: AppHandle, text: String) -> Result<Translation, String> {
+fn translation_target(text: &str) -> &'static str {
+    if text.chars().any(is_cjk_character) {
+        "English"
+    } else {
+        "Simplified Chinese"
+    }
+}
+
+fn is_cjk_character(character: char) -> bool {
+    matches!(
+        character,
+        '\u{3400}'..='\u{4DBF}'
+            | '\u{4E00}'..='\u{9FFF}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{20000}'..='\u{2FA1F}'
+    )
+}
+
+fn capture_float_placement(app: &AppHandle) -> Result<FloatPlacement, String> {
+    let window = app.get_webview_window("selection-float")
+        .ok_or_else(|| "Selection float window is unavailable.".to_string())?;
+    let position = window.outer_position().map_err(|error| error.to_string())?;
+    let size = window.outer_size().map_err(|error| error.to_string())?;
+    let monitor = monitor_for_anchor(&window, &Anchor { x: position.x, y: position.y })?;
+    let work_area = monitor.work_area();
+
+    Ok(FloatPlacement {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        work_x: work_area.position.x,
+        work_y: work_area.position.y,
+        work_width: work_area.size.width,
+        work_height: work_area.size.height,
+    })
+}
+
+fn position_translation_window(window: &WebviewWindow, placement: FloatPlacement) -> Result<(), String> {
+    let size = window.outer_size().map_err(|error| error.to_string())?;
+    let position = translation_window_position(placement, size.width, size.height);
+    window.set_position(Position::Physical(PhysicalPosition::new(position.x, position.y)))
+        .map_err(|error| error.to_string())
+}
+
+async fn translate_and_display(
+    app: AppHandle,
+    text: String,
+    float_placement: Option<FloatPlacement>,
+) -> Result<Translation, String> {
     let source = text.trim().to_string();
     if source.is_empty() { return Err("没有可翻译的文本。".to_string()); }
     if source.chars().count() > 12_000 {
@@ -510,6 +658,9 @@ async fn translate_and_display(app: AppHandle, text: String) -> Result<Translati
     }
     let result = Translation { translation: request_translation(&source).await?, source };
     let window = app.get_webview_window("main").ok_or_else(|| "未找到结果窗口。".to_string())?;
+    if let Some(placement) = float_placement {
+        position_translation_window(&window, placement)?;
+    }
     window.show().map_err(|error| error.to_string())?;
     window.set_always_on_top(true).map_err(|error| error.to_string())?;
     app.emit("translation-result", &result).map_err(|error| error.to_string())?;
@@ -517,7 +668,9 @@ async fn translate_and_display(app: AppHandle, text: String) -> Result<Translati
 }
 
 #[tauri::command]
-async fn translate_text(app: AppHandle, text: String) -> Result<Translation, String> { translate_and_display(app, text).await }
+async fn translate_text(app: AppHandle, text: String) -> Result<Translation, String> {
+    translate_and_display(app, text, None).await
+}
 
 #[tauri::command]
 fn save_api_key(api_key: String) -> Result<(), String> {
@@ -528,11 +681,6 @@ fn save_api_key(api_key: String) -> Result<(), String> {
 
 #[tauri::command]
 fn has_api_key() -> bool { api_key().is_ok() }
-
-#[tauri::command]
-fn copy_text(app: AppHandle, text: String) -> Result<(), String> {
-    app.clipboard().write_text(text).map_err(|error| format!("无法写入剪贴板：{error}"))
-}
 
 #[tauri::command]
 fn hide_window(app: AppHandle) -> Result<(), String> {
@@ -553,10 +701,11 @@ async fn translate_selection_float(app: AppHandle) -> Result<(), String> {
         return Err(error);
     };
 
+    let float_placement = capture_float_placement(&app).ok();
     if let Err(error) = hide_float(&app) {
         eprintln!("Selection float hide failed before translation: {error}");
     }
-    match translate_and_display(app.clone(), text).await {
+    match translate_and_display(app.clone(), text, float_placement).await {
         Ok(_) => Ok(()),
         Err(error) => {
             report_translation_error(&app, &error);
@@ -577,14 +726,16 @@ fn initialize_required_then_optional(
 }
 
 fn initialize_tray_icon(app: &tauri::App) -> Result<(), String> {
-    let icon = app
-        .default_window_icon()
-        .cloned()
-        .ok_or_else(|| "AI Translate does not have a tray icon asset.".to_string())?;
+    let icon = TauriImage::from_bytes(include_bytes!("../icons/tray-icon.png"))
+        .map_err(|error| format!("Could not load the tray icon asset: {error}"))?;
+    let settings_item = MenuItemBuilder::with_id("settings", "设置")
+        .build(app)
+        .map_err(|error| error.to_string())?;
     let quit_item = MenuItemBuilder::with_id("quit", "退出")
         .build(app)
         .map_err(|error| error.to_string())?;
-    let menu = Menu::with_items(app, &[&quit_item]).map_err(|error| error.to_string())?;
+    let menu = Menu::with_items(app, &[&settings_item, &quit_item])
+        .map_err(|error| error.to_string())?;
 
     TrayIconBuilder::with_id("ai-translate-tray")
         .icon(icon)
@@ -592,8 +743,18 @@ fn initialize_tray_icon(app: &tauri::App) -> Result<(), String> {
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| {
-            if event.id() == "quit" {
-                app.exit(0);
+            match event.id().as_ref() {
+                "settings" => {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                    if let Err(error) = app.emit("open-settings", ()) {
+                        eprintln!("Could not open settings from the tray menu: {error}");
+                    }
+                }
+                "quit" => app.exit(0),
+                _ => {}
             }
         })
         .on_tray_icon_event(|tray, event| {
@@ -639,7 +800,7 @@ fn initialize_selection_float(app: &tauri::App) -> Result<(), String> {
 
     let result = (|| {
         let float_window = window.hwnd().map_err(|error| error.to_string())?;
-        shape_float_window_as_circle(float_window)?;
+        shape_float_window_as_round_rect(float_window)?;
         let mouse_app = app.handle().clone();
         let scheduler = CaptureScheduler::start(mouse_app.clone())?;
         mouse_hook::start_mouse_hook(float_window, move |event| {
@@ -685,7 +846,7 @@ pub fn run() {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
                     let text = app.clipboard().read_text().unwrap_or_default();
-                    if let Err(error) = translate_and_display(app.clone(), text).await {
+                    if let Err(error) = translate_and_display(app.clone(), text, None).await {
                         report_translation_error(&app, &error);
                     }
                 });
@@ -708,7 +869,6 @@ pub fn run() {
             translate_selection_float,
             save_api_key,
             has_api_key,
-            copy_text,
             hide_window,
         ])
         .run(tauri::generate_context!())

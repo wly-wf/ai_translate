@@ -1,11 +1,14 @@
-import { useEffect, useState } from "react";
+import { type MouseEvent, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { SelectionFloat } from "./SelectionFloat";
+import selectionFloatIcon from "./assets/selection-float-icon.svg";
 import "./App.css";
 
 type Translation = { source: string; translation: string };
+const TRANSLATION_MODEL = "deepseek-v4-flash";
 
 const isTauriDesktop = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -41,7 +44,8 @@ function App() {
       setResult(event.payload); setLoading(false); setNotice(""); setShowSettings(false);
     });
     const errorListener = listen<string>("translation-error", (event) => { setLoading(false); setNotice(event.payload); });
-    return () => { void resultListener.then((remove) => remove()); void errorListener.then((remove) => remove()); };
+    const settingsListener = listen("open-settings", () => { setShowSettings(true); setNotice(""); });
+    return () => { void resultListener.then((remove) => remove()); void errorListener.then((remove) => remove()); void settingsListener.then((remove) => remove()); };
   }, []);
 
   async function translate() {
@@ -59,30 +63,35 @@ function App() {
     } catch (error) { setNotice(String(error)); }
   }
 
-  async function copy() {
-    if (!result) return;
-    try {
-      await nativeInvoke("copy_text", { text: result.translation });
-      setNotice("译文已复制。");
-    } catch (error) {
-      setNotice(String(error));
-    }
+  function dragWindow(event: MouseEvent<HTMLElement>) {
+    if ((event.target as HTMLElement).closest("button, input, textarea")) return;
+    void getCurrentWindow().startDragging();
   }
 
   return <main className="app-shell">
-    <header className="titlebar" data-tauri-drag-region>
-      <div className="brand" data-tauri-drag-region><span>✦</span> AI Translate</div>
-      <div className="window-actions"><button className="icon-button" onClick={() => setShowSettings((value) => !value)} aria-label="设置">⚙</button><button className="icon-button" onClick={() => void nativeInvoke("hide_window")} aria-label="隐藏">—</button></div>
+    <header className="titlebar" onMouseDown={dragWindow}>
+      <div className="brand"><img className="brand-icon" src={selectionFloatIcon} alt="翻译" /></div>
+      <div className="window-actions"><button className="icon-button" onClick={() => void nativeInvoke("hide_window")} aria-label="隐藏">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10" /></svg>
+      </button></div>
     </header>
     {showSettings ? <section className="content settings">
-      <h1>DeepSeek 设置</h1><p>Key 仅保存到当前 Windows 用户的凭据管理器。</p>
-      <input value={apiKey} onChange={(event) => setApiKey(event.target.value)} type="password" placeholder="DeepSeek API Key" autoFocus />
-      <button className="primary" onClick={() => void saveKey()}>保存 API Key</button><button className="secondary" onClick={() => setShowSettings(false)}>返回</button>
+      <div className="page-heading"><p className="eyebrow">连接设置</p><h1>DeepSeek 设置</h1><p className="hint">API Key 仅保存到当前 Windows 用户的凭据管理器。</p></div>
+      <label className="field-label" htmlFor="deepseek-api-key">DeepSeek API Key</label>
+      <input id="deepseek-api-key" value={apiKey} onChange={(event) => setApiKey(event.target.value)} type="password" placeholder="粘贴你的 API Key" autoFocus />
+      <p className="field-help">保存后，选中文本即可快速翻译。</p>
+      <div className="action-row"><button className="primary" onClick={() => void saveKey()}>保存 API Key</button><button className="secondary" onClick={() => setShowSettings(false)}>返回</button></div>
     </section> : <section className="content">
-      {result ? <><div className="label">原文</div><p className="source">{result.source}</p><div className="label">译文</div><p className="translation">{result.translation}</p><button className="primary" onClick={() => void copy()}>复制译文</button></> : <>
-        <h1>快速翻译</h1><p className="hint">选中文本后复制，再按 <kbd>Alt</kbd> + <kbd>T</kbd>。</p>{!hasApiKey && <p className="warning">请先点击右上角设置 API Key。</p>}
-        <textarea value={text} onChange={(event) => setText(event.target.value)} placeholder="或在这里输入要翻译的文字" /><button className="primary" disabled={loading || !text.trim()} onClick={() => void translate()}>{loading ? "翻译中…" : "翻译"}</button>
-      </>}{notice && <p className="notice">{notice}</p>}
+      {result ? <div className="translation-result">
+        <div className="result-card"><div className="result-section"><div className="result-model"><span>翻译模型</span><strong>{TRANSLATION_MODEL}</strong></div><p className="result-label">原文</p><p className="source">{result.source}</p></div><div className="result-divider" /><div className="result-section"><p className="result-label result-label-accent">译文</p><p className={`translation${/[\u3400-\u9fff]/.test(result.source) ? " translation-english" : ""}`}>{result.translation}</p></div></div>
+      </div> : <>
+        <div className="page-heading"><p className="eyebrow">快速翻译</p><h1>把文字变成另一种语言</h1><p className="hint">选中文本后复制，再按 <kbd>Alt</kbd> + <kbd>T</kbd>；也可以直接输入。</p></div>
+        {!hasApiKey && <div className="warning"><span className="warning-icon" aria-hidden="true">!</span><p>请先在系统托盘图标的右键菜单中设置 API Key。</p></div>}
+        <div className="input-card"><div className="input-head"><label className="field-label" htmlFor="translation-input">输入文本</label><span className="character-count">{text.length} 字符</span></div>
+          <textarea id="translation-input" value={text} onChange={(event) => setText(event.target.value)} placeholder="输入要翻译的文字…" />
+          <div className="input-footer"><span className="field-help">支持中英文自动识别</span><button className="primary" disabled={loading || !text.trim()} onClick={() => void translate()}>{loading ? "翻译中…" : "翻译"}</button></div>
+        </div>
+      </>}{notice && <p className="notice" role="status">{notice}</p>}
     </section>}
   </main>;
 }

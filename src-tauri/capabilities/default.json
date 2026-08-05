@@ -4,6 +4,7 @@
   "description": "Capability for the main window",
   "windows": ["main", "selection-float"],
   "permissions": [
-    "core:default"
+    "core:default",
+    "core:window:allow-start-dragging"
   ]
 }

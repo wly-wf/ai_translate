@@ -7,9 +7,11 @@ use windows::{
     core::Error,
     Win32::{
         Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+        Graphics::Gdi::ScreenToClient,
         UI::WindowsAndMessaging::{
-            CallNextHookEx, GetMessageW, GetWindowRect, IsWindowVisible, SetWindowsHookExW,
-            UnhookWindowsHookEx, MSLLHOOKSTRUCT, MSG, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP,
+            CallNextHookEx, GetClientRect, GetMessageW, GetWindowRect, IsWindowVisible,
+            SetWindowsHookExW, UnhookWindowsHookEx, WindowFromPoint, MSLLHOOKSTRUCT, MSG,
+            WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP,
         },
     },
 };
@@ -18,12 +20,18 @@ type MouseUpCallback = dyn Fn(RawMouseUp) + Send + Sync + 'static;
 type CallbackSlot = Mutex<Option<Arc<MouseUpCallback>>>;
 
 static CALLBACK: OnceLock<CallbackSlot> = OnceLock::new();
-static BUTTON_DOWN_POINT: OnceLock<Mutex<Option<POINT>>> = OnceLock::new();
+static BUTTON_DOWN: OnceLock<Mutex<Option<MouseDown>>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug)]
 struct RawMouseUp {
     point: POINT,
     selection_gesture: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MouseDown {
+    point: POINT,
+    started_in_client_area: bool,
 }
 
 #[derive(Debug)]
@@ -105,19 +113,21 @@ fn callback_slot() -> &'static CallbackSlot {
     CALLBACK.get_or_init(|| Mutex::new(None))
 }
 
-fn button_down_point_slot() -> &'static Mutex<Option<POINT>> {
-    BUTTON_DOWN_POINT.get_or_init(|| Mutex::new(None))
+fn button_down_slot() -> &'static Mutex<Option<MouseDown>> {
+    BUTTON_DOWN.get_or_init(|| Mutex::new(None))
 }
 
 fn remember_button_down(point: POINT) {
-    *button_down_point_slot()
+    *button_down_slot()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(point);
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(MouseDown {
+        point,
+        started_in_client_area: point_is_in_client_area(point),
+    });
 }
 
 fn take_selection_gesture(point: POINT) -> bool {
-    const DRAG_THRESHOLD: i64 = 3;
-    let start = button_down_point_slot()
+    let start = button_down_slot()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .take();
@@ -127,9 +137,41 @@ fn take_selection_gesture(point: POINT) -> bool {
         return true;
     };
 
-    let delta_x = i64::from(point.x) - i64::from(start.x);
-    let delta_y = i64::from(point.y) - i64::from(start.y);
+    is_selection_gesture(start, point)
+}
+
+fn is_selection_gesture(start: MouseDown, point: POINT) -> bool {
+    const DRAG_THRESHOLD: i64 = 3;
+    if !start.started_in_client_area {
+        return false;
+    }
+    let delta_x = i64::from(point.x) - i64::from(start.point.x);
+    let delta_y = i64::from(point.y) - i64::from(start.point.y);
     delta_x * delta_x + delta_y * delta_y >= DRAG_THRESHOLD * DRAG_THRESHOLD
+}
+
+fn point_is_in_client_area(screen_point: POINT) -> bool {
+    let window = unsafe { WindowFromPoint(screen_point) };
+    if window.is_invalid() {
+        return false;
+    }
+
+    let mut client_point = screen_point;
+    if !unsafe { ScreenToClient(window, &mut client_point) }.as_bool() {
+        return false;
+    }
+    let mut client = RECT::default();
+    if unsafe { GetClientRect(window, &mut client) }.is_err() {
+        return false;
+    }
+    point_is_inside_rectangle(client_point, client)
+}
+
+fn point_is_inside_rectangle(point: POINT, rectangle: RECT) -> bool {
+    point.x >= rectangle.left
+        && point.x < rectangle.right
+        && point.y >= rectangle.top
+        && point.y < rectangle.bottom
 }
 
 fn clicked_float_at_event(float_window: HWND, point: POINT) -> bool {
@@ -140,21 +182,32 @@ fn clicked_float_at_event(float_window: HWND, point: POINT) -> bool {
     if unsafe { GetWindowRect(float_window, &mut rectangle) }.is_err() {
         return false;
     }
-    point_inside_circle(point, rectangle)
+    point_inside_round_rect(point, rectangle)
 }
 
-fn point_inside_circle(point: POINT, rectangle: RECT) -> bool {
-    let radius_x = (rectangle.right - rectangle.left) as i64;
-    let radius_y = (rectangle.bottom - rectangle.top) as i64;
-    if radius_x <= 0 || radius_y <= 0 {
+fn point_inside_round_rect(point: POINT, rectangle: RECT) -> bool {
+    let width = (rectangle.right - rectangle.left) as i64;
+    let height = (rectangle.bottom - rectangle.top) as i64;
+    let radius = crate::FLOAT_CORNER_RADIUS as i64;
+    if width <= 0 || height <= 0 {
         return false;
     }
 
-    let offset_x = (point.x - rectangle.left) as i64 * 2 - radius_x;
-    let offset_y = (point.y - rectangle.top) as i64 * 2 - radius_y;
+    let x = (point.x - rectangle.left) as i64;
+    let y = (point.y - rectangle.top) as i64;
+    if x < 0 || x >= width || y < 0 || y >= height {
+        return false;
+    }
 
-    offset_x * offset_x * radius_y * radius_y + offset_y * offset_y * radius_x * radius_x
-        <= radius_x * radius_x * radius_y * radius_y
+    if (x < radius || x >= width - radius) && (y < radius || y >= height - radius) {
+        let center_x = if x < radius { radius } else { width - radius - 1 };
+        let center_y = if y < radius { radius } else { height - radius - 1 };
+        let dx = x - center_x;
+        let dy = y - center_y;
+        dx * dx + dy * dy <= radius * radius
+    } else {
+        true
+    }
 }
 
 fn reserve_callback<'a>(
@@ -230,8 +283,35 @@ mod tests {
 
     #[test]
     fn drag_is_a_selection_gesture() {
-        remember_button_down(POINT { x: 20, y: 30 });
-        assert!(take_selection_gesture(POINT { x: 24, y: 31 }));
+        let start = MouseDown {
+            point: POINT { x: 20, y: 30 },
+            started_in_client_area: true,
+        };
+        assert!(is_selection_gesture(start, POINT { x: 24, y: 31 }));
+    }
+
+    #[test]
+    fn title_bar_drag_is_not_a_selection_gesture() {
+        let start = MouseDown {
+            point: POINT { x: 20, y: 30 },
+            started_in_client_area: false,
+        };
+
+        assert!(!is_selection_gesture(start, POINT { x: 80, y: 30 }));
+    }
+
+    #[test]
+    fn client_area_hit_test_excludes_the_window_frame() {
+        let client = RECT {
+            left: 0,
+            top: 0,
+            right: 100,
+            bottom: 50,
+        };
+
+        assert!(point_is_inside_rectangle(POINT { x: 0, y: 0 }, client));
+        assert!(!point_is_inside_rectangle(POINT { x: -1, y: 20 }, client));
+        assert!(!point_is_inside_rectangle(POINT { x: 100, y: 20 }, client));
     }
 
     #[test]
@@ -243,8 +323,8 @@ mod tests {
             bottom: 44,
         };
 
-        assert!(point_inside_circle(POINT { x: 22, y: 32 }, rectangle));
-        assert!(!point_inside_circle(POINT { x: 10, y: 20 }, rectangle));
-        assert!(!point_inside_circle(POINT { x: 33, y: 43 }, rectangle));
+        assert!(point_inside_round_rect(POINT { x: 22, y: 32 }, rectangle));
+        assert!(!point_inside_round_rect(POINT { x: 10, y: 20 }, rectangle));
+        assert!(!point_inside_round_rect(POINT { x: 33, y: 43 }, rectangle));
     }
 }

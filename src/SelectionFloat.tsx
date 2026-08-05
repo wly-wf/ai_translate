@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
-import selectionFloatIcon from "./assets/selection-float-icon.png";
+import selectionFloatIcon from "./assets/selection-float-icon.svg";
 
 const nativeInvoke = invoke;
 
@@ -36,7 +36,6 @@ export function SelectionFloat() {
       className="selection-float-button"
       type="button"
       aria-label="翻译选中文本"
-      title="翻译选中文本"
       disabled={translating}
       onClick={() => void translateSelection()}
     >
