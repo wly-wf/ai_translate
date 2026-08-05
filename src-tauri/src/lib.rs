@@ -10,14 +10,14 @@ use serde::{Deserialize, Serialize};
 use std::{
     sync::{Arc, Condvar, Mutex},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{
     image::Image as TauriImage,
     menu::{Menu, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     window::Color,
-    AppHandle, Emitter, Manager, PhysicalPosition, Position, WebviewUrl, WebviewWindow,
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Position, Size, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
 };
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -27,6 +27,7 @@ use tauri_plugin_global_shortcut::{
 
 const KEYRING_SERVICE: &str = "ai-translate";
 const KEYRING_ACCOUNT: &str = "deepseek-api-key";
+const PROVIDER_KEYRING_PREFIX: &str = "provider-config:";
 const DEEPSEEK_URL: &str = "https://api.deepseek.com/chat/completions";
 const DEEPSEEK_THINKING_DISABLED: &str = "disabled";
 const FLOAT_SIZE: i32 = 28;
@@ -284,6 +285,27 @@ mod selection_float_tests {
 struct Translation {
     source: String,
     translation: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct StoredProviderConfig {
+    api_key: String,
+    base_url: String,
+    model: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderConfigResponse {
+    api_key: String,
+    base_url: String,
+    model: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ConnectionTestResult {
+    latency_ms: u128,
+    message: String,
 }
 
 #[derive(Serialize)]
@@ -564,6 +586,36 @@ fn keyring_entry() -> Result<Entry, String> {
     Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(|error| error.to_string())
 }
 
+fn supported_provider(provider: &str) -> bool {
+    matches!(
+        provider,
+        "deepseek" | "xiaomi" | "qwen" | "zhipu" | "moonshot" | "openai" | "google" | "anthropic"
+    )
+}
+
+fn provider_keyring_entry(provider: &str) -> Result<Entry, String> {
+    if !supported_provider(provider) {
+        return Err(format!("不支持的 AI 提供商：{provider}"));
+    }
+    Entry::new(KEYRING_SERVICE, &format!("{PROVIDER_KEYRING_PREFIX}{provider}"))
+        .map_err(|error| error.to_string())
+}
+
+fn stored_provider_config(provider: &str) -> Result<StoredProviderConfig, String> {
+    let password = provider_keyring_entry(provider)?
+        .get_password()
+        .map_err(|_| format!("请先保存 {provider} 的 API Key。"))?;
+    serde_json::from_str(&password).map_err(|error| format!("无法读取 {provider} 配置：{error}"))
+}
+
+fn provider_api_key(provider: &str, api_key: &str) -> Result<String, String> {
+    let value = api_key.trim();
+    if !value.is_empty() {
+        return Ok(value.to_string());
+    }
+    stored_provider_config(provider).map(|config| config.api_key)
+}
+
 fn api_key() -> Result<String, String> {
     keyring_entry()?.get_password().map_err(|_| "请先在设置中保存 DeepSeek API Key。".to_string())
 }
@@ -600,6 +652,93 @@ async fn request_translation(text: &str) -> Result<String, String> {
     payload.choices.into_iter().next().and_then(|choice| choice.message.content)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "DeepSeek 没有返回翻译结果。".to_string())
+}
+
+fn append_endpoint(base_url: &str, endpoint: &str) -> String {
+    let base = base_url.trim().trim_end_matches('/');
+    if base.ends_with(endpoint) {
+        base.to_string()
+    } else {
+        format!("{base}/{endpoint}")
+    }
+}
+
+async fn send_connection_test(
+    provider: &str,
+    api_key: &str,
+    base_url: &str,
+    model: &str,
+) -> Result<(), String> {
+    if base_url.trim().is_empty() {
+        return Err("Base URL 不能为空。".to_string());
+    }
+    if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+        return Err("Base URL 必须以 http:// 或 https:// 开头。".to_string());
+    }
+    if model.trim().is_empty() {
+        return Err("模型名称不能为空。".to_string());
+    }
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| format!("无法初始化网络连接：{error}"))?;
+
+    let response = match provider {
+        "google" => {
+            let endpoint = format!(
+                "{}/models/{}:generateContent",
+                base_url.trim().trim_end_matches('/'),
+                model.trim()
+            );
+            client
+                .post(endpoint)
+                .header("x-goog-api-key", api_key)
+                .json(&serde_json::json!({
+                    "contents": [{ "parts": [{ "text": "Reply with OK only." }] }],
+                    "generationConfig": { "maxOutputTokens": 8 }
+                }))
+                .send()
+                .await
+        }
+        "anthropic" => {
+            let endpoint = append_endpoint(base_url, "messages");
+            client
+                .post(endpoint)
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01")
+                .json(&serde_json::json!({
+                    "model": model.trim(),
+                    "max_tokens": 8,
+                    "messages": [{ "role": "user", "content": "Reply with OK only." }]
+                }))
+                .send()
+                .await
+        }
+        _ => {
+            let endpoint = append_endpoint(base_url, "chat/completions");
+            let mut body = serde_json::json!({
+                "model": model.trim(),
+                "messages": [{ "role": "user", "content": "Reply with OK only." }],
+                "max_tokens": 8,
+                "temperature": 0,
+                "stream": false
+            });
+            if provider == "deepseek" {
+                body["thinking"] = serde_json::json!({ "type": DEEPSEEK_THINKING_DISABLED });
+            }
+            client.post(endpoint).bearer_auth(api_key).json(&body).send().await
+        }
+    }
+    .map_err(|error| format!("网络请求失败：{error}"))?;
+
+    let status = response.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let detail = response.text().await.unwrap_or_default();
+    let detail = detail.chars().take(400).collect::<String>();
+    Err(format!("请求失败（{status}）：{detail}"))
 }
 
 fn translation_target(text: &str) -> &'static str {
@@ -679,13 +818,152 @@ fn save_api_key(api_key: String) -> Result<(), String> {
     keyring_entry()?.set_password(value).map_err(|error| format!("无法保存 API Key：{error}"))
 }
 
+fn save_provider_config_sync(
+    provider: String,
+    api_key: String,
+    base_url: String,
+    model: String,
+) -> Result<(), String> {
+    if !supported_provider(&provider) {
+        return Err(format!("不支持的 AI 提供商：{provider}"));
+    }
+    if base_url.trim().is_empty() || model.trim().is_empty() {
+        return Err("Base URL 和模型名称不能为空。".to_string());
+    }
+    let key = if api_key.trim().is_empty() {
+        stored_provider_config(&provider)?.api_key
+    } else {
+        api_key.trim().to_string()
+    };
+    if key.is_empty() {
+        return Err("API Key 不能为空。".to_string());
+    }
+    let config = StoredProviderConfig {
+        api_key: key.clone(),
+        base_url: base_url.trim().trim_end_matches('/').to_string(),
+        model: model.trim().to_string(),
+    };
+    let serialized = serde_json::to_string(&config).map_err(|error| format!("无法序列化配置：{error}"))?;
+    provider_keyring_entry(&provider)?.set_password(&serialized)
+        .map_err(|error| format!("无法保存 {provider} 配置：{error}"))?;
+    if provider == "deepseek" {
+        keyring_entry()?.set_password(&key)
+            .map_err(|error| format!("无法同步保存 DeepSeek API Key：{error}"))?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
-fn has_api_key() -> bool { api_key().is_ok() }
+async fn save_provider_config(
+    provider: String,
+    api_key: String,
+    base_url: String,
+    model: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        save_provider_config_sync(provider, api_key, base_url, model)
+    })
+    .await
+    .map_err(|error| format!("保存配置任务失败：{error}"))?
+}
+
+#[tauri::command]
+async fn get_provider_config(provider: String) -> Result<Option<ProviderConfigResponse>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let entry = provider_keyring_entry(&provider)?;
+        let Ok(password) = entry.get_password() else {
+            return Ok(None);
+        };
+        let config: StoredProviderConfig = serde_json::from_str(&password)
+            .map_err(|error| format!("无法读取 {provider} 配置：{error}"))?;
+        Ok(Some(ProviderConfigResponse {
+            api_key: config.api_key,
+            base_url: config.base_url,
+            model: config.model,
+        }))
+    })
+    .await
+    .map_err(|error| format!("读取配置任务失败：{error}"))?
+}
+
+#[tauri::command]
+async fn test_provider_connection(
+    provider: String,
+    api_key: String,
+    base_url: String,
+    model: String,
+) -> Result<ConnectionTestResult, String> {
+    if !supported_provider(&provider) {
+        return Err(format!("不支持的 AI 提供商：{provider}"));
+    }
+    let key = provider_api_key(&provider, &api_key)?;
+    let started = Instant::now();
+    send_connection_test(&provider, &key, &base_url, &model).await?;
+    Ok(ConnectionTestResult {
+        latency_ms: started.elapsed().as_millis(),
+        message: "连接成功".to_string(),
+    })
+}
+
+#[tauri::command]
+async fn has_api_key() -> bool {
+    tauri::async_runtime::spawn_blocking(|| api_key().is_ok())
+        .await
+        .unwrap_or(false)
+}
 
 #[tauri::command]
 fn hide_window(app: AppHandle) -> Result<(), String> {
     app.get_webview_window("main").ok_or_else(|| "未找到结果窗口。".to_string())?
         .hide().map_err(|error| error.to_string())
+}
+
+fn show_settings_window(app: &AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("settings") {
+        window.set_size(Size::Logical(LogicalSize::new(1120.0, 760.0))).map_err(|error| error.to_string())?;
+        window.set_resizable(false).map_err(|error| error.to_string())?;
+        window.show().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
+        .inner_size(1120.0, 760.0)
+        .min_inner_size(900.0, 620.0)
+        .title("AI Translate 设置")
+        .decorations(false)
+        .shadow(true)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .focused(true)
+        .visible(true)
+        .build()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn spawn_settings_window(app: &AppHandle) {
+    let app = app.clone();
+    thread::spawn(move || {
+        if let Err(error) = show_settings_window(&app) {
+            eprintln!("Could not open settings window from the tray menu: {error}");
+        }
+    });
+}
+
+#[tauri::command]
+async fn open_settings_window(app: AppHandle) -> Result<(), String> {
+    show_settings_window(&app)
+}
+
+#[tauri::command]
+fn hide_settings_window(app: AppHandle) -> Result<(), String> {
+    app.get_webview_window("settings")
+        .ok_or_else(|| "未找到设置窗口".to_string())?
+        .hide()
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -744,15 +1022,7 @@ fn initialize_tray_icon(app: &tauri::App) -> Result<(), String> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| {
             match event.id().as_ref() {
-                "settings" => {
-                    if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
-                    if let Err(error) = app.emit("open-settings", ()) {
-                        eprintln!("Could not open settings from the tray menu: {error}");
-                    }
-                }
+                "settings" => spawn_settings_window(app),
                 "quit" => app.exit(0),
                 _ => {}
             }
@@ -868,8 +1138,13 @@ pub fn run() {
             translate_text,
             translate_selection_float,
             save_api_key,
+            save_provider_config,
+            get_provider_config,
+            test_provider_connection,
             has_api_key,
             hide_window,
+            open_settings_window,
+            hide_settings_window,
         ])
         .run(tauri::generate_context!())
         .expect("启动 AI Translate 失败");

@@ -17,6 +17,8 @@ vi.mock("@tauri-apps/api/window", () => ({
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
 
+Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
+
 import App from "./App";
 
 function mockWindowLabel(label: string) {
@@ -59,6 +61,36 @@ describe("App", () => {
 
     expect(screen.queryByRole("button", { name: "设置" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "隐藏" })).toBeInTheDocument();
+  });
+
+  it("provides a separate settings-window entry point", () => {
+    render(<App />);
+
+    expect(screen.getByRole("button", { name: "更多操作" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "厂商接口配置" })).not.toBeInTheDocument();
+  });
+
+  it("renders the multi-page settings window", () => {
+    mockWindowLabel("settings");
+    render(<App />);
+
+    expect(screen.getByRole("heading", { name: "厂商接口配置" })).toBeInTheDocument();
+    expect(screen.getAllByText("DeepSeek").length).toBeGreaterThan(0);
+    const apiKeyInput = screen.getByLabelText("API Key");
+    expect(apiKeyInput).toHaveAttribute("type", "password");
+    fireEvent.click(screen.getByRole("button", { name: "显示 API Key" }));
+    expect(apiKeyInput).toHaveAttribute("type", "text");
+
+    fireEvent.click(screen.getByRole("button", { name: /^＋ 添加$/ }));
+    expect(screen.getByRole("heading", { name: "添加供应商" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "OpenAI" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByLabelText("名称")).toHaveValue("OpenAI");
+    fireEvent.click(screen.getByRole("tab", { name: "Google" }));
+    expect(screen.getByLabelText("Base URL")).toHaveValue("https://generativelanguage.googleapis.com/v1beta");
+    fireEvent.click(screen.getByRole("button", { name: "关闭添加供应商" }));
+    expect(screen.getByRole("heading", { name: "厂商接口配置" })).toBeInTheDocument();
+
+    expect(screen.getAllByRole("button", { name: "测试连接" })).toHaveLength(2);
   });
 
   it("invokes selection translation once while a request is pending", async () => {

@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
-import selectionFloatIcon from "./assets/selection-float-icon.svg";
+import selectionFloatIcon from "../src-tauri/icons/tray-icon.svg";
 
 const nativeInvoke = invoke;
 
