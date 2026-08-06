@@ -25,13 +25,12 @@ static BUTTON_DOWN: OnceLock<Mutex<Option<MouseDown>>> = OnceLock::new();
 #[derive(Clone, Copy, Debug)]
 struct RawMouseUp {
     point: POINT,
-    selection_gesture: bool,
+    start_point: Option<POINT>,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct MouseDown {
     point: POINT,
-    started_in_client_area: bool,
 }
 
 #[derive(Debug)]
@@ -71,12 +70,37 @@ pub fn start_mouse_hook(
     on_mouse_up: impl Fn(MouseUpEvent) + Send + Sync + 'static,
 ) -> Result<(), HookError> {
     let float_window = float_window.0 as isize;
+    let (event_sender, event_receiver) = mpsc::sync_channel::<RawMouseUp>(32);
+    thread::Builder::new()
+        .name("selection-mouse-dispatch".into())
+        .spawn(move || {
+            while let Ok(event) = event_receiver.recv() {
+                let clicked_float = event
+                    .start_point
+                    .map(|point| clicked_float_at_event(HWND(float_window as *mut _), point))
+                    .unwrap_or(false)
+                    || clicked_float_at_event(HWND(float_window as *mut _), event.point);
+                let selection_gesture = event.start_point.map_or(true, |start_point| {
+                    let start = MouseDown { point: start_point };
+                    is_selection_gesture(
+                        start,
+                        event.point,
+                        point_is_in_client_area(start_point) && !clicked_float_at_event(
+                            HWND(float_window as *mut _),
+                            start_point,
+                        ),
+                    )
+                });
+                on_mouse_up(MouseUpEvent {
+                    point: event.point,
+                    clicked_float,
+                    selection_gesture,
+                });
+            }
+        })
+        .map_err(|_| HookError::StartupChannelClosed)?;
     let callback = Arc::new(move |event: RawMouseUp| {
-        on_mouse_up(MouseUpEvent {
-            point: event.point,
-            clicked_float: clicked_float_at_event(HWND(float_window as *mut _), event.point),
-            selection_gesture: event.selection_gesture,
-        });
+        let _ = event_sender.try_send(event);
     });
     let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
 
@@ -121,28 +145,21 @@ fn remember_button_down(point: POINT) {
     *button_down_slot()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(MouseDown {
-        point,
-        started_in_client_area: point_is_in_client_area(point),
-    });
+            point,
+        });
 }
 
-fn take_selection_gesture(point: POINT) -> bool {
+fn take_mouse_down() -> Option<POINT> {
     let start = button_down_slot()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .take();
-    let Some(start) = start else {
-        // Preserve selection capture if a hook event was missed rather than
-        // incorrectly dismissing a newly selected range.
-        return true;
-    };
-
-    is_selection_gesture(start, point)
+    start.map(|start| start.point)
 }
 
-fn is_selection_gesture(start: MouseDown, point: POINT) -> bool {
+fn is_selection_gesture(start: MouseDown, point: POINT, started_in_client_area: bool) -> bool {
     const DRAG_THRESHOLD: i64 = 3;
-    if !start.started_in_client_area {
+    if !started_in_client_area {
         return false;
     }
     let delta_x = i64::from(point.x) - i64::from(start.point.x);
@@ -247,7 +264,7 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                 if let Some(callback) = callback {
                     callback(RawMouseUp {
                         point,
-                        selection_gesture: take_selection_gesture(point),
+                        start_point: take_mouse_down(),
                     });
                 }
             }
@@ -278,26 +295,29 @@ mod tests {
     #[test]
     fn simple_click_is_not_a_selection_gesture() {
         remember_button_down(POINT { x: 20, y: 30 });
-        assert!(!take_selection_gesture(POINT { x: 22, y: 31 }));
+        let start = take_mouse_down().unwrap();
+        assert!(!is_selection_gesture(
+            MouseDown { point: start },
+            POINT { x: 22, y: 31 },
+            true,
+        ));
     }
 
     #[test]
     fn drag_is_a_selection_gesture() {
         let start = MouseDown {
             point: POINT { x: 20, y: 30 },
-            started_in_client_area: true,
         };
-        assert!(is_selection_gesture(start, POINT { x: 24, y: 31 }));
+        assert!(is_selection_gesture(start, POINT { x: 24, y: 31 }, true));
     }
 
     #[test]
     fn title_bar_drag_is_not_a_selection_gesture() {
         let start = MouseDown {
             point: POINT { x: 20, y: 30 },
-            started_in_client_area: false,
         };
 
-        assert!(!is_selection_gesture(start, POINT { x: 80, y: 30 }));
+        assert!(!is_selection_gesture(start, POINT { x: 80, y: 30 }, false));
     }
 
     #[test]

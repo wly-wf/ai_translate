@@ -13,7 +13,9 @@ type SettingsProviderId = "deepseek" | "xiaomi" | "qwen" | "zhipu" | "moonshot" 
 type GenericProviderId = "openai" | "google" | "anthropic";
 type SettingsPage = "providers" | "generic" | "connection" | "general" | "interface" | "about";
 type ApiProtocol = "openai" | "google" | "anthropic";
-type Translation = { source: string; translation: string; providerId?: ProviderId };
+type Translation = { source: string; translation: string; requestId?: number; providerId?: ProviderId };
+type TranslationError = { requestId: number; message: string };
+type UserPreferences = { autoSelection: boolean; keepOnTop: boolean };
 
 type TranslationProvider = {
   id: ProviderId;
@@ -210,6 +212,7 @@ const TRANSLATION_PROVIDERS: TranslationProvider[] = [
 const AVAILABLE_TRANSLATION_PROVIDERS = TRANSLATION_PROVIDERS.filter((provider) => provider.enabled);
 
 const DEFAULT_PROVIDER_ID: ProviderId = "deepseek";
+const DEFAULT_USER_PREFERENCES: UserPreferences = { autoSelection: true, keepOnTop: true };
 const isTauriDesktop = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 function isMostlyEnglish(value: string) {
@@ -235,6 +238,53 @@ async function nativeInvoke<T>(command: string, args?: Record<string, unknown>):
   return invoke<T>(command, args);
 }
 
+function useUserPreferences() {
+  const [preferences, setPreferences] = useState<UserPreferences>(DEFAULT_USER_PREFERENCES);
+  const [loaded, setLoaded] = useState(false);
+  const [preferencesError, setPreferencesError] = useState("");
+  const saveChain = useRef<Promise<unknown>>(Promise.resolve());
+
+  useEffect(() => {
+    if (!isTauriDesktop) {
+      setLoaded(true);
+      return;
+    }
+    let cancelled = false;
+    void nativeInvoke<UserPreferences>("get_preferences")
+      .then((stored) => {
+        if (cancelled) return;
+        setPreferences({ ...DEFAULT_USER_PREFERENCES, ...(stored ?? {}) });
+        setLoaded(true);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setPreferencesError(String(error));
+        setLoaded(true);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriDesktop || !loaded) return;
+    let cancelled = false;
+    saveChain.current = saveChain.current
+      .catch(() => undefined)
+      .then(() => nativeInvoke("save_preferences", preferences))
+      .catch((error) => {
+        if (!cancelled) setPreferencesError(String(error));
+      });
+    return () => { cancelled = true; };
+  }, [loaded, preferences]);
+
+  return {
+    autoSelection: preferences.autoSelection,
+    keepOnTop: preferences.keepOnTop,
+    setAutoSelection: (value: boolean) => setPreferences((current) => ({ ...current, autoSelection: value })),
+    setKeepOnTop: (value: boolean) => setPreferences((current) => ({ ...current, keepOnTop: value })),
+    preferencesError,
+  };
+}
+
 function Icon({ name }: { name: "menu" | "close" | "chevron" }) {
   const paths: Record<string, React.ReactNode> = {
     menu: <path d="M3 5h10M3 10h10M3 15h10" />,
@@ -243,6 +293,22 @@ function Icon({ name }: { name: "menu" | "close" | "chevron" }) {
   };
 
   return <svg className={`ui-icon ui-icon-${name}`} viewBox="0 0 18 18" aria-hidden="true">{paths[name]}</svg>;
+}
+
+function QuickTranslateIcon() {
+  return <svg className="quick-translate-icon" viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M5.25 5.5h9.1a3 3 0 0 1 3 3v3.9a3 3 0 0 1-3 3H9.7l-3.55 2.9v-2.95a3 3 0 0 1-1.9-2.8V8.5a3 3 0 0 1 3-3Z" />
+    <path d="M7.45 9.15h4.55M9.72 7.85v2.6M7.45 11.65h3.05" />
+    <path className="quick-translate-spark" d="m18.1 3.15.62 1.82 1.83.62-1.83.62-.62 1.83-.62-1.83-1.83-.62 1.83-.62.62-1.82Z" />
+  </svg>;
+}
+
+function ReturnToFloatIcon() {
+  return <svg className="quick-translate-icon" viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M12.75 5.25h5.5a2 2 0 0 1 2 2v9.5a2 2 0 0 1-2 2h-5.5" />
+    <path d="m10.5 8.5-3.5 3.5 3.5 3.5M7.25 12h9" />
+    <path d="M4 5.25v13.5" />
+  </svg>;
 }
 
 function SearchIcon({ className = "provider-search-icon" }: { className?: string }) {
@@ -276,13 +342,21 @@ function MainWindow() {
   const [providerDrafts, setProviderDrafts] = useState<Record<SettingsProviderId, ProviderDraft>>(createProviderDrafts);
   const [connectionState, setConnectionState] = useState<ConnectionState>({ providerId: null, status: "idle", message: "" });
   const [showApiKey, setShowApiKey] = useState(false);
-  const [autoSelection, setAutoSelection] = useState(true);
-  const [keepOnTop, setKeepOnTop] = useState(true);
+  const { autoSelection, keepOnTop, setAutoSelection, setKeepOnTop, preferencesError } = useUserPreferences();
   const [hasApiKey, setHasApiKey] = useState(false);
   const [loading, setLoading] = useState(false);
   const [expandedProviderId, setExpandedProviderId] = useState<ProviderId | null>(DEFAULT_PROVIDER_ID);
-  const [notice, setNotice] = useState("按 Alt + T 翻译剪贴板中的文本");
+  const [showQuickTranslate, setShowQuickTranslate] = useState(false);
+  const [notice, setNotice] = useState("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const latestRequestId = useRef(0);
+  const latestTranslationAttempt = useRef(0);
+
+  function acceptRequest(requestId?: number) {
+    if (requestId !== undefined && requestId < latestRequestId.current) return false;
+    if (requestId !== undefined) latestRequestId.current = requestId;
+    return true;
+  }
 
   useEffect(() => {
     if (!isTauriDesktop) {
@@ -293,34 +367,60 @@ function MainWindow() {
       .then(setHasApiKey)
       .catch((error) => setNotice(String(error)));
     const resultListener = listen<Translation>("translation-result", (event) => {
+      if (!acceptRequest(event.payload.requestId)) return;
       const providerId = event.payload.providerId ?? DEFAULT_PROVIDER_ID;
       setResult({ ...event.payload, providerId });
       setExpandedProviderId(providerId);
       setLoading(false);
       setNotice("");
       setShowSettings(false);
+      setShowQuickTranslate(false);
     });
-    const errorListener = listen<string>("translation-error", (event) => { setLoading(false); setNotice(event.payload); });
-    const settingsListener = listen("open-settings", () => { switchSettingsPage("providers"); setShowSettings(true); setNotice(""); });
+    const errorListener = listen<TranslationError>("translation-error", (event) => {
+      if (!acceptRequest(event.payload.requestId)) return;
+      setLoading(false);
+      setNotice(event.payload.message);
+    });
+    const settingsListener = listen("open-settings", () => { switchSettingsPage("providers"); setShowSettings(true); setShowQuickTranslate(false); setNotice(""); });
+    const windowListener = listen("translation-window:open", () => {
+      setShowSettings(false);
+      setShowQuickTranslate(false);
+      setNotice("");
+    });
+    const quickTranslateListener = listen("quick-translate:open", () => {
+      setShowSettings(false);
+      setShowQuickTranslate(true);
+      setNotice("");
+    });
     return () => {
       void resultListener.then((remove) => remove());
       void errorListener.then((remove) => remove());
       void settingsListener.then((remove) => remove());
+      void windowListener.then((remove) => remove());
+      void quickTranslateListener.then((remove) => remove());
     };
   }, []);
 
+  useEffect(() => {
+    if (preferencesError) setNotice(preferencesError);
+  }, [preferencesError]);
+
   async function translate() {
     if (!text.trim()) return;
+    const attempt = latestTranslationAttempt.current + 1;
+    latestTranslationAttempt.current = attempt;
     setLoading(true);
     setNotice("");
     setExpandedProviderId(DEFAULT_PROVIDER_ID);
     try {
       const translated = await nativeInvoke<Translation>("translate_text", { text });
+      if (attempt !== latestTranslationAttempt.current || !acceptRequest(translated.requestId)) return;
       setResult({ ...translated, providerId: DEFAULT_PROVIDER_ID });
+      setShowQuickTranslate(false);
     } catch (error) {
-      setNotice(String(error));
+      if (attempt === latestTranslationAttempt.current) setNotice(String(error));
     } finally {
-      setLoading(false);
+      if (attempt === latestTranslationAttempt.current) setLoading(false);
     }
   }
 
@@ -387,6 +487,26 @@ function MainWindow() {
   function dragWindow(event: MouseEvent<HTMLElement>) {
     if ((event.target as HTMLElement).closest("button, input, textarea")) return;
     void getCurrentWindow().startDragging();
+  }
+
+  function openQuickTranslate() {
+    setShowSettings(false);
+    setShowQuickTranslate(true);
+    setNotice("");
+  }
+
+  function returnToFloatingTranslate() {
+    setShowSettings(false);
+    setShowQuickTranslate(false);
+    setNotice("");
+  }
+
+  function toggleQuickTranslate() {
+    if (showQuickTranslate) {
+      returnToFloatingTranslate();
+      return;
+    }
+    openQuickTranslate();
   }
 
   const activeProvider = AVAILABLE_TRANSLATION_PROVIDERS.find((provider) => provider.id === (result?.providerId ?? DEFAULT_PROVIDER_ID)) ?? AVAILABLE_TRANSLATION_PROVIDERS[0];
@@ -475,12 +595,11 @@ function MainWindow() {
 
   function renderGeneralPage() {
     return <>
-      <div className="settings-page-heading"><div><p className="eyebrow">偏好</p><h1>界面与快捷键</h1></div></div>
-      <p className="settings-description">调整悬浮翻译窗口的行为。快捷键目前固定为 Alt + T。</p>
+      <div className="settings-page-heading"><div><p className="eyebrow">偏好</p><h1>界面设置</h1></div></div>
+      <p className="settings-description">调整悬浮翻译按钮和翻译结果窗口的显示方式。</p>
       <div className="preference-list">
         <label className="preference-row"><span><strong>选中文本自动显示悬浮按钮</strong><small>鼠标完成选区后显示翻译入口</small></span><input type="checkbox" checked={autoSelection} onChange={(event) => setAutoSelection(event.target.checked)} /></label>
         <label className="preference-row"><span><strong>翻译窗口保持置顶</strong><small>结果窗口不会被其他窗口遮挡</small></span><input type="checkbox" checked={keepOnTop} onChange={(event) => setKeepOnTop(event.target.checked)} /></label>
-        <div className="preference-row shortcut-row"><span><strong>全局翻译快捷键</strong><small>复制文本后快速打开翻译结果</small></span><kbd>Alt + T</kbd></div>
       </div>
       <div className="settings-info-card"><strong>接口扩展</strong><p>新增厂商时，请先在对应页面填写 Base URL、模型和 API Key，再用连接测试确认配置可用。</p></div>
     </>;
@@ -493,6 +612,9 @@ function MainWindow() {
         <span className="app-name">AI Translate</span>
       </div>
       <div className="titlebar-actions">
+        <button className={`titlebar-quick-action${showQuickTranslate ? " is-active" : ""}`} type="button" onClick={toggleQuickTranslate} aria-label={showQuickTranslate ? "返回悬浮翻译" : "快速翻译"} title={showQuickTranslate ? "返回悬浮翻译" : "快速翻译"}>
+          {showQuickTranslate ? <ReturnToFloatIcon /> : <QuickTranslateIcon />}
+        </button>
         <button className="titlebar-icon-button" onClick={() => void nativeInvoke("open_settings_window").catch((error) => setNotice(String(error)))} aria-label="更多操作">
           <Icon name="menu" />
         </button>
@@ -509,7 +631,7 @@ function MainWindow() {
           <button aria-label="AI 提供商" className={settingsPage === "providers" ? "is-active" : ""} onClick={() => switchSettingsPage("providers")}><span aria-hidden="true">◈</span>AI 提供商</button>
           <button aria-label="通用接口" className={settingsPage === "generic" ? "is-active" : ""} onClick={() => switchSettingsPage("generic")}><span aria-hidden="true">◇</span>通用接口</button>
           <button aria-label="连接测试" className={settingsPage === "connection" ? "is-active" : ""} onClick={() => switchSettingsPage("connection")}><span aria-hidden="true">⌁</span>连接测试</button>
-          <button aria-label="界面与快捷键" className={settingsPage === "general" ? "is-active" : ""} onClick={() => switchSettingsPage("general")}><span aria-hidden="true">⚙</span>界面与快捷键</button>
+          <button aria-label="界面设置" className={settingsPage === "general" ? "is-active" : ""} onClick={() => switchSettingsPage("general")}><span aria-hidden="true">⚙</span>界面设置</button>
         </nav>
         <button className="settings-back" onClick={() => setShowSettings(false)}>← 返回翻译</button>
       </aside>
@@ -518,7 +640,15 @@ function MainWindow() {
         {notice && <p className="notice" role="status">{notice}</p>}
       </div>
     </section> : <section className="content">
-      {result ? <div className="translation-result">
+      {showQuickTranslate ? <div className="quick-translate-page">
+        <div className="quick-translate-heading"><p className="eyebrow">快速翻译</p></div>
+        {!hasApiKey && <div className="warning"><span className="warning-icon" aria-hidden="true">!</span><p>请先在系统托盘图标的右键菜单中设置 DeepSeek API Key。</p></div>}
+        <div className="model-strip"><ProviderIcon provider={activeProvider} /><span className="quick-provider-copy"><strong>{activeProvider.model}/{activeProvider.vendor}</strong></span></div>
+        <div className="input-card"><div className="input-head"><label className="field-label" htmlFor="translation-input">输入文本</label><span className="character-count">{text.length} 字符</span></div>
+          <textarea ref={inputRef} id="translation-input" value={text} onChange={(event) => setText(event.target.value)} placeholder="输入要翻译的文字…" />
+        </div>
+        <div className="quick-translate-action"><button className="primary" disabled={loading || !text.trim()} onClick={() => void translate()}>{loading ? "翻译中…" : "翻译"}</button></div>
+      </div> : result ? <div className="translation-result">
         <div className="provider-list">
           {AVAILABLE_TRANSLATION_PROVIDERS.map((provider) => {
             const isOpen = expandedProviderId === provider.id;
@@ -538,15 +668,13 @@ function MainWindow() {
             </article>;
           })}
         </div>
-      </div> : <>
-        <div className="page-heading"><p className="eyebrow">快速翻译</p><h1>把文字变成另一种语言</h1><p className="hint">选中文本后复制，再按 <kbd>Alt</kbd> + <kbd>T</kbd>；也可以直接输入。</p></div>
-        {!hasApiKey && <div className="warning"><span className="warning-icon" aria-hidden="true">!</span><p>请先在系统托盘图标的右键菜单中设置 DeepSeek API Key。</p></div>}
-        <div className="model-strip"><ProviderIcon provider={activeProvider} /><span><strong>{activeProvider.model}/{activeProvider.vendor}</strong></span><span className="provider-status ready">已接入</span></div>
-        <div className="input-card"><div className="input-head"><label className="field-label" htmlFor="translation-input">输入文本</label><span className="character-count">{text.length} 字符</span></div>
-          <textarea ref={inputRef} id="translation-input" value={text} onChange={(event) => setText(event.target.value)} placeholder="输入要翻译的文字…" />
-          <div className="input-footer"><span className="field-help">支持中英文自动识别</span><button className="primary" disabled={loading || !text.trim()} onClick={() => void translate()}>{loading ? "翻译中…" : "翻译"}</button></div>
-        </div>
-      </>}{notice && <p className="notice" role="status">{notice}</p>}
+      </div> : <div className="floating-empty-state">
+        <div className="floating-empty-mark" aria-hidden="true"><QuickTranslateIcon /></div>
+        <p className="eyebrow">悬浮翻译</p>
+        <h1>选中文本开始翻译</h1>
+        <p className="hint">在任意应用中选中文本，翻译入口会出现在选区旁边。</p>
+        <div className="floating-empty-tip"><span>选中文本后，点击悬浮翻译按钮即可开始</span></div>
+      </div>}{notice && <p className="notice" role="status">{notice}</p>}
     </section>}
   </main>;
 }
@@ -556,12 +684,15 @@ function LegacySettingsWindow() {
   const [selectedSettingsProviderId, setSelectedSettingsProviderId] = useState<SettingsProviderId>("deepseek");
   const [providerDrafts, setProviderDrafts] = useState<Record<SettingsProviderId, ProviderDraft>>(createProviderDrafts);
   const [connectionState, setConnectionState] = useState<ConnectionState>({ providerId: null, status: "idle", message: "" });
-  const [autoSelection, setAutoSelection] = useState(true);
-  const [keepOnTop, setKeepOnTop] = useState(true);
+  const { autoSelection, keepOnTop, setAutoSelection, setKeepOnTop, preferencesError } = useUserPreferences();
   const [notice, setNotice] = useState("");
   const [showApiKey, setShowApiKey] = useState(false);
   const [providerSearch, setProviderSearch] = useState("");
   const [enabledProviders, setEnabledProviders] = useState<Partial<Record<SettingsProviderId, boolean>>>({ deepseek: true });
+
+  useEffect(() => {
+    if (preferencesError) setNotice(preferencesError);
+  }, [preferencesError]);
 
   const selectedSettingsProvider = ALL_SETTINGS_PROVIDERS.find((provider) => provider.id === selectedSettingsProviderId) ?? SETTINGS_PROVIDERS[0];
   const selectedDraft = providerDrafts[selectedSettingsProvider.id];
@@ -709,12 +840,11 @@ function LegacySettingsWindow() {
 
   function renderGeneralPage() {
     return <>
-      <div className="settings-page-heading"><div><p className="eyebrow">偏好</p><h1>界面与快捷键</h1></div></div>
-      <p className="settings-description">调整悬浮翻译窗口的行为。全局快捷键目前固定为 Alt + T。</p>
+      <div className="settings-page-heading"><div><p className="eyebrow">偏好</p><h1>界面设置</h1></div></div>
+      <p className="settings-description">调整悬浮翻译按钮和翻译结果窗口的显示方式。</p>
       <div className="preference-list">
         <label className="preference-row"><span><strong>选中文本自动显示悬浮按钮</strong><small>鼠标完成选区后显示翻译入口</small></span><input type="checkbox" checked={autoSelection} onChange={(event) => setAutoSelection(event.target.checked)} /></label>
         <label className="preference-row"><span><strong>翻译窗口保持置顶</strong><small>结果窗口不会被其他窗口遮挡</small></span><input type="checkbox" checked={keepOnTop} onChange={(event) => setKeepOnTop(event.target.checked)} /></label>
-        <div className="preference-row shortcut-row"><span><strong>全局翻译快捷键</strong><small>复制文本后快速打开翻译结果</small></span><kbd>Alt + T</kbd></div>
       </div>
       <div className="settings-info-card"><strong>接口扩展</strong><p>新增厂商时，在对应页面填写 Base URL、模型和 API Key，再使用连接测试确认配置可用。</p></div>
     </>;
@@ -727,7 +857,7 @@ function LegacySettingsWindow() {
       <div className="provider-mode-switch" aria-label="接口类型"><button type="button" className={settingsPage === "providers" ? "is-active" : ""} onClick={() => switchSettingsPage("providers")}>厂商接口</button><button type="button" className={settingsPage === "generic" ? "is-active" : ""} onClick={() => switchSettingsPage("generic")}>通用接口</button></div>
       <div className="provider-list-heading"><span>{settingsPage === "generic" ? "通用接口" : "AI 提供商"}</span><strong>{filteredProviders.length}</strong></div>
       <nav className="provider-list-nav" aria-label="供应商列表">{filteredProviders.map((provider) => { const enabled = enabledProviders[provider.id] ?? providerDrafts[provider.id].saved; return <button type="button" className={`provider-list-item ${provider.id === selectedSettingsProvider.id ? "is-selected" : ""}`} key={provider.id} onClick={() => selectSettingsProvider(provider.id)}><ProviderIcon provider={provider} /><span className="provider-list-copy"><strong>{provider.vendor}</strong></span><span className={`provider-list-status ${enabled ? "is-enabled" : ""}`}>{enabled ? "启用" : "禁用"}</span></button>; })}</nav>
-      <div className="provider-panel-footer"><button type="button" className={settingsPage === "connection" ? "is-active" : ""} onClick={() => setSettingsPage("connection")}><span aria-hidden="true">◌</span>连接测试</button><button type="button" className={settingsPage === "general" ? "is-active" : ""} onClick={() => setSettingsPage("general")}><span aria-hidden="true">⚙</span>界面与快捷键</button><button type="button" className="provider-add-button" onClick={() => setNotice("请从列表中选择一个供应商进行配置。")}>＋ 添加</button></div>
+      <div className="provider-panel-footer"><button type="button" className={settingsPage === "connection" ? "is-active" : ""} onClick={() => setSettingsPage("connection")}><span aria-hidden="true">◌</span>连接测试</button><button type="button" className={settingsPage === "general" ? "is-active" : ""} onClick={() => setSettingsPage("general")}><span aria-hidden="true">⚙</span>界面设置</button><button type="button" className="provider-add-button" onClick={() => setNotice("请从列表中选择一个供应商进行配置。")}>＋ 添加</button></div>
     </aside>;
   }
 
@@ -747,8 +877,7 @@ function SettingsWindow() {
   const [selectedSettingsProviderId, setSelectedSettingsProviderId] = useState<SettingsProviderId>("deepseek");
   const [providerDrafts, setProviderDrafts] = useState<Record<SettingsProviderId, ProviderDraft>>(createProviderDrafts);
   const [connectionState, setConnectionState] = useState<ConnectionState>({ providerId: null, status: "idle", message: "" });
-  const [autoSelection, setAutoSelection] = useState(true);
-  const [keepOnTop, setKeepOnTop] = useState(true);
+  const { autoSelection, keepOnTop, setAutoSelection, setKeepOnTop, preferencesError } = useUserPreferences();
   const [notice, setNotice] = useState("");
   const [showApiKey, setShowApiKey] = useState(false);
   const [providerSearch, setProviderSearch] = useState("");
@@ -758,6 +887,10 @@ function SettingsWindow() {
   const [addProviderId, setAddProviderId] = useState<GenericProviderId>("openai");
   const [addProviderName, setAddProviderName] = useState(GENERIC_PROVIDERS[0].vendor);
   const [useResponsesApi, setUseResponsesApi] = useState(false);
+
+  useEffect(() => {
+    if (preferencesError) setNotice(preferencesError);
+  }, [preferencesError]);
 
   const selectedSettingsProvider = ALL_SETTINGS_PROVIDERS.find((provider) => provider.id === selectedSettingsProviderId) ?? SETTINGS_PROVIDERS[0];
   const selectedDraft = providerDrafts[selectedSettingsProvider.id];
@@ -966,11 +1099,11 @@ function SettingsWindow() {
   }
 
   function renderInterfacePage() {
-    return <div className="settings-page-view"><div className="settings-page-heading"><div><p className="settings-page-eyebrow">外观与交互</p><h1>界面设置</h1></div></div><p className="settings-description">调整悬浮按钮和翻译结果窗口的显示方式。</p><section className="interface-settings-card"><label className="preference-row"><span><strong>选中文本自动显示悬浮按钮</strong><small>鼠标完成选区后显示翻译入口</small></span><input type="checkbox" checked={autoSelection} onChange={(event) => setAutoSelection(event.target.checked)} /></label><label className="preference-row"><span><strong>翻译窗口保持置顶</strong><small>结果窗口不会被其他窗口遮挡</small></span><input type="checkbox" checked={keepOnTop} onChange={(event) => setKeepOnTop(event.target.checked)} /></label><div className="preference-row shortcut-row"><span><strong>全局翻译快捷键</strong><small>复制文本后快速打开翻译结果</small></span><kbd>Alt + T</kbd></div><div className="placeholder-setting-row"><div><strong>主题与字体</strong><small>主题切换和字体大小设置</small></div><span className="placeholder-badge">即将支持</span></div></section></div>;
+    return <div className="settings-page-view"><div className="settings-page-heading"><div><p className="settings-page-eyebrow">外观与交互</p><h1>界面设置</h1></div></div><p className="settings-description">调整悬浮按钮和翻译结果窗口的显示方式。</p><section className="interface-settings-card"><label className="preference-row"><span><strong>选中文本自动显示悬浮按钮</strong><small>鼠标完成选区后显示翻译入口</small></span><input type="checkbox" checked={autoSelection} onChange={(event) => setAutoSelection(event.target.checked)} /></label><label className="preference-row"><span><strong>翻译窗口保持置顶</strong><small>结果窗口不会被其他窗口遮挡</small></span><input type="checkbox" checked={keepOnTop} onChange={(event) => setKeepOnTop(event.target.checked)} /></label><div className="placeholder-setting-row"><div><strong>主题与字体</strong><small>主题切换和字体大小设置</small></div><span className="placeholder-badge">即将支持</span></div></section></div>;
   }
 
   function renderAboutPage() {
-    return <div className="settings-page-view about-page"><div className="about-brand"><img src={appIcon} alt="AI Translate 图标" /><div><p className="settings-page-eyebrow">AI Translate</p><h1>关于</h1><p>轻量、快速的桌面翻译工具。</p></div></div><section className="about-card"><div><span>当前版本</span><strong>0.1.0</strong></div><div><span>翻译引擎</span><strong>DeepSeek</strong></div><div><span>全局快捷键</span><strong>Alt + T</strong></div></section><div className="settings-info-card"><strong>更多信息</strong><p>更新日志、反馈入口和自动更新功能将在后续版本接入。</p></div></div>;
+    return <div className="settings-page-view about-page"><div className="about-brand"><img src={appIcon} alt="AI Translate 图标" /><div><p className="settings-page-eyebrow">AI Translate</p><h1>关于</h1><p>轻量、快速的桌面翻译工具。</p></div></div><section className="about-card"><div><span>当前版本</span><strong>0.1.0</strong></div><div><span>翻译引擎</span><strong>DeepSeek</strong></div></section><div className="settings-info-card"><strong>更多信息</strong><p>更新日志、反馈入口和自动更新功能将在后续版本接入。</p></div></div>;
   }
 
   function renderAddProviderPage() {

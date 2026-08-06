@@ -1,6 +1,6 @@
 use std::{
     mem::size_of,
-    ptr::{copy_nonoverlapping, null_mut},
+    ptr::null_mut,
     thread,
     time::Duration,
 };
@@ -8,18 +8,18 @@ use std::{
 use windows::{
     core::Error,
     Win32::{
-        Foundation::{HANDLE, HGLOBAL, POINT, RECT},
+        Foundation::{HGLOBAL, POINT, RECT},
         System::{
             Com::{
                 CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
                 CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
             },
             DataExchange::{
-                CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber,
-                OpenClipboard, SetClipboardData,
+                CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
+                GetClipboardSequenceNumber, OpenClipboard,
             },
-            Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE},
-            Ole::{SafeArrayDestroy, CF_UNICODETEXT},
+            Memory::{GlobalLock, GlobalSize, GlobalUnlock},
+            Ole::{OleGetClipboard, OleSetClipboard, SafeArrayDestroy, CF_UNICODETEXT},
         },
         UI::{
             Accessibility::{
@@ -36,11 +36,6 @@ use crate::selection_state::Anchor;
 const MAX_SELECTION_CHARACTERS: usize = 12_000;
 const CLIPBOARD_RETRIES: usize = 8;
 const CLIPBOARD_RETRY_DELAY: Duration = Duration::from_millis(15);
-
-#[link(name = "kernel32")]
-extern "system" {
-    fn GlobalFree(memory: HGLOBAL) -> HGLOBAL;
-}
 
 #[derive(Debug)]
 pub struct CaptureError(Error);
@@ -216,8 +211,16 @@ fn rectangles_for_range(
 }
 
 fn copy_fallback(point: POINT) -> CaptureOutcome {
+    let Ok(_apartment) = ComApartment::initialize() else {
+        return CaptureOutcome::Failed(
+            "could not initialize COM for clipboard fallback".to_string(),
+        );
+    };
+    let original_clipboard = match snapshot_clipboard() {
+        Ok(snapshot) => snapshot,
+        Err(error) => return CaptureOutcome::Failed(error),
+    };
     let before_sequence = unsafe { GetClipboardSequenceNumber() };
-    let original_text = read_plain_text();
     if !send_copy_shortcut() {
         return CaptureOutcome::Failed(
             "could not send Ctrl+C for clipboard fallback".to_string(),
@@ -232,17 +235,15 @@ fn copy_fallback(point: POINT) -> CaptureOutcome {
         }
 
         let copied_text = read_plain_text();
-        if let Some(original_text) = original_text.as_deref() {
-            match restore_plain_text_if_unchanged(copied_sequence, original_text) {
-                Ok(true) => {}
-                Ok(false) => {
-                    eprintln!(
-                        "Selection clipboard restore skipped because the clipboard changed."
-                    );
-                }
-                Err(error) => {
-                    eprintln!("Selection clipboard restore failed: {error}");
-                }
+        match restore_clipboard_if_unchanged(copied_sequence, &original_clipboard) {
+            Ok(true) => {}
+            Ok(false) => {
+                eprintln!(
+                    "Selection clipboard restore skipped because the clipboard changed."
+                );
+            }
+            Err(error) => {
+                eprintln!("Selection clipboard restore failed: {error}");
             }
         }
         return copied_text
@@ -322,52 +323,49 @@ fn read_plain_text() -> Option<String> {
     text
 }
 
+enum ClipboardSnapshot {
+    DataObject(windows::Win32::System::Com::IDataObject),
+    Empty,
+}
+
+fn snapshot_clipboard() -> Result<ClipboardSnapshot, String> {
+    if let Ok(data_object) = unsafe { OleGetClipboard() } {
+        return Ok(ClipboardSnapshot::DataObject(data_object));
+    }
+
+    let _clipboard = ClipboardGuard::open()
+        .ok_or_else(|| "could not snapshot the clipboard for fallback".to_string())?;
+    let has_formats = unsafe { EnumClipboardFormats(0) } != 0;
+    if has_formats {
+        return Err("could not snapshot the clipboard for fallback".to_string());
+    }
+    Ok(ClipboardSnapshot::Empty)
+}
+
 fn should_restore_clipboard(expected_sequence: u32, observed_sequence: u32) -> bool {
     expected_sequence == observed_sequence
 }
 
-fn restore_plain_text_if_unchanged(
+fn restore_clipboard_if_unchanged(
     expected_sequence: u32,
-    text: &str,
+    snapshot: &ClipboardSnapshot,
 ) -> Result<bool, String> {
-    let _clipboard =
-        ClipboardGuard::open().ok_or_else(|| "could not open the clipboard".to_string())?;
     let observed_sequence = unsafe { GetClipboardSequenceNumber() };
     if !should_restore_clipboard(expected_sequence, observed_sequence) {
         return Ok(false);
     }
 
-    write_plain_text_to_open_clipboard(text)?;
+    match snapshot {
+        ClipboardSnapshot::DataObject(data_object) => unsafe {
+            OleSetClipboard(data_object).map_err(|error| error.to_string())?;
+        },
+        ClipboardSnapshot::Empty => {
+            let _clipboard = ClipboardGuard::open()
+                .ok_or_else(|| "could not open the clipboard for restore".to_string())?;
+            unsafe { EmptyClipboard() }.map_err(|error| error.to_string())?;
+        }
+    }
     Ok(true)
-}
-
-fn write_plain_text_to_open_clipboard(text: &str) -> Result<(), String> {
-    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-    let bytes = wide
-        .len()
-        .checked_mul(size_of::<u16>())
-        .ok_or_else(|| "clipboard text allocation overflowed".to_string())?;
-    let global =
-        unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes) }.map_err(|error| error.to_string())?;
-    let data = unsafe { GlobalLock(global) }.cast::<u16>();
-    if data.is_null() {
-        let _ = unsafe { GlobalFree(global) };
-        return Err("could not lock clipboard text memory".to_string());
-    }
-    unsafe { copy_nonoverlapping(wide.as_ptr(), data, wide.len()) };
-    let _ = unsafe { GlobalUnlock(global) };
-
-    if let Err(error) = unsafe { EmptyClipboard() } {
-        let _ = unsafe { GlobalFree(global) };
-        return Err(error.to_string());
-    }
-    if let Err(error) =
-        unsafe { SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(global.0))) }
-    {
-        let _ = unsafe { GlobalFree(global) };
-        return Err(error.to_string());
-    }
-    Ok(())
 }
 
 #[cfg(test)]

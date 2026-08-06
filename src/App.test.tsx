@@ -63,6 +63,27 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "隐藏" })).toBeInTheDocument();
   });
 
+  it("opens the floating translation state by default and keeps quick translation behind its entry", () => {
+    render(<App />);
+
+    expect(screen.getByRole("heading", { name: "选中文本开始翻译" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "把文字变成另一种语言" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "快速翻译" }));
+
+    expect(screen.getByText("快速翻译", { exact: true })).toBeInTheDocument();
+    expect(screen.queryByText("把文字变成另一种语言")).not.toBeInTheDocument();
+    expect(screen.queryByText("直接输入文本即可开始翻译。")).not.toBeInTheDocument();
+    expect(screen.queryByText("支持中英文自动识别")).not.toBeInTheDocument();
+    expect(screen.queryByText("已接入")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("输入文本")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "返回悬浮翻译" }));
+
+    expect(screen.getByRole("heading", { name: "选中文本开始翻译" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("输入文本")).not.toBeInTheDocument();
+  });
+
   it("provides a separate settings-window entry point", () => {
     render(<App />);
 
@@ -87,10 +108,10 @@ describe("App", () => {
     expect(screen.getByLabelText("名称")).toHaveValue("OpenAI");
     fireEvent.click(screen.getByRole("tab", { name: "Google" }));
     expect(screen.getByLabelText("Base URL")).toHaveValue("https://generativelanguage.googleapis.com/v1beta");
-    fireEvent.click(screen.getByRole("button", { name: "关闭添加供应商" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "关闭添加供应商" })[0]);
     expect(screen.getByRole("heading", { name: "厂商接口配置" })).toBeInTheDocument();
 
-    expect(screen.getAllByRole("button", { name: "测试连接" })).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "测试连接" })).toHaveLength(1);
   });
 
   it("invokes selection translation once while a request is pending", async () => {

@@ -6,7 +6,7 @@
 
 **Architecture:** 将平台无关的浮标状态拆为可单测的 Rust 状态机；Windows 层负责鼠标抬起事件、UI Automation 和剪贴板兜底；Tauri 创建独立浮标 Webview 窗口，React 按窗口标签渲染浮标或既有结果界面。原有 `translate_and_display` 是唯一的翻译入口。
 
-**Tech Stack:** Tauri 2、Rust、`windows` crate、React 19、TypeScript、现有 DeepSeek API 与 Tauri clipboard/global-shortcut 插件。
+**Tech Stack:** Tauri 2、Rust、`windows` crate、React 19、TypeScript 与现有 DeepSeek API。
 
 ## Global Constraints
 
@@ -15,7 +15,7 @@
 - 新选区必须替换文本并移动同一个浮标。
 - 优先 UI Automation，失败才使用 `Ctrl+C` 和纯文本剪贴板兜底。
 - 单次文本最多 12,000 字符；不满足时不显示浮标。
-- 既有 `Alt + T` 取词翻译必须保持可用。
+- 当前版本暂不提供全局快捷键；鼠标选区浮标是本阶段的取词入口。
 - 管理员权限窗口不作为兼容性验收条件。
 
 ---
@@ -340,7 +340,7 @@ Expected: PASS，状态机与集成处理测试全部通过。
 3. 选择另一段文字，浮标移动。
 4. 点击浮标，显示正确译文。
 5. 点击空白和切换应用，浮标消失。
-6. 复制文字并按 `Alt + T`，既有翻译路径仍可用。
+6. 复制文字后验证选区浮标翻译流程和剪贴板原内容均正常。
 
 在 README 记录：优先 UI Automation、复制兜底，以及管理员权限窗口可能不支持。
 

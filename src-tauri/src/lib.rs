@@ -8,7 +8,10 @@ use keyring::Entry;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::{
-    sync::{Arc, Condvar, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Condvar, Mutex,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -20,18 +23,19 @@ use tauri::{
     AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Position, Size, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
 };
-use tauri_plugin_clipboard_manager::ClipboardExt;
-use tauri_plugin_global_shortcut::{
-    Builder as GlobalShortcutBuilder, Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
-};
 
 const KEYRING_SERVICE: &str = "ai-translate";
 const KEYRING_ACCOUNT: &str = "deepseek-api-key";
+const PREFERENCES_ACCOUNT: &str = "user-preferences";
 const PROVIDER_KEYRING_PREFIX: &str = "provider-config:";
+const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 const DEEPSEEK_URL: &str = "https://api.deepseek.com/chat/completions";
+const DEEPSEEK_MODEL: &str = "deepseek-v4-flash";
 const DEEPSEEK_THINKING_DISABLED: &str = "disabled";
 const FLOAT_SIZE: i32 = 28;
 pub(crate) const FLOAT_CORNER_RADIUS: i32 = 10;
+
+static NEXT_TRANSLATION_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 
 fn shape_float_window_as_round_rect(hwnd: windows::Win32::Foundation::HWND) -> Result<(), String> {
     use windows::Win32::{
@@ -189,28 +193,6 @@ mod selection_float_tests {
     }
 
     #[test]
-    fn optional_selection_startup_failure_does_not_abort_shortcut_setup() {
-        let steps = Mutex::new(Vec::new());
-
-        let result = initialize_required_then_optional(
-            || {
-                steps.lock().unwrap().push("shortcut");
-                Ok(())
-            },
-            || {
-                steps.lock().unwrap().push("selection-float");
-                Err("hook unavailable".to_string())
-            },
-        );
-
-        assert_eq!(result, Ok(()));
-        assert_eq!(
-            *steps.lock().unwrap(),
-            vec!["shortcut", "selection-float"]
-        );
-    }
-
-    #[test]
     fn newest_capture_request_replaces_an_older_pending_request() {
         let pending = PendingCapture::default();
         pending.submit(CaptureRequest {
@@ -244,7 +226,7 @@ mod selection_float_tests {
     }
 
     #[test]
-    fn capture_failure_keeps_the_last_valid_selection() {
+    fn capture_failure_hides_the_last_valid_selection() {
         let mut controller = visible_controller("one");
         let generation = controller.begin_mouse_up();
 
@@ -255,9 +237,9 @@ mod selection_float_tests {
                 CaptureOutcome::Failed("UIA unavailable".into()),
                 false,
             ),
-            StateChange::Unchanged
+            StateChange::Hide
         );
-        assert_eq!(controller.take_for_translation(), Some("one".into()));
+        assert_eq!(controller.take_for_translation(), None);
     }
 
     #[test]
@@ -279,12 +261,45 @@ mod selection_float_tests {
 
         assert_eq!(payload, serde_json::json!({ "type": "disabled" }));
     }
+
+    #[test]
+    fn remote_http_provider_urls_are_rejected_but_loopback_is_allowed() {
+        assert!(validate_base_url("https://api.example.com/v1").is_ok());
+        assert!(validate_base_url("http://localhost:8080/v1").is_ok());
+        assert!(validate_base_url("http://127.0.0.1:8080/v1").is_ok());
+        assert!(validate_base_url("http://api.example.com/v1").is_err());
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct Translation {
     source: String,
     translation: String,
+    request_id: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UserPreferences {
+    auto_selection: bool,
+    keep_on_top: bool,
+}
+
+impl Default for UserPreferences {
+    fn default() -> Self {
+        Self {
+            auto_selection: true,
+            keep_on_top: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TranslationError {
+    request_id: u64,
+    message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -314,7 +329,7 @@ struct ChatMessage<'a> { role: &'a str, content: &'a str }
 struct ThinkingConfig { #[serde(rename = "type")] mode: &'static str }
 #[derive(Serialize)]
 struct DeepSeekRequest<'a> {
-    model: &'static str,
+    model: &'a str,
     messages: Vec<ChatMessage<'a>>,
     // DeepSeek defaults thinking to enabled, so disable it explicitly for translation.
     thinking: ThinkingConfig,
@@ -395,7 +410,7 @@ fn handle_mouse_up(
         CaptureOutcome::Empty | CaptureOutcome::TooLong { .. } => {
             controller.clear_after_plain_click(generation, false)
         }
-        CaptureOutcome::Failed(_) => StateChange::Unchanged,
+        CaptureOutcome::Failed(_) => controller.clear_after_plain_click(generation, false),
     }
 }
 
@@ -463,6 +478,10 @@ impl CaptureScheduler {
                 if !is_latest_generation(&app, request.generation) {
                     continue;
                 }
+                if !is_auto_selection_enabled(&app) {
+                    apply_mouse_up(&app, request.generation, CaptureOutcome::Empty, false);
+                    continue;
+                }
                 let outcome = capture_selection(request.point);
                 apply_mouse_up(&app, request.generation, outcome, false);
             })
@@ -489,6 +508,11 @@ fn apply_mouse_up(
     captured: CaptureOutcome,
     clicked_float: bool,
 ) {
+    let captured = if is_auto_selection_enabled(app) {
+        captured
+    } else {
+        CaptureOutcome::Empty
+    };
     let (change, current) = {
         let controller = app.state::<Mutex<SelectionController>>();
         let mut controller = controller.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -568,22 +592,77 @@ pub fn hide_float(app: &AppHandle) -> Result<(), String> {
     window.emit("selection-float:hide", ()).map_err(|error| error.to_string())
 }
 
-fn report_translation_error(app: &AppHandle, error: &str) {
+fn show_translation_window(app: &AppHandle, open_quick_translate: bool) {
     match app.get_webview_window("main") {
         Some(window) => {
             if let Err(show_error) = window.show() {
-                eprintln!("Translation error window show failed: {show_error}");
+                eprintln!("Translation window show failed: {show_error}");
+            }
+            if let Err(focus_error) = window.set_focus() {
+                eprintln!("Translation window focus failed: {focus_error}");
+            }
+            let event_name = if open_quick_translate {
+                "quick-translate:open"
+            } else {
+                "translation-window:open"
+            };
+            if let Err(event_error) = window.emit(event_name, ()) {
+                eprintln!("Translation window open event failed: {event_error}");
             }
         }
         None => eprintln!("Translation error window is unavailable."),
     }
-    if let Err(emit_error) = app.emit("translation-error", error) {
+}
+
+fn report_translation_error(app: &AppHandle, request_id: u64, error: &str) {
+    show_translation_window(app, false);
+    let payload = TranslationError {
+        request_id,
+        message: error.to_string(),
+    };
+    if let Err(emit_error) = app.emit("translation-error", payload) {
         eprintln!("Translation error event emission failed: {emit_error}");
     }
 }
 
 fn keyring_entry() -> Result<Entry, String> {
     Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(|error| error.to_string())
+}
+
+fn preferences_entry() -> Result<Entry, String> {
+    Entry::new(KEYRING_SERVICE, PREFERENCES_ACCOUNT).map_err(|error| error.to_string())
+}
+
+fn load_preferences_sync() -> Result<UserPreferences, String> {
+    let entry = preferences_entry()?;
+    match entry.get_password() {
+        Ok(password) => serde_json::from_str(&password)
+            .map_err(|error| format!("无法读取界面偏好：{error}")),
+        Err(_) => Ok(UserPreferences::default()),
+    }
+}
+
+fn save_preferences_sync(preferences: &UserPreferences) -> Result<(), String> {
+    let serialized = serde_json::to_string(preferences)
+        .map_err(|error| format!("无法序列化界面偏好：{error}"))?;
+    preferences_entry()?
+        .set_password(&serialized)
+        .map_err(|error| format!("无法保存界面偏好：{error}"))
+}
+
+fn current_preferences(app: &AppHandle) -> UserPreferences {
+    app.state::<Mutex<UserPreferences>>()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+fn is_auto_selection_enabled(app: &AppHandle) -> bool {
+    current_preferences(app).auto_selection
+}
+
+fn next_translation_request_id() -> u64 {
+    NEXT_TRANSLATION_REQUEST_ID.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 fn supported_provider(provider: &str) -> bool {
@@ -613,21 +692,55 @@ fn provider_api_key(provider: &str, api_key: &str) -> Result<String, String> {
     if !value.is_empty() {
         return Ok(value.to_string());
     }
-    stored_provider_config(provider).map(|config| config.api_key)
+    stored_provider_config(provider).map(|config| config.api_key).or_else(|error| {
+        if provider == "deepseek" {
+            legacy_api_key()
+        } else {
+            Err(error)
+        }
+    })
 }
 
-fn api_key() -> Result<String, String> {
+fn legacy_api_key() -> Result<String, String> {
     keyring_entry()?.get_password().map_err(|_| "请先在设置中保存 DeepSeek API Key。".to_string())
 }
 
+fn configured_deepseek() -> Result<(String, String, String), String> {
+    let config = match stored_provider_config("deepseek") {
+        Ok(config) => config,
+        Err(_) => {
+            return Ok((
+                legacy_api_key()?,
+                DEEPSEEK_URL.to_string(),
+                DEEPSEEK_MODEL.to_string(),
+            ));
+        }
+    };
+    if config.api_key.trim().is_empty() {
+        return Err("DeepSeek API Key 不能为空。".to_string());
+    }
+    if config.base_url.trim().is_empty() {
+        return Err("DeepSeek Base URL 不能为空。".to_string());
+    }
+    validate_base_url(&config.base_url)?;
+    if config.model.trim().is_empty() {
+        return Err("DeepSeek 模型名称不能为空。".to_string());
+    }
+    Ok((
+        config.api_key,
+        append_endpoint(&config.base_url, "chat/completions"),
+        config.model,
+    ))
+}
+
 async fn request_translation(text: &str) -> Result<String, String> {
-    let key = api_key()?;
+    let (key, endpoint, model) = configured_deepseek()?;
     let target = translation_target(text);
     let prompt = format!(
         "Translate the following text into natural {target}. The target language is fixed by the application; do not answer in the source language, even when the input mixes Chinese and English terms. Preserve product names, model names, acronyms, and technical notation. Return only the translation, without notes or quotation marks.\n\n{text}"
     );
     let body = DeepSeekRequest {
-        model: "deepseek-v4-flash",
+        model: model.trim(),
         messages: vec![
             ChatMessage { role: "system", content: "You are a precise translation engine." },
             ChatMessage { role: "user", content: &prompt },
@@ -640,7 +753,7 @@ async fn request_translation(text: &str) -> Result<String, String> {
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|error| format!("无法初始化网络连接：{error}"))?;
-    let response = client.post(DEEPSEEK_URL).bearer_auth(key).json(&body).send().await
+    let response = client.post(endpoint).bearer_auth(key).json(&body).send().await
         .map_err(|error| format!("无法连接 DeepSeek：{error}"))?;
     let status = response.status();
     if !status.is_success() {
@@ -663,18 +776,28 @@ fn append_endpoint(base_url: &str, endpoint: &str) -> String {
     }
 }
 
+fn validate_base_url(base_url: &str) -> Result<(), String> {
+    let base_url = base_url.trim();
+    if base_url.is_empty() {
+        return Err("Base URL 不能为空。".to_string());
+    }
+    let url = reqwest::Url::parse(base_url)
+        .map_err(|_| "Base URL 必须是有效的 HTTPS URL。".to_string())?;
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1")) => Ok(()),
+        "http" => Err("出于安全原因，远程 HTTP Base URL 不被允许，请改用 HTTPS。".to_string()),
+        _ => Err("Base URL 必须使用 HTTPS；本机服务可使用 HTTP。".to_string()),
+    }
+}
+
 async fn send_connection_test(
     provider: &str,
     api_key: &str,
     base_url: &str,
     model: &str,
 ) -> Result<(), String> {
-    if base_url.trim().is_empty() {
-        return Err("Base URL 不能为空。".to_string());
-    }
-    if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
-        return Err("Base URL 必须以 http:// 或 https:// 开头。".to_string());
-    }
+    validate_base_url(base_url)?;
     if model.trim().is_empty() {
         return Err("模型名称不能为空。".to_string());
     }
@@ -789,26 +912,33 @@ async fn translate_and_display(
     app: AppHandle,
     text: String,
     float_placement: Option<FloatPlacement>,
+    request_id: u64,
 ) -> Result<Translation, String> {
     let source = text.trim().to_string();
     if source.is_empty() { return Err("没有可翻译的文本。".to_string()); }
     if source.chars().count() > 12_000 {
         return Err("单次翻译最多支持 12,000 个字符。".to_string());
     }
-    let result = Translation { translation: request_translation(&source).await?, source };
+    let result = Translation {
+        translation: request_translation(&source).await?,
+        source,
+        request_id,
+    };
     let window = app.get_webview_window("main").ok_or_else(|| "未找到结果窗口。".to_string())?;
     if let Some(placement) = float_placement {
         position_translation_window(&window, placement)?;
     }
     window.show().map_err(|error| error.to_string())?;
-    window.set_always_on_top(true).map_err(|error| error.to_string())?;
+    window
+        .set_always_on_top(current_preferences(&app).keep_on_top)
+        .map_err(|error| error.to_string())?;
     app.emit("translation-result", &result).map_err(|error| error.to_string())?;
     Ok(result)
 }
 
 #[tauri::command]
 async fn translate_text(app: AppHandle, text: String) -> Result<Translation, String> {
-    translate_and_display(app, text, None).await
+    translate_and_display(app, text, None, next_translation_request_id()).await
 }
 
 #[tauri::command]
@@ -830,8 +960,15 @@ fn save_provider_config_sync(
     if base_url.trim().is_empty() || model.trim().is_empty() {
         return Err("Base URL 和模型名称不能为空。".to_string());
     }
+    validate_base_url(&base_url)?;
     let key = if api_key.trim().is_empty() {
-        stored_provider_config(&provider)?.api_key
+        stored_provider_config(&provider).map(|config| config.api_key).or_else(|error| {
+            if provider == "deepseek" {
+                legacy_api_key()
+            } else {
+                Err(error)
+            }
+        })?
     } else {
         api_key.trim().to_string()
     };
@@ -872,6 +1009,15 @@ async fn get_provider_config(provider: String) -> Result<Option<ProviderConfigRe
     tauri::async_runtime::spawn_blocking(move || {
         let entry = provider_keyring_entry(&provider)?;
         let Ok(password) = entry.get_password() else {
+            if provider == "deepseek" {
+                if let Ok(api_key) = legacy_api_key() {
+                    return Ok(Some(ProviderConfigResponse {
+                        api_key,
+                        base_url: DEEPSEEK_BASE_URL.to_string(),
+                        model: DEEPSEEK_MODEL.to_string(),
+                    }));
+                }
+            }
             return Ok(None);
         };
         let config: StoredProviderConfig = serde_json::from_str(&password)
@@ -907,9 +1053,46 @@ async fn test_provider_connection(
 
 #[tauri::command]
 async fn has_api_key() -> bool {
-    tauri::async_runtime::spawn_blocking(|| api_key().is_ok())
+    tauri::async_runtime::spawn_blocking(|| legacy_api_key().is_ok())
         .await
         .unwrap_or(false)
+}
+
+#[tauri::command]
+fn get_preferences(app: AppHandle) -> UserPreferences {
+    current_preferences(&app)
+}
+
+#[tauri::command]
+async fn save_preferences(
+    app: AppHandle,
+    auto_selection: bool,
+    keep_on_top: bool,
+) -> Result<UserPreferences, String> {
+    let preferences = UserPreferences {
+        auto_selection,
+        keep_on_top,
+    };
+    let saved_preferences = preferences.clone();
+    tauri::async_runtime::spawn_blocking(move || save_preferences_sync(&saved_preferences))
+        .await
+        .map_err(|error| format!("保存偏好任务失败：{error}"))??;
+
+    {
+        let state = app.state::<Mutex<UserPreferences>>();
+        *state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = preferences.clone();
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        window
+            .set_always_on_top(preferences.keep_on_top)
+            .map_err(|error| error.to_string())?;
+    }
+    if !preferences.auto_selection {
+        if let Err(error) = hide_float(&app) {
+            eprintln!("Selection float hide failed after disabling auto selection: {error}");
+        }
+    }
+    Ok(preferences)
 }
 
 #[tauri::command]
@@ -968,39 +1151,40 @@ fn hide_settings_window(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn translate_selection_float(app: AppHandle) -> Result<(), String> {
-    let text = {
+    let request_id = next_translation_request_id();
+    let selection = {
         let controller = app.state::<Mutex<SelectionController>>();
         let mut controller = controller.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         controller.take_for_translation()
     };
-    let Some(text) = text else {
+    let Some(selection) = selection else {
         let error = "没有待翻译的选中文本。".to_string();
-        report_translation_error(&app, &error);
+        report_translation_error(&app, request_id, &error);
         return Err(error);
     };
 
+    let text = selection.text.clone();
     let float_placement = capture_float_placement(&app).ok();
     if let Err(error) = hide_float(&app) {
         eprintln!("Selection float hide failed before translation: {error}");
     }
-    match translate_and_display(app.clone(), text, float_placement).await {
+    match translate_and_display(app.clone(), text, float_placement, request_id).await {
         Ok(_) => Ok(()),
         Err(error) => {
-            report_translation_error(&app, &error);
+            let restored = {
+                let controller = app.state::<Mutex<SelectionController>>();
+                let mut controller = controller.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                controller.restore_after_translation_failure(selection.clone())
+            };
+            if restored {
+                if let Err(show_error) = show_float(&app, selection.anchor, selection.generation) {
+                    eprintln!("Selection float restore failed after translation error: {show_error}");
+                }
+            }
+            report_translation_error(&app, request_id, &error);
             Err(error)
         }
     }
-}
-
-fn initialize_required_then_optional(
-    required: impl FnOnce() -> Result<(), String>,
-    optional: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
-    required()?;
-    if let Err(error) = optional() {
-        eprintln!("Selection float disabled: {error}");
-    }
-    Ok(())
 }
 
 fn initialize_tray_icon(app: &tauri::App) -> Result<(), String> {
@@ -1036,10 +1220,7 @@ fn initialize_tray_icon(app: &tauri::App) -> Result<(), String> {
                     ..
                 }
             ) {
-                if let Some(window) = tray.app_handle().get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
+                show_translation_window(tray.app_handle(), true);
             }
         })
         .build(app)
@@ -1084,6 +1265,10 @@ fn initialize_selection_float(app: &tauri::App) -> Result<(), String> {
             if event.clicked_float {
                 return;
             }
+            if !is_auto_selection_enabled(&mouse_app) {
+                apply_mouse_up(&mouse_app, generation, CaptureOutcome::Empty, false);
+                return;
+            }
             if !event.selection_gesture {
                 apply_mouse_up(&mouse_app, generation, CaptureOutcome::Empty, false);
                 return;
@@ -1107,31 +1292,18 @@ fn initialize_selection_float(app: &tauri::App) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let shortcut = Shortcut::new(Some(Modifiers::ALT), Code::KeyT);
+    let preferences = load_preferences_sync().unwrap_or_else(|error| {
+        eprintln!("Could not load interface preferences, using defaults: {error}");
+        UserPreferences::default()
+    });
     tauri::Builder::default()
         .manage(Mutex::<SelectionController>::default())
-        .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(GlobalShortcutBuilder::new().with_handler(move |app, pressed, event| {
-            if pressed == &shortcut && event.state() == ShortcutState::Pressed {
-                let app = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    let text = app.clipboard().read_text().unwrap_or_default();
-                    if let Err(error) = translate_and_display(app.clone(), text, None).await {
-                        report_translation_error(&app, &error);
-                    }
-                });
-            }
-        }).build())
+        .manage(Mutex::new(preferences))
         .setup(move |app| {
             initialize_tray_icon(app)?;
-            initialize_required_then_optional(
-                || {
-                    app.global_shortcut()
-                        .register(shortcut)
-                        .map_err(|error| format!("无法注册 Alt+T：{error}"))
-                },
-                || initialize_selection_float(app),
-            )?;
+            if let Err(error) = initialize_selection_float(app) {
+                eprintln!("Selection float disabled: {error}");
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1142,6 +1314,8 @@ pub fn run() {
             get_provider_config,
             test_provider_connection,
             has_api_key,
+            get_preferences,
+            save_preferences,
             hide_window,
             open_settings_window,
             hide_settings_window,

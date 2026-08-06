@@ -76,8 +76,16 @@ impl SelectionController {
         }
     }
 
-    pub fn take_for_translation(&mut self) -> Option<String> {
-        self.current.take().map(|selection| selection.text)
+    pub fn take_for_translation(&mut self) -> Option<Selection> {
+        self.current.take()
+    }
+
+    pub fn restore_after_translation_failure(&mut self, selection: Selection) -> bool {
+        if selection.generation != self.latest_generation || self.current.is_some() {
+            return false;
+        }
+        self.current = Some(selection);
+        true
     }
 }
 
@@ -130,8 +138,28 @@ mod tests {
     #[test]
     fn float_click_returns_exact_saved_text_once() {
         let mut controller = visible_controller("selected");
-        assert_eq!(controller.take_for_translation(), Some("selected".into()));
+        assert_eq!(controller.take_for_translation().map(|selection| selection.text), Some("selected".into()));
         assert_eq!(controller.take_for_translation(), None);
+    }
+
+    #[test]
+    fn failed_translation_can_restore_the_same_selection_for_retry() {
+        let mut controller = visible_controller("selected");
+        let selection = controller.take_for_translation().unwrap();
+
+        assert!(controller.restore_after_translation_failure(selection));
+        assert_eq!(controller.take_for_translation().map(|selection| selection.text), Some("selected".into()));
+    }
+
+    #[test]
+    fn failed_translation_does_not_restore_over_a_newer_selection() {
+        let mut controller = visible_controller("old");
+        let selection = controller.take_for_translation().unwrap();
+        let generation = controller.begin_mouse_up();
+        controller.replace_selection(generation, "new".into(), Anchor { x: 1, y: 1 });
+
+        assert!(!controller.restore_after_translation_failure(selection));
+        assert_eq!(controller.take_for_translation().map(|selection| selection.text), Some("new".into()));
     }
 
     #[test]
@@ -160,7 +188,7 @@ mod tests {
             controller.replace_selection(generation, over_limit_text, Anchor { x: 1, y: 2 });
 
         assert_eq!(change, StateChange::Unchanged);
-        assert_eq!(controller.take_for_translation(), Some("valid selection".into()));
+        assert_eq!(controller.take_for_translation().map(|selection| selection.text), Some("valid selection".into()));
     }
 
     #[test]
@@ -185,7 +213,7 @@ mod tests {
             ),
             StateChange::Unchanged
         );
-        assert_eq!(controller.take_for_translation(), Some("current".into()));
+        assert_eq!(controller.take_for_translation().map(|selection| selection.text), Some("current".into()));
     }
 
     #[test]
@@ -203,7 +231,7 @@ mod tests {
             controller.clear_after_plain_click(stale_generation, false),
             StateChange::Unchanged
         );
-        assert_eq!(controller.take_for_translation(), Some("current".into()));
+        assert_eq!(controller.take_for_translation().map(|selection| selection.text), Some("current".into()));
     }
 
     #[test]
@@ -213,7 +241,7 @@ mod tests {
         let _float_click_generation = controller.begin_mouse_up();
 
         assert_eq!(
-            controller.take_for_translation(),
+            controller.take_for_translation().map(|selection| selection.text),
             Some("translate me".into())
         );
         assert_eq!(
