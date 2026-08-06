@@ -5,6 +5,7 @@
   "windows": ["main", "selection-float", "settings"],
   "permissions": [
     "core:default",
-    "core:window:allow-start-dragging"
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize"
   ]
 }

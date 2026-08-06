@@ -44,19 +44,22 @@ button { cursor: pointer; }
 }
 .titlebar-start, .titlebar-actions { display: flex; align-items: center; }
 .titlebar-start { min-width: 0; gap: 8px; }
-.titlebar-actions { gap: 2px; }
+.titlebar-actions { gap: 8px; }
 .app-icon { width: 34px; height: 34px; flex: 0 0 34px; padding: 0; object-fit: contain; border: 0; border-radius: 10px; background: transparent; }
 .app-name { max-width: 120px; overflow: hidden; color: #262d34; font-size: 13px; font-weight: 700; letter-spacing: .1px; text-overflow: ellipsis; white-space: nowrap; }
-.titlebar-icon-button { width: 34px; height: 34px; display: grid; place-items: center; padding: 0; color: #20262c; background: transparent; border: 0; border-radius: 10px; transition: background-color .18s ease, color .18s ease, transform .18s ease; }
-.titlebar-icon-button:hover { background: #f0f1f1; }
+.titlebar-icon-button, .titlebar-quick-action { box-sizing: border-box; width: 32px; height: 32px; flex: 0 0 32px; display: grid; place-items: center; padding: 0; background: transparent; border: 0; border-radius: 9px; line-height: 0; transition: background-color .18s ease, color .18s ease, transform .18s ease; }
+.titlebar-icon-button { color: #20262c; }
+.titlebar-icon-button:hover, .titlebar-quick-action:hover { background: #f0f1f1; }
 .titlebar-icon-button:active { transform: scale(.94); }
+.titlebar-pin.is-active { color: #315c9f; background: transparent; }
+.titlebar-pin.is-active:hover { background: #f0f1f1; }
 .titlebar-close:hover { color: #c54f23; background: #fff0e9; }
-.ui-icon { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.45; }
-.titlebar-quick-action { width: 34px; height: 34px; display: grid; place-items: center; padding: 0; color: #4d70ad; background: linear-gradient(145deg, #eef4ff, #e3ecfb); border: 1px solid #d5e1f4; border-radius: 11px; box-shadow: 0 3px 9px rgba(64, 99, 157, .12); transition: background .18s ease, border-color .18s ease, color .18s ease, transform .18s ease, box-shadow .18s ease; }
-.titlebar-quick-action:hover { color: #315c9f; background: linear-gradient(145deg, #e5efff, #d9e6fa); border-color: #bfd2ed; box-shadow: 0 5px 12px rgba(64, 99, 157, .18); transform: translateY(-1px); }
+.ui-icon { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.45; }
+.titlebar-quick-action { color: #4d70ad; }
+.titlebar-quick-action:hover { color: #315c9f; transform: translateY(-1px); }
 .titlebar-quick-action:active { transform: scale(.94); }
-.titlebar-quick-action.is-active { color: #fff; background: linear-gradient(145deg, #6b8fcf, #4f70ad); border-color: #4f70ad; box-shadow: 0 4px 11px rgba(68, 102, 163, .28); }
-.quick-translate-icon { width: 19px; height: 19px; display: block; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.55; }
+.titlebar-quick-action.is-active { color: #315c9f; background: transparent; }
+.quick-translate-icon { width: 20px; height: 20px; display: block; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.55; }
 .quick-translate-spark { fill: currentColor; stroke: none; }
 
 .content { height: calc(100% - 64px); overflow-y: auto; padding: 22px 16px 28px; scrollbar-width: thin; scrollbar-color: #cfd3d5 transparent; }
@@ -296,10 +299,12 @@ textarea:focus, input:focus { outline: 2px solid rgba(242, 117, 50, .28); outlin
 
 .notice { margin-top: 13px; padding: 9px 11px; color: #737c82; background: #f0f3f3; border: 1px solid #e2e5e5; border-radius: 8px; font-size: 11px; line-height: 1.45; }
 
-.selection-float-button { width: 28px; height: 28px; margin: 0; padding: 0; appearance: none; border: 0; border-radius: 10px; outline: 0; background: transparent; transition: filter .15s ease, transform .15s ease; }
+.selection-float-button { position: absolute; top: 50%; left: 50%; width: 28px; height: 28px; margin: 0; padding: 0; appearance: none; border: 0; border-radius: 10px; outline: 0; background: transparent; transform: translate(-50%, -50%); transition: filter .15s ease, transform .15s ease; }
 .selection-float-icon { display: block; width: 28px; height: 28px; margin: auto; object-fit: contain; }
-.selection-float-button:hover:not(:disabled) { filter: brightness(1.08); transform: scale(1.05); }
-.selection-float-button:focus, .selection-float-button:focus-visible { outline: 2px solid #456aa5; outline-offset: 2px; }
+.selection-float-button:hover:not(:disabled) { filter: brightness(1.08); transform: translate(-50%, -50%) scale(1.05); }
+.selection-float-button::after { position: absolute; inset: 1px; border: 2px solid #456aa5; border-radius: 9px; opacity: 0; pointer-events: none; content: ""; transition: opacity .15s ease; }
+.selection-float-button:focus, .selection-float-button:focus-visible { outline: 0; }
+.selection-float-button:focus::after, .selection-float-button:focus-visible::after { opacity: 1; }
 .selection-float-button:disabled { cursor: wait; opacity: .68; }
 
 @media (max-width: 430px) {
@@ -328,6 +333,10 @@ textarea:focus, input:focus { outline: 2px solid rgba(242, 117, 50, .28); outlin
 .app-shell.settings-window-shell { width: 100%; min-width: 0; height: 100%; margin: 0; overflow: hidden; border: 0; border-radius: 0; background: transparent; }
 .settings-shell { position: relative; height: 100%; display: grid; grid-template-rows: 48px minmax(0, 1fr); min-height: 0; overflow: hidden; border-radius: 0; background: #fff; }
 .settings-topbar { position: relative; z-index: 3; grid-column: 1 / -1; grid-row: 1; display: flex; align-items: center; justify-content: space-between; min-width: 0; padding: 0 7px 0 10px; background: #fff; cursor: move; user-select: none; }
+.settings-window-actions { display: flex; align-items: center; gap: 8px; }
+.settings-window-button { position: static; width: 34px; height: 34px; flex: 0 0 34px; display: grid; place-items: center; padding: 0; color: #4d5964; background: #fff; border: 1px solid #dfe5eb; border-radius: 9px; }
+.settings-window-button:hover { color: #2f5d92; background: #f3f7fb; border-color: #cdd9e6; }
+.settings-window-button .ui-icon { width: 18px; height: 18px; }
 .settings-shell > aside, .settings-shell > section { position: relative; z-index: 1; }
 .settings-shell-providers { grid-template-columns: 222px 292px minmax(0, 1fr); }
 .settings-shell-single { grid-template-columns: 222px minmax(0, 1fr); }

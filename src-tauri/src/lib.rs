@@ -20,6 +20,7 @@ use tauri::{
     menu::{Menu, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     window::Color,
+    webview::PageLoadEvent,
     AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Position, Size, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
 };
@@ -32,8 +33,11 @@ const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 const DEEPSEEK_URL: &str = "https://api.deepseek.com/chat/completions";
 const DEEPSEEK_MODEL: &str = "deepseek-v4-flash";
 const DEEPSEEK_THINKING_DISABLED: &str = "disabled";
-const FLOAT_SIZE: i32 = 28;
-const TRANSLATION_WINDOW_WIDTH: f64 = 520.0;
+const USER_PREFERENCES_VERSION: u8 = 1;
+const FLOAT_BUTTON_SIZE: i32 = 28;
+const FLOAT_SIZE: i32 = FLOAT_BUTTON_SIZE + 4;
+pub(crate) const FLOAT_PADDING: i32 = (FLOAT_SIZE - FLOAT_BUTTON_SIZE) / 2;
+const TRANSLATION_WINDOW_WIDTH: f64 = 500.0;
 const TRANSLATION_WINDOW_HEIGHT: f64 = 700.0;
 pub(crate) const FLOAT_CORNER_RADIUS: i32 = 10;
 
@@ -129,7 +133,7 @@ mod selection_float_tests {
     fn float_position_stays_inside_the_monitor_work_area() {
         assert_eq!(
             clamp_float_position(Anchor { x: 188, y: 4 }, 0, 0, 200, 100),
-            Anchor { x: 172, y: 10 },
+            Anchor { x: 168, y: 8 },
         );
     }
 
@@ -286,13 +290,16 @@ struct Translation {
 struct UserPreferences {
     auto_selection: bool,
     keep_on_top: bool,
+    #[serde(default)]
+    preference_version: u8,
 }
 
 impl Default for UserPreferences {
     fn default() -> Self {
         Self {
             auto_selection: true,
-            keep_on_top: true,
+            keep_on_top: false,
+            preference_version: USER_PREFERENCES_VERSION,
         }
     }
 }
@@ -355,8 +362,16 @@ fn clamp_float_position(
     let max_x = (work_x + work_width as i32 - FLOAT_SIZE).max(work_x);
     let max_y = (work_y + work_height as i32 - FLOAT_SIZE).max(work_y);
     Anchor {
-        x: anchor.x.saturating_add(6).clamp(work_x, max_x),
-        y: anchor.y.saturating_add(6).clamp(work_y, max_y),
+        x: anchor
+            .x
+            .saturating_add(6)
+            .saturating_sub(FLOAT_PADDING)
+            .clamp(work_x, max_x),
+        y: anchor
+            .y
+            .saturating_add(6)
+            .saturating_sub(FLOAT_PADDING)
+            .clamp(work_y, max_y),
     }
 }
 
@@ -600,6 +615,12 @@ fn show_translation_window(app: &AppHandle, open_quick_translate: bool) {
             if let Err(lock_error) = lock_translation_window(&window) {
                 eprintln!("Translation window size lock failed: {lock_error}");
             }
+            if let Err(top_error) = window.set_always_on_top(current_preferences(app).keep_on_top) {
+                eprintln!("Translation window topmost state update failed: {top_error}");
+            }
+            if let Err(unminimize_error) = window.unminimize() {
+                eprintln!("Translation window restore failed: {unminimize_error}");
+            }
             if let Err(show_error) = window.show() {
                 eprintln!("Translation window show failed: {show_error}");
             }
@@ -641,8 +662,18 @@ fn preferences_entry() -> Result<Entry, String> {
 fn load_preferences_sync() -> Result<UserPreferences, String> {
     let entry = preferences_entry()?;
     match entry.get_password() {
-        Ok(password) => serde_json::from_str(&password)
-            .map_err(|error| format!("无法读取界面偏好：{error}")),
+        Ok(password) => {
+            let mut preferences: UserPreferences = serde_json::from_str(&password)
+                .map_err(|error| format!("无法读取界面偏好：{error}"))?;
+            if preferences.preference_version < USER_PREFERENCES_VERSION {
+                // The previous version defaulted to always-on-top. Start the
+                // new click-away behavior unpinned, while preserving future
+                // pin choices across restarts.
+                preferences.keep_on_top = false;
+                preferences.preference_version = USER_PREFERENCES_VERSION;
+            }
+            Ok(preferences)
+        }
         Err(_) => Ok(UserPreferences::default()),
     }
 }
@@ -920,7 +951,8 @@ fn lock_translation_window(window: &WebviewWindow) -> Result<(), String> {
             TRANSLATION_WINDOW_HEIGHT,
         )))
         .map_err(|error| error.to_string())?;
-    window.set_resizable(false).map_err(|error| error.to_string())
+    window.set_resizable(false).map_err(|error| error.to_string())?;
+    window.set_minimizable(true).map_err(|error| error.to_string())
 }
 
 async fn translate_and_display(
@@ -944,7 +976,9 @@ async fn translate_and_display(
     if let Some(placement) = float_placement {
         position_translation_window(&window, placement)?;
     }
+    window.unminimize().map_err(|error| error.to_string())?;
     window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())?;
     window
         .set_always_on_top(current_preferences(&app).keep_on_top)
         .map_err(|error| error.to_string())?;
@@ -1088,6 +1122,7 @@ async fn save_preferences(
     let preferences = UserPreferences {
         auto_selection,
         keep_on_top,
+        preference_version: USER_PREFERENCES_VERSION,
     };
     let saved_preferences = preferences.clone();
     tauri::async_runtime::spawn_blocking(move || save_preferences_sync(&saved_preferences))
@@ -1121,6 +1156,8 @@ fn show_settings_window(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("settings") {
         window.set_size(Size::Logical(LogicalSize::new(1120.0, 760.0))).map_err(|error| error.to_string())?;
         window.set_resizable(false).map_err(|error| error.to_string())?;
+        window.set_minimizable(true).map_err(|error| error.to_string())?;
+        window.unminimize().map_err(|error| error.to_string())?;
         window.show().map_err(|error| error.to_string())?;
         window.set_focus().map_err(|error| error.to_string())?;
         return Ok(());
@@ -1134,10 +1171,21 @@ fn show_settings_window(app: &AppHandle) -> Result<(), String> {
         .shadow(true)
         .transparent(true)
         .always_on_top(true)
-        .skip_taskbar(true)
+        .skip_taskbar(false)
+        .minimizable(true)
         .resizable(false)
-        .focused(true)
-        .visible(true)
+        .focused(false)
+        .visible(false)
+        .on_page_load(|window, payload| {
+            if matches!(payload.event(), PageLoadEvent::Finished) {
+                if let Err(error) = window.show() {
+                    eprintln!("Settings window show after page load failed: {error}");
+                }
+                if let Err(error) = window.set_focus() {
+                    eprintln!("Settings window focus after page load failed: {error}");
+                }
+            }
+        })
         .build()
         .map(|_| ())
         .map_err(|error| error.to_string())

@@ -1,7 +1,7 @@
 import { type MouseEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { siAnthropic, siDeepseek, siGooglegemini, siMoonshotai, siQwen, siZdotai, type SimpleIcon } from "simple-icons";
 import { SelectionFloat } from "./SelectionFloat";
@@ -16,6 +16,12 @@ type ApiProtocol = "openai" | "google" | "anthropic";
 type Translation = { source: string; translation: string; requestId?: number; providerId?: ProviderId };
 type TranslationError = { requestId: number; message: string };
 type UserPreferences = { autoSelection: boolean; keepOnTop: boolean };
+type TitlebarDragState = {
+  startX: number;
+  startY: number;
+  started: boolean;
+  cleanup: () => void;
+};
 
 type TranslationProvider = {
   id: ProviderId;
@@ -212,7 +218,7 @@ const TRANSLATION_PROVIDERS: TranslationProvider[] = [
 const AVAILABLE_TRANSLATION_PROVIDERS = TRANSLATION_PROVIDERS.filter((provider) => provider.enabled);
 
 const DEFAULT_PROVIDER_ID: ProviderId = "deepseek";
-const DEFAULT_USER_PREFERENCES: UserPreferences = { autoSelection: true, keepOnTop: true };
+const DEFAULT_USER_PREFERENCES: UserPreferences = { autoSelection: true, keepOnTop: false };
 const isTauriDesktop = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 function isMostlyEnglish(value: string) {
@@ -310,11 +316,13 @@ function useUserPreferences() {
   };
 }
 
-function Icon({ name }: { name: "menu" | "close" | "chevron" }) {
+function Icon({ name }: { name: "menu" | "close" | "chevron" | "pin" | "minimize" }) {
   const paths: Record<string, React.ReactNode> = {
-    menu: <path d="M3 5h10M3 10h10M3 15h10" />,
+    menu: <path d="M3 5h12M3 9h12M3 13h12" />,
     close: <path d="m3 3 12 12M15 3 3 15" />,
     chevron: <path d="m3 6 5 5 5-5" />,
+    pin: <><path d="M5 3.5h8M6 3.5v5.2l-2.8 3.1h11.6L12 8.7V3.5M9 11.8v4.7" /></>,
+    minimize: <path d="M3 9h12" />,
   };
 
   return <svg className={`ui-icon ui-icon-${name}`} viewBox="0 0 18 18" aria-hidden="true">{paths[name]}</svg>;
@@ -431,11 +439,106 @@ function MainWindow() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const latestRequestId = useRef(0);
   const latestTranslationAttempt = useRef(0);
+  const titlebarDragRef = useRef<TitlebarDragState | null>(null);
+  const activationGraceUntilRef = useRef(0);
+  const focusLossTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!isTauriDesktop) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const windowHandle = getCurrentWindow();
+    const clearFocusLossTimer = () => {
+      if (focusLossTimerRef.current !== null) {
+        window.clearTimeout(focusLossTimerRef.current);
+        focusLossTimerRef.current = null;
+      }
+    };
+    const checkFocusLoss = () => {
+      focusLossTimerRef.current = window.setTimeout(() => {
+        focusLossTimerRef.current = null;
+        if (keepOnTop || Date.now() < activationGraceUntilRef.current) return;
+        void Promise.all([
+          windowHandle.isFocused(),
+          windowHandle.isMinimized(),
+          cursorPosition(),
+          windowHandle.outerPosition(),
+          windowHandle.outerSize(),
+        ])
+          .then(([focused, minimized, cursor, position, size]) => {
+            if (focused || minimized || Date.now() < activationGraceUntilRef.current) return;
+            const insideWindow = cursor.x >= position.x
+              && cursor.x < position.x + size.width
+              && cursor.y >= position.y
+              && cursor.y < position.y + size.height;
+            if (!insideWindow) void windowHandle.minimize().catch(() => undefined);
+          })
+          .catch(() => undefined);
+      }, Math.max(250, activationGraceUntilRef.current - Date.now()));
+    };
+    void windowHandle.onFocusChanged(({ payload: focused }) => {
+      if (focused) {
+        activationGraceUntilRef.current = Date.now() + 400;
+        clearFocusLossTimer();
+        return;
+      }
+      if (!keepOnTop) {
+        clearFocusLossTimer();
+        checkFocusLoss();
+      }
+    }).then((remove) => {
+      if (disposed) {
+        remove();
+      } else {
+        unlisten = remove;
+      }
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      clearFocusLossTimer();
+      unlisten?.();
+    };
+  }, [keepOnTop]);
 
   function acceptRequest(requestId?: number) {
     if (requestId !== undefined && requestId < latestRequestId.current) return false;
     if (requestId !== undefined) latestRequestId.current = requestId;
     return true;
+  }
+
+  function finishTitlebarDrag() {
+    const drag = titlebarDragRef.current;
+    drag?.cleanup();
+    titlebarDragRef.current = null;
+  }
+
+  function beginTitlebarDrag(event: MouseEvent<HTMLElement>) {
+    if (event.button !== 0 || (event.target as HTMLElement).closest("button, input, textarea, select")) return;
+    finishTitlebarDrag();
+
+    const startX = event.screenX;
+    const startY = event.screenY;
+    let cleanedUp = false;
+    const handleMove = (moveEvent: globalThis.MouseEvent) => {
+      const drag = titlebarDragRef.current;
+      if (!drag || drag.started) return;
+      const deltaX = moveEvent.screenX - drag.startX;
+      const deltaY = moveEvent.screenY - drag.startY;
+      if (deltaX * deltaX + deltaY * deltaY < 16) return;
+      drag.started = true;
+      void getCurrentWindow().startDragging().catch(() => {
+        drag.started = false;
+      });
+    };
+    const cleanup = () => {
+      if (cleanedUp) return;
+      cleanedUp = true;
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", finishTitlebarDrag);
+    };
+    titlebarDragRef.current = { startX, startY, started: false, cleanup };
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", finishTitlebarDrag);
   }
 
   useEffect(() => {
@@ -448,6 +551,7 @@ function MainWindow() {
       .catch((error) => setNotice(String(error)));
     const resultListener = listen<Translation>("translation-result", (event) => {
       if (!acceptRequest(event.payload.requestId)) return;
+      activationGraceUntilRef.current = Date.now() + 400;
       const providerId = event.payload.providerId ?? DEFAULT_PROVIDER_ID;
       setResult({ ...event.payload, providerId });
       setExpandedProviderId(providerId);
@@ -458,16 +562,19 @@ function MainWindow() {
     });
     const errorListener = listen<TranslationError>("translation-error", (event) => {
       if (!acceptRequest(event.payload.requestId)) return;
+      activationGraceUntilRef.current = Date.now() + 400;
       setLoading(false);
       setNotice(event.payload.message);
     });
     const settingsListener = listen("open-settings", () => { switchSettingsPage("providers"); setShowSettings(true); setShowQuickTranslate(false); setNotice(""); });
     const windowListener = listen("translation-window:open", () => {
+      activationGraceUntilRef.current = Date.now() + 500;
       setShowSettings(false);
       setShowQuickTranslate(false);
       setNotice("");
     });
     const quickTranslateListener = listen("quick-translate:open", () => {
+      activationGraceUntilRef.current = Date.now() + 500;
       setShowSettings(false);
       setShowQuickTranslate(true);
       setNotice("");
@@ -562,11 +669,6 @@ function MainWindow() {
     } catch (error) {
       setConnectionState({ providerId: provider.id, status: "error", message: String(error) });
     }
-  }
-
-  function dragWindow(event: MouseEvent<HTMLElement>) {
-    if ((event.target as HTMLElement).closest("button, input, textarea")) return;
-    void getCurrentWindow().startDragging();
   }
 
   function openQuickTranslate() {
@@ -686,7 +788,7 @@ function MainWindow() {
   }
 
   return <main className="app-shell">
-    <header className="titlebar" onMouseDown={dragWindow}>
+    <header className="titlebar" onMouseDown={beginTitlebarDrag} onMouseUp={finishTitlebarDrag}>
       <div className="titlebar-start">
         <img className="app-icon" src={appIcon} alt="AI Translate 翻译图标" />
         <span className="app-name">AI Translate</span>
@@ -695,10 +797,16 @@ function MainWindow() {
         <button className={`titlebar-quick-action${showQuickTranslate ? " is-active" : ""}`} type="button" onClick={toggleQuickTranslate} aria-label={showQuickTranslate ? "返回悬浮翻译" : "快速翻译"} title={showQuickTranslate ? "返回悬浮翻译" : "快速翻译"}>
           {showQuickTranslate ? <ReturnToFloatIcon /> : <QuickTranslateIcon />}
         </button>
+        <button className={`titlebar-icon-button titlebar-pin${keepOnTop ? " is-active" : ""}`} type="button" onClick={() => setKeepOnTop(!keepOnTop)} aria-label={keepOnTop ? "取消置顶" : "置顶"} aria-pressed={keepOnTop} title={keepOnTop ? "取消置顶" : "置顶"}>
+          <Icon name="pin" />
+        </button>
         <button className="titlebar-icon-button" onClick={() => void nativeInvoke("open_settings_window").catch((error) => setNotice(String(error)))} aria-label="更多操作">
           <Icon name="menu" />
         </button>
-        <button className="titlebar-icon-button titlebar-close" onClick={() => void nativeInvoke("hide_window")} aria-label="隐藏">
+        <button className="titlebar-icon-button titlebar-minimize" type="button" onClick={() => void getCurrentWindow().minimize().catch(() => undefined)} aria-label="最小化" title="最小化">
+          <Icon name="minimize" />
+        </button>
+        <button className="titlebar-icon-button titlebar-close" type="button" onClick={() => void nativeInvoke("hide_window")} aria-label="关闭" title="关闭翻译窗口">
           <Icon name="close" />
         </button>
       </div>
@@ -1190,7 +1298,7 @@ function SettingsWindow() {
     const apiPath = addProviderDefinition.protocol === "google" ? "/models/{model}:generateContent" : addProviderDefinition.protocol === "anthropic" ? "/messages" : useResponsesApi ? "/responses" : "/chat/completions";
     const draft = providerDrafts[addProviderId];
     const tabLabels: Record<GenericProviderId, string> = { openai: "OpenAI", google: "Google", anthropic: "Claude" };
-    return <section className="settings-add-provider-page" aria-labelledby="add-provider-title"><div className="settings-topbar" onMouseDown={dragWindow}><div className="settings-brand settings-brand-top"><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong></div></div><button type="button" className="settings-close-button" onClick={closeAddProvider} aria-label="关闭添加供应商" title="关闭添加供应商"><Icon name="close" /></button></div>
+    return <section className="settings-add-provider-page" aria-labelledby="add-provider-title"><div className="settings-topbar" onMouseDown={dragWindow}><div className="settings-brand settings-brand-top"><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong></div></div><div className="settings-window-actions"><button type="button" className="settings-window-button settings-minimize-button" onClick={() => void getCurrentWindow().minimize().catch(() => undefined)} aria-label="最小化" title="最小化"><Icon name="minimize" /></button><button type="button" className="settings-close-button" onClick={closeAddProvider} aria-label="关闭添加供应商" title="关闭添加供应商"><Icon name="close" /></button></div></div>
       <header className="add-provider-header" onMouseDown={dragWindow}><h1 id="add-provider-title">添加供应商</h1><button type="button" className="add-provider-close" onClick={closeAddProvider} aria-label="关闭添加供应商" title="关闭添加供应商"><Icon name="close" /></button></header>
       <div className="add-provider-content">
         <div className="add-provider-tabs" role="tablist" aria-label="供应商类型">{GENERIC_PROVIDERS.map((provider) => <button type="button" role="tab" aria-selected={provider.id === addProviderId} className={provider.id === addProviderId ? "is-active" : ""} key={provider.id} onClick={() => selectAddProvider(provider.id as GenericProviderId)}>{tabLabels[provider.id as GenericProviderId]}</button>)}</div>
@@ -1221,7 +1329,7 @@ function SettingsWindow() {
     return <main className="app-shell settings-window-shell"><section className="settings-add-provider-shell">{renderAddProviderPage()}</section></main>;
   }
 
-  return <main className="app-shell settings-window-shell"><section className={`settings-shell settings-shell-${isProviderPage ? "providers" : "single"}`}><div className="settings-topbar" onMouseDown={dragWindow}><div className="settings-brand settings-brand-top"><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong></div></div><button type="button" className="settings-close-button" onClick={() => void nativeInvoke("hide_settings_window")} aria-label="关闭设置" title="关闭设置"><Icon name="close" /></button></div><aside className="settings-nav-panel"><div className="settings-brand" onMouseDown={dragWindow}><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong><small>设置中心</small></div></div><nav className="settings-primary-nav" aria-label="设置分类"><button type="button" className={activeNavPage === "general" ? "is-active" : ""} onClick={() => switchSettingsPage("general")}><SettingsNavIcon name="general" />通用设置</button><button type="button" className={activeNavPage === "interface" ? "is-active" : ""} onClick={() => switchSettingsPage("interface")}><SettingsNavIcon name="interface" />界面设置</button><button type="button" className={activeNavPage === "providers" ? "is-active" : ""} onClick={() => switchSettingsPage("providers")}><SettingsNavIcon name="providers" />供应商</button><button type="button" className={activeNavPage === "about" ? "is-active" : ""} onClick={() => switchSettingsPage("about")}><SettingsNavIcon name="about" />关于</button></nav></aside>{isProviderPage && renderProviderColumn()}<section className="settings-main">{settingsPage === "connection" ? renderConnectionPage() : settingsPage === "general" ? renderCommonPage() : settingsPage === "interface" ? renderInterfacePage() : settingsPage === "about" ? renderAboutPage() : renderProviderDetails()}{notice && <p className="notice" role="status">{notice}</p>}</section></section></main>;
+  return <main className="app-shell settings-window-shell"><section className={`settings-shell settings-shell-${isProviderPage ? "providers" : "single"}`}><div className="settings-topbar" onMouseDown={dragWindow}><div className="settings-brand settings-brand-top"><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong></div></div><div className="settings-window-actions"><button type="button" className="settings-window-button settings-minimize-button" onClick={() => void getCurrentWindow().minimize().catch(() => undefined)} aria-label="最小化" title="最小化"><Icon name="minimize" /></button><button type="button" className="settings-close-button" onClick={() => void nativeInvoke("hide_settings_window")} aria-label="关闭设置" title="关闭设置"><Icon name="close" /></button></div></div><aside className="settings-nav-panel"><div className="settings-brand" onMouseDown={dragWindow}><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong><small>设置中心</small></div></div><nav className="settings-primary-nav" aria-label="设置分类"><button type="button" className={activeNavPage === "general" ? "is-active" : ""} onClick={() => switchSettingsPage("general")}><SettingsNavIcon name="general" />通用设置</button><button type="button" className={activeNavPage === "interface" ? "is-active" : ""} onClick={() => switchSettingsPage("interface")}><SettingsNavIcon name="interface" />界面设置</button><button type="button" className={activeNavPage === "providers" ? "is-active" : ""} onClick={() => switchSettingsPage("providers")}><SettingsNavIcon name="providers" />供应商</button><button type="button" className={activeNavPage === "about" ? "is-active" : ""} onClick={() => switchSettingsPage("about")}><SettingsNavIcon name="about" />关于</button></nav></aside>{isProviderPage && renderProviderColumn()}<section className="settings-main">{settingsPage === "connection" ? renderConnectionPage() : settingsPage === "general" ? renderCommonPage() : settingsPage === "interface" ? renderInterfacePage() : settingsPage === "about" ? renderAboutPage() : renderProviderDetails()}{notice && <p className="notice" role="status">{notice}</p>}</section></section></main>;
 }
 
 function App() {

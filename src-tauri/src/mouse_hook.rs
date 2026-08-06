@@ -199,6 +199,13 @@ fn clicked_float_at_event(float_window: HWND, point: POINT) -> bool {
     if unsafe { GetWindowRect(float_window, &mut rectangle) }.is_err() {
         return false;
     }
+    // The native window includes a small transparent buffer so the hover
+    // scale animation can grow without being clipped. Keep that buffer out
+    // of the actual floating-button hit target.
+    rectangle.left += crate::FLOAT_PADDING;
+    rectangle.top += crate::FLOAT_PADDING;
+    rectangle.right -= crate::FLOAT_PADDING;
+    rectangle.bottom -= crate::FLOAT_PADDING;
     point_inside_round_rect(point, rectangle)
 }
 

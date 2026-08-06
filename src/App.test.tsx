@@ -5,13 +5,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 let windowLabel = "main";
 const invokeMock = vi.hoisted(() => vi.fn());
 const startDraggingMock = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+const minimizeMock = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+const onFocusChangedMock = vi.hoisted(() => vi.fn().mockResolvedValue(() => {}));
+const cursorPositionMock = vi.hoisted(() => vi.fn().mockResolvedValue({ x: 0, y: 0 }));
 
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
   getCurrentWebviewWindow: () => ({ label: windowLabel }),
 }));
 
 vi.mock("@tauri-apps/api/window", () => ({
-  getCurrentWindow: () => ({ startDragging: startDraggingMock }),
+  getCurrentWindow: () => ({ startDragging: startDraggingMock, minimize: minimizeMock, onFocusChanged: onFocusChangedMock }),
+  cursorPosition: cursorPositionMock,
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
@@ -32,6 +36,8 @@ describe("App", () => {
     mockWindowLabel("main");
     invokeMock.mockReset();
     startDraggingMock.mockClear();
+    minimizeMock.mockClear();
+    onFocusChangedMock.mockClear();
   });
 
   it("routes the selection-float window to the translate-selection control", () => {
@@ -48,19 +54,33 @@ describe("App", () => {
     expect(screen.queryByText("快速翻译")).not.toBeInTheDocument();
   });
 
-  it("drags the main window from its title bar without intercepting window actions", () => {
+  it("starts dragging only after the title bar is moved", () => {
     render(<App />);
 
-    fireEvent.mouseDown(screen.getByRole("banner"));
+    const titlebar = screen.getByRole("banner");
 
+    fireEvent.mouseDown(titlebar, { button: 0, screenX: 100, screenY: 100 });
+    expect(startDraggingMock).not.toHaveBeenCalled();
+
+    fireEvent.mouseMove(window, { screenX: 105, screenY: 100 });
     expect(startDraggingMock).toHaveBeenCalledTimes(1);
+
+    fireEvent.mouseUp(window);
   });
 
   it("keeps settings out of the title bar", () => {
     render(<App />);
 
     expect(screen.queryByRole("button", { name: "设置" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "隐藏" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "关闭" })).toBeInTheDocument();
+  });
+
+  it("minimizes the translation window without hiding its taskbar entry", () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "最小化" }));
+
+    expect(minimizeMock).toHaveBeenCalledTimes(1);
   });
 
   it("opens the floating translation state by default and keeps quick translation behind its entry", () => {
@@ -91,12 +111,25 @@ describe("App", () => {
     expect(screen.queryByRole("heading", { name: "厂商接口配置" })).not.toBeInTheDocument();
   });
 
+  it("toggles the translation window pin from the title bar", () => {
+    render(<App />);
+
+    const pinButton = screen.getByRole("button", { name: "置顶" });
+    expect(pinButton).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(pinButton);
+
+    expect(screen.getByRole("button", { name: "取消置顶" })).toHaveAttribute("aria-pressed", "true");
+  });
+
   it("renders the multi-page settings window", () => {
     mockWindowLabel("settings");
     render(<App />);
 
     expect(screen.getByRole("heading", { name: "厂商接口配置" })).toBeInTheDocument();
     expect(screen.getAllByText("DeepSeek").length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: "最小化" }));
+    expect(minimizeMock).toHaveBeenCalledTimes(1);
     const apiKeyInput = screen.getByLabelText("API Key");
     expect(apiKeyInput).toHaveAttribute("type", "password");
     fireEvent.click(screen.getByRole("button", { name: "显示 API Key" }));
