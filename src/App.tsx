@@ -1,4 +1,4 @@
-import { type MouseEvent, useEffect, useRef, useState } from "react";
+import { type MouseEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -221,6 +221,31 @@ function isMostlyEnglish(value: string) {
   return latinCount > cjkCount;
 }
 
+function normalizeParagraphText(value: string) {
+  return value
+    .replace(/\r\n?/g, "\n")
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .reduce((joined, line) => {
+        if (!joined) return line;
+        const previous = joined.charAt(joined.length - 1);
+        const next = line.charAt(0);
+        const previousIsCjk = /[\u3400-\u9fff]/.test(previous);
+        const nextIsCjk = /[\u3400-\u9fff]/.test(next);
+        const needsSpace = !previousIsCjk
+          && !nextIsCjk
+          && previous !== "-"
+          && !/[([{"'“‘]/.test(previous)
+          && !/[,.!?;:)]}"'。，！？；：、）】》”’]/.test(next);
+        return `${joined}${needsSpace ? " " : ""}${line}`;
+      }, ""))
+    .filter(Boolean)
+    .join("\n\n");
+}
+
 function ProviderIcon({ provider }: { provider: { id: string; mark: string; accent: string } }) {
   if (provider.id === "xiaomi") {
     return <span className="provider-mark provider-mimo-mark" aria-label="Xiaomi MiMo" title="Xiaomi MiMo">MiMo</span>;
@@ -293,6 +318,61 @@ function Icon({ name }: { name: "menu" | "close" | "chevron" }) {
   };
 
   return <svg className={`ui-icon ui-icon-${name}`} viewBox="0 0 18 18" aria-hidden="true">{paths[name]}</svg>;
+}
+
+export function ExpandableText({ text, kind, textClassName = "" }: { text: string; kind: "source" | "translation"; textClassName?: string }) {
+  const textRef = useRef<HTMLParagraphElement>(null);
+  const measurementRef = useRef<HTMLParagraphElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [overflowing, setOverflowing] = useState(false);
+
+  useEffect(() => {
+    setExpanded(false);
+    setOverflowing(false);
+  }, [text]);
+
+  useLayoutEffect(() => {
+    if (expanded) return;
+    const element = textRef.current;
+    const measurement = measurementRef.current;
+    if (!element || !measurement) return;
+    const measure = () => {
+      const collapsedHeight = element.getBoundingClientRect().height;
+      const expandedHeight = measurement.getBoundingClientRect().height;
+      setOverflowing(expandedHeight > collapsedHeight + 1);
+    };
+    const frame = window.requestAnimationFrame(measure);
+    const resizeObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    resizeObserver?.observe(element);
+    resizeObserver?.observe(measurement);
+    window.addEventListener("resize", measure);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [expanded, text]);
+
+  const toggleExpanded = () => setExpanded((current) => !current);
+  const canExpand = overflowing;
+  const textLabel = kind === "source" ? "原文" : "译文";
+
+  return <div
+    className={`text-expandable ${kind}-expandable${expanded ? " is-expanded" : ""}${overflowing ? " is-overflowing" : ""}`}
+  >
+    <p ref={textRef} className={`${kind}${textClassName ? ` ${textClassName}` : ""}`}>{text}</p>
+    <p ref={measurementRef} className={`${kind} text-measure${textClassName ? ` ${textClassName}` : ""}`} aria-hidden="true">{text}</p>
+    {canExpand && <button
+      type="button"
+      className={`text-expand-button ${kind}-expand-button`}
+      aria-label={expanded ? `收起完整${textLabel}` : `展开完整${textLabel}`}
+      aria-expanded={expanded}
+      title={expanded ? `收起${textLabel}` : `展开完整${textLabel}`}
+      onClick={toggleExpanded}
+    >
+      <Icon name="chevron" />
+    </button>}
+  </div>;
 }
 
 function QuickTranslateIcon() {
@@ -661,8 +741,8 @@ function MainWindow() {
               </button>
               {isOpen && <div className="provider-body">
                 {provider.enabled && isActive ? <>
-                  <div className="text-line"><p className="source">{result.source}</p></div>
-                  <div className="text-line translation-line"><p className={`translation${isMostlyEnglish(result.translation) ? " translation-english" : ""}`}>{result.translation}</p></div>
+                  <div className="text-line"><ExpandableText kind="source" text={normalizeParagraphText(result.source)} /></div>
+                  <div className="text-line translation-line"><ExpandableText kind="translation" text={result.translation} textClassName={isMostlyEnglish(result.translation) ? "translation-english" : undefined} /></div>
                 </> : <div className="provider-placeholder"><span className="placeholder-dot" />{provider.summary}</div>}
               </div>}
             </article>;

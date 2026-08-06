@@ -19,7 +19,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() =
 
 Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
 
-import App from "./App";
+import App, { ExpandableText } from "./App";
 
 function mockWindowLabel(label: string) {
   windowLabel = label;
@@ -138,5 +138,33 @@ describe("App", () => {
 
     await waitFor(() => expect(button).toBeEnabled());
     expect(invokeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows an expand arrow when the source is taller than its two-line preview", async () => {
+    const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const height = this.classList.contains("text-measure") ? 120 : 44;
+      return {
+        x: 0,
+        y: 0,
+        width: 420,
+        height,
+        top: 0,
+        right: 420,
+        bottom: height,
+        left: 0,
+        toJSON: () => ({}),
+      } as DOMRect;
+    });
+
+    try {
+      render(<ExpandableText kind="source" text={"这是一段超过两行显示高度的原文内容。".repeat(8)} />);
+
+      const button = await screen.findByRole("button", { name: "展开完整原文" });
+      expect(button).toHaveAttribute("aria-expanded", "false");
+      fireEvent.click(button);
+      expect(button).toHaveAttribute("aria-expanded", "true");
+    } finally {
+      rectSpy.mockRestore();
+    }
   });
 });

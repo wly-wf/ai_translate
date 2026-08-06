@@ -33,6 +33,8 @@ const DEEPSEEK_URL: &str = "https://api.deepseek.com/chat/completions";
 const DEEPSEEK_MODEL: &str = "deepseek-v4-flash";
 const DEEPSEEK_THINKING_DISABLED: &str = "disabled";
 const FLOAT_SIZE: i32 = 28;
+const TRANSLATION_WINDOW_WIDTH: f64 = 520.0;
+const TRANSLATION_WINDOW_HEIGHT: f64 = 700.0;
 pub(crate) const FLOAT_CORNER_RADIUS: i32 = 10;
 
 static NEXT_TRANSLATION_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -595,6 +597,9 @@ pub fn hide_float(app: &AppHandle) -> Result<(), String> {
 fn show_translation_window(app: &AppHandle, open_quick_translate: bool) {
     match app.get_webview_window("main") {
         Some(window) => {
+            if let Err(lock_error) = lock_translation_window(&window) {
+                eprintln!("Translation window size lock failed: {lock_error}");
+            }
             if let Err(show_error) = window.show() {
                 eprintln!("Translation window show failed: {show_error}");
             }
@@ -908,6 +913,16 @@ fn position_translation_window(window: &WebviewWindow, placement: FloatPlacement
         .map_err(|error| error.to_string())
 }
 
+fn lock_translation_window(window: &WebviewWindow) -> Result<(), String> {
+    window
+        .set_size(Size::Logical(LogicalSize::new(
+            TRANSLATION_WINDOW_WIDTH,
+            TRANSLATION_WINDOW_HEIGHT,
+        )))
+        .map_err(|error| error.to_string())?;
+    window.set_resizable(false).map_err(|error| error.to_string())
+}
+
 async fn translate_and_display(
     app: AppHandle,
     text: String,
@@ -925,6 +940,7 @@ async fn translate_and_display(
         request_id,
     };
     let window = app.get_webview_window("main").ok_or_else(|| "未找到结果窗口。".to_string())?;
+    lock_translation_window(&window)?;
     if let Some(placement) = float_placement {
         position_translation_window(&window, placement)?;
     }
