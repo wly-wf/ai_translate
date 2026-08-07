@@ -8,13 +8,15 @@ import { SelectionFloat } from "./SelectionFloat";
 import appIcon from "../src-tauri/icons/tray-icon.svg";
 import "./App.css";
 
-type ProviderId = "deepseek" | "openai" | "anthropic" | "gemini";
 type SettingsProviderId = "deepseek" | "xiaomi" | "qwen" | "zhipu" | "moonshot" | "openai" | "google" | "anthropic";
+type ProviderId = SettingsProviderId;
 type GenericProviderId = "openai" | "google" | "anthropic";
 type SettingsPage = "providers" | "generic" | "connection" | "general" | "interface" | "about";
 type ApiProtocol = "openai" | "google" | "anthropic";
-type Translation = { source: string; translation: string; requestId?: number; providerId?: ProviderId };
+type ProviderTranslationResult = { providerId: ProviderId; model: string; translation?: string | null; error?: string | null };
+type Translation = { source: string; results: ProviderTranslationResult[]; requestId?: number };
 type TranslationError = { requestId: number; message: string };
+type ActiveProviderChanged = { providerId: ProviderId; model: string };
 type UserPreferences = { autoSelection: boolean; keepOnTop: boolean };
 type TitlebarDragState = {
   startX: number;
@@ -66,7 +68,7 @@ type ConnectionState = {
 const PROVIDER_ICONS: Partial<Record<ProviderId, SimpleIcon>> = {
   deepseek: siDeepseek,
   anthropic: siAnthropic,
-  gemini: siGooglegemini,
+  google: siGooglegemini,
 };
 
 const SETTINGS_PROVIDER_ICONS: Partial<Record<SettingsProviderId, SimpleIcon>> = {
@@ -175,51 +177,15 @@ function createProviderDrafts(): Record<SettingsProviderId, ProviderDraft> {
   }])) as Record<SettingsProviderId, ProviderDraft>;
 }
 
-// Add a provider here when its native request adapter is ready. The result
-// window is intentionally driven by this registry instead of vendor names.
-const TRANSLATION_PROVIDERS: TranslationProvider[] = [
-  {
-    id: "deepseek",
-    vendor: "DeepSeek",
-    model: "deepseek-v4-flash",
-    mark: "D",
-    accent: "#16a394",
-    enabled: true,
-    summary: "速度优先，适合日常取词和技术文本。",
-  },
-  {
-    id: "openai",
-    vendor: "OpenAI",
-    model: "GPT-4.1 mini",
-    mark: "O",
-    accent: "#4c6fff",
-    enabled: false,
-    summary: "待接入 OpenAI 接口。",
-  },
-  {
-    id: "anthropic",
-    vendor: "Anthropic",
-    model: "Claude Sonnet",
-    mark: "A",
-    accent: "#d27b52",
-    enabled: false,
-    summary: "待接入 Anthropic 接口。",
-  },
-  {
-    id: "gemini",
-    vendor: "Google",
-    model: "Gemini Flash",
-    mark: "G",
-    accent: "#8d68db",
-    enabled: false,
-    summary: "待接入 Google Gemini 接口。",
-  },
-];
+const TRANSLATION_PROVIDERS: TranslationProvider[] = ALL_SETTINGS_PROVIDERS.map((provider) => ({
+  ...provider,
+  enabled: true,
+}));
 const AVAILABLE_TRANSLATION_PROVIDERS = TRANSLATION_PROVIDERS.filter((provider) => provider.enabled);
 
 const DEFAULT_PROVIDER_ID: ProviderId = "deepseek";
 const DEFAULT_USER_PREFERENCES: UserPreferences = { autoSelection: true, keepOnTop: false };
-const isTauriDesktop = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+const isTauriDesktop = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 function isMostlyEnglish(value: string) {
   const latinCount = value.match(/[A-Za-z]/g)?.length ?? 0;
@@ -263,7 +229,7 @@ function ProviderIcon({ provider }: { provider: { id: string; mark: string; acce
 }
 
 async function nativeInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  if (!isTauriDesktop) {
+  if (!isTauriDesktop()) {
     throw new Error("当前页面运行在普通浏览器中。请关闭此页面，并使用 `npm.cmd run tauri dev` 打开的 AI Translate 桌面窗口。");
   }
   return invoke<T>(command, args);
@@ -276,7 +242,7 @@ function useUserPreferences() {
   const saveChain = useRef<Promise<unknown>>(Promise.resolve());
 
   useEffect(() => {
-    if (!isTauriDesktop) {
+    if (!isTauriDesktop()) {
       setLoaded(true);
       return;
     }
@@ -296,7 +262,7 @@ function useUserPreferences() {
   }, []);
 
   useEffect(() => {
-    if (!isTauriDesktop || !loaded) return;
+    if (!isTauriDesktop() || !loaded) return;
     let cancelled = false;
     saveChain.current = saveChain.current
       .catch(() => undefined)
@@ -432,8 +398,12 @@ function MainWindow() {
   const [showApiKey, setShowApiKey] = useState(false);
   const { autoSelection, keepOnTop, setAutoSelection, setKeepOnTop, preferencesError } = useUserPreferences();
   const [hasApiKey, setHasApiKey] = useState(false);
+  const [activeProviderId, setActiveProviderId] = useState<ProviderId>(DEFAULT_PROVIDER_ID);
+  const [activeProviderModel, setActiveProviderModel] = useState(SETTINGS_PROVIDERS[0].model);
+  const [enabledProviderIds, setEnabledProviderIds] = useState<ProviderId[]>([DEFAULT_PROVIDER_ID]);
+  const [enabledProviderModels, setEnabledProviderModels] = useState<Partial<Record<ProviderId, string>>>({ deepseek: SETTINGS_PROVIDERS[0].model });
   const [loading, setLoading] = useState(false);
-  const [expandedProviderId, setExpandedProviderId] = useState<ProviderId | null>(DEFAULT_PROVIDER_ID);
+  const [expandedProviderIds, setExpandedProviderIds] = useState<ProviderId[]>([DEFAULT_PROVIDER_ID]);
   const [showQuickTranslate, setShowQuickTranslate] = useState(false);
   const [notice, setNotice] = useState("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -444,7 +414,7 @@ function MainWindow() {
   const focusLossTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
-    if (!isTauriDesktop) return;
+    if (!isTauriDesktop()) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
     const windowHandle = getCurrentWindow();
@@ -471,7 +441,7 @@ function MainWindow() {
               && cursor.x < position.x + size.width
               && cursor.y >= position.y
               && cursor.y < position.y + size.height;
-            if (!insideWindow) void windowHandle.minimize().catch(() => undefined);
+            if (!insideWindow) void nativeInvoke<void>("minimize_window").catch(() => undefined);
           })
           .catch(() => undefined);
       }, Math.max(250, activationGraceUntilRef.current - Date.now()));
@@ -480,6 +450,12 @@ function MainWindow() {
       if (focused) {
         activationGraceUntilRef.current = Date.now() + 400;
         clearFocusLossTimer();
+        void nativeInvoke<Translation | null>("get_latest_translation")
+          .then((snapshot) => {
+            if (!snapshot || (snapshot.requestId ?? 0) <= latestRequestId.current) return;
+            applyTranslationSnapshot(snapshot);
+          })
+          .catch(() => undefined);
         return;
       }
       if (!keepOnTop) {
@@ -504,6 +480,34 @@ function MainWindow() {
     if (requestId !== undefined && requestId < latestRequestId.current) return false;
     if (requestId !== undefined) latestRequestId.current = requestId;
     return true;
+  }
+
+  function translationIsPending(snapshot: Translation) {
+    return snapshot.results.length > 0
+      && snapshot.results.some((item) => !item.translation && !item.error);
+  }
+
+  function applyTranslationSnapshot(snapshot: Translation) {
+    if (!acceptRequest(snapshot.requestId)) return;
+    const providerId = snapshot.results[0]?.providerId ?? DEFAULT_PROVIDER_ID;
+    setActiveProviderId(providerId);
+    if (snapshot.results[0]?.model) setActiveProviderModel(snapshot.results[0].model);
+    setResult(snapshot);
+    setExpandedProviderIds(snapshot.results.map((item) => item.providerId));
+    setLoading(translationIsPending(snapshot));
+    setNotice("");
+    setShowSettings(false);
+    setShowQuickTranslate(false);
+  }
+
+  async function loadEnabledProviders(providerIds: ProviderId[]) {
+    setEnabledProviderIds(providerIds);
+    const entries = await Promise.all(providerIds.map(async (providerId) => {
+      const config = await nativeInvoke<ProviderConfigResponse | null>("get_provider_config", { provider: providerId });
+      return [providerId, config?.model] as const;
+    }));
+    setEnabledProviderModels(Object.fromEntries(entries.filter((entry): entry is readonly [ProviderId, string] => Boolean(entry[1]))));
+    setHasApiKey(providerIds.length > 0);
   }
 
   function finishTitlebarDrag() {
@@ -542,23 +546,25 @@ function MainWindow() {
   }
 
   useEffect(() => {
-    if (!isTauriDesktop) {
+    if (!isTauriDesktop()) {
       setNotice("当前是普通浏览器预览，无法保存 API Key 或调用翻译。请使用 Tauri 桌面窗口。");
       return;
     }
-    void nativeInvoke<boolean>("has_api_key")
-      .then(setHasApiKey)
+    void nativeInvoke<ProviderId[]>("get_enabled_providers")
+      .then((providerIds) => {
+        const enabled = providerIds ?? [];
+        if (enabled[0]) setActiveProviderId(enabled[0]);
+        setExpandedProviderIds(enabled);
+        return loadEnabledProviders(enabled);
+      })
       .catch((error) => setNotice(String(error)));
-    const resultListener = listen<Translation>("translation-result", (event) => {
-      if (!acceptRequest(event.payload.requestId)) return;
+    const startedListener = listen<Translation>("translation-started", (event) => {
       activationGraceUntilRef.current = Date.now() + 400;
-      const providerId = event.payload.providerId ?? DEFAULT_PROVIDER_ID;
-      setResult({ ...event.payload, providerId });
-      setExpandedProviderId(providerId);
-      setLoading(false);
-      setNotice("");
-      setShowSettings(false);
-      setShowQuickTranslate(false);
+      applyTranslationSnapshot(event.payload);
+    });
+    const resultListener = listen<Translation>("translation-result", (event) => {
+      activationGraceUntilRef.current = Date.now() + 400;
+      applyTranslationSnapshot(event.payload);
     });
     const errorListener = listen<TranslationError>("translation-error", (event) => {
       if (!acceptRequest(event.payload.requestId)) return;
@@ -579,14 +585,48 @@ function MainWindow() {
       setShowQuickTranslate(true);
       setNotice("");
     });
+    const activeProviderListener = listen<ActiveProviderChanged>("active-provider-changed", (event) => {
+      setActiveProviderId(event.payload.providerId);
+      setActiveProviderModel(event.payload.model);
+      setExpandedProviderIds([event.payload.providerId]);
+      setHasApiKey(true);
+    });
+    const enabledProvidersListener = listen<ProviderId[]>("enabled-providers-changed", (event) => {
+      const enabled = event.payload ?? [];
+      if (enabled[0]) setActiveProviderId(enabled[0]);
+      setExpandedProviderIds(enabled);
+      void loadEnabledProviders(enabled).catch((error) => setNotice(String(error)));
+    });
+    void nativeInvoke<Translation | null>("get_latest_translation")
+      .then((snapshot) => {
+        if (snapshot) applyTranslationSnapshot(snapshot);
+      })
+      .catch(() => undefined);
     return () => {
+      void startedListener.then((remove) => remove());
       void resultListener.then((remove) => remove());
       void errorListener.then((remove) => remove());
       void settingsListener.then((remove) => remove());
       void windowListener.then((remove) => remove());
       void quickTranslateListener.then((remove) => remove());
+      void activeProviderListener.then((remove) => remove());
+      void enabledProvidersListener.then((remove) => remove());
     };
   }, []);
+
+  useEffect(() => {
+    if (!isTauriDesktop() || !result || !translationIsPending(result)) return;
+    const timer = window.setInterval(() => {
+      void nativeInvoke<Translation | null>("get_latest_translation")
+        .then((snapshot) => {
+          if (!snapshot || snapshot.requestId !== result.requestId
+            || JSON.stringify(snapshot.results) === JSON.stringify(result.results)) return;
+          applyTranslationSnapshot(snapshot);
+        })
+        .catch(() => undefined);
+    }, 150);
+    return () => window.clearInterval(timer);
+  }, [result]);
 
   useEffect(() => {
     if (preferencesError) setNotice(preferencesError);
@@ -598,11 +638,15 @@ function MainWindow() {
     latestTranslationAttempt.current = attempt;
     setLoading(true);
     setNotice("");
-    setExpandedProviderId(DEFAULT_PROVIDER_ID);
+    setExpandedProviderIds(enabledProviderIds);
     try {
       const translated = await nativeInvoke<Translation>("translate_text", { text });
       if (attempt !== latestTranslationAttempt.current || !acceptRequest(translated.requestId)) return;
-      setResult({ ...translated, providerId: DEFAULT_PROVIDER_ID });
+      const providerId = translated.results[0]?.providerId ?? activeProviderId;
+      setActiveProviderId(providerId);
+      if (translated.results[0]?.model) setActiveProviderModel(translated.results[0].model);
+      setExpandedProviderIds(translated.results.map((item) => item.providerId));
+      setResult(translated);
       setShowQuickTranslate(false);
     } catch (error) {
       if (attempt === latestTranslationAttempt.current) setNotice(String(error));
@@ -691,7 +735,8 @@ function MainWindow() {
     openQuickTranslate();
   }
 
-  const activeProvider = AVAILABLE_TRANSLATION_PROVIDERS.find((provider) => provider.id === (result?.providerId ?? DEFAULT_PROVIDER_ID)) ?? AVAILABLE_TRANSLATION_PROVIDERS[0];
+  const activeProviderDefinition = AVAILABLE_TRANSLATION_PROVIDERS.find((provider) => provider.id === activeProviderId) ?? AVAILABLE_TRANSLATION_PROVIDERS[0];
+  const activeProvider = { ...activeProviderDefinition, model: enabledProviderModels[activeProviderId] ?? activeProviderModel ?? activeProviderDefinition.model };
   const selectedSettingsProvider = ALL_SETTINGS_PROVIDERS.find((provider) => provider.id === selectedSettingsProviderId) ?? SETTINGS_PROVIDERS[0];
   const selectedDraft = providerDrafts[selectedSettingsProvider.id];
   const settingsCollection = settingsPage === "generic" ? GENERIC_PROVIDERS : SETTINGS_PROVIDERS;
@@ -803,7 +848,7 @@ function MainWindow() {
         <button className="titlebar-icon-button" onClick={() => void nativeInvoke("open_settings_window").catch((error) => setNotice(String(error)))} aria-label="更多操作">
           <Icon name="menu" />
         </button>
-        <button className="titlebar-icon-button titlebar-minimize" type="button" onClick={() => void getCurrentWindow().minimize().catch(() => undefined)} aria-label="最小化" title="最小化">
+        <button className="titlebar-icon-button titlebar-minimize" type="button" onClick={() => void nativeInvoke<void>("minimize_window").catch(() => undefined)} aria-label="最小化" title="最小化">
           <Icon name="minimize" />
         </button>
         <button className="titlebar-icon-button titlebar-close" type="button" onClick={() => void nativeInvoke("hide_window")} aria-label="关闭" title="关闭翻译窗口">
@@ -830,28 +875,29 @@ function MainWindow() {
     </section> : <section className="content">
       {showQuickTranslate ? <div className="quick-translate-page">
         <div className="quick-translate-heading"><p className="eyebrow">快速翻译</p></div>
-        {!hasApiKey && <div className="warning"><span className="warning-icon" aria-hidden="true">!</span><p>请先在系统托盘图标的右键菜单中设置 DeepSeek API Key。</p></div>}
-        <div className="model-strip"><ProviderIcon provider={activeProvider} /><span className="quick-provider-copy"><strong>{activeProvider.model}/{activeProvider.vendor}</strong></span></div>
+        {!hasApiKey && <div className="warning"><span className="warning-icon" aria-hidden="true">!</span><p>请先在设置中配置并选择一个翻译模型。</p></div>}
+        <div className="model-strip"><ProviderIcon provider={activeProvider} /><span className="quick-provider-copy"><strong>{activeProvider.model}/{activeProvider.vendor}{enabledProviderIds.length > 1 ? ` 等 ${enabledProviderIds.length} 个模型` : ""}</strong></span></div>
         <div className="input-card"><div className="input-head"><label className="field-label" htmlFor="translation-input">输入文本</label><span className="character-count">{text.length} 字符</span></div>
           <textarea ref={inputRef} id="translation-input" value={text} onChange={(event) => setText(event.target.value)} placeholder="输入要翻译的文字…" />
         </div>
         <div className="quick-translate-action"><button className="primary" disabled={loading || !text.trim()} onClick={() => void translate()}>{loading ? "翻译中…" : "翻译"}</button></div>
       </div> : result ? <div className="translation-result">
         <div className="provider-list">
-          {AVAILABLE_TRANSLATION_PROVIDERS.map((provider) => {
-            const isOpen = expandedProviderId === provider.id;
-            const isActive = provider.id === activeProvider.id;
-            return <article className={`provider-card ${isOpen ? "is-open" : "is-closed"} ${isActive ? "is-active" : ""}`} key={provider.id}>
-              <button className="provider-header" onClick={() => setExpandedProviderId(isOpen ? null : provider.id)} aria-expanded={isOpen}>
+          {result.results.map((providerResult) => {
+            const providerDefinition = AVAILABLE_TRANSLATION_PROVIDERS.find((provider) => provider.id === providerResult.providerId) ?? activeProvider;
+            const provider = { ...providerDefinition, model: providerResult.model || providerDefinition.model };
+            const isOpen = expandedProviderIds.includes(provider.id);
+            return <article className={`provider-card ${isOpen ? "is-open" : "is-closed"} is-active`} key={provider.id}>
+              <button className="provider-header" onClick={() => setExpandedProviderIds((ids) => isOpen ? ids.filter((id) => id !== provider.id) : [...ids, provider.id])} aria-expanded={isOpen}>
                 <ProviderIcon provider={provider} />
                 <span className="provider-heading"><strong>{provider.model}/{provider.vendor}</strong></span>
                 <Icon name="chevron" />
               </button>
               {isOpen && <div className="provider-body">
-                {provider.enabled && isActive ? <>
+                {providerResult.translation ? <>
                   <div className="text-line"><ExpandableText kind="source" text={normalizeParagraphText(result.source)} /></div>
-                  <div className="text-line translation-line"><ExpandableText kind="translation" text={result.translation} textClassName={isMostlyEnglish(result.translation) ? "translation-english" : undefined} /></div>
-                </> : <div className="provider-placeholder"><span className="placeholder-dot" />{provider.summary}</div>}
+                  <div className="text-line translation-line"><ExpandableText kind="translation" text={providerResult.translation} textClassName={isMostlyEnglish(providerResult.translation) ? "translation-english" : undefined} /></div>
+                </> : <div className="provider-placeholder"><span className="placeholder-dot" />{providerResult.error ?? (loading ? "翻译中…" : "翻译失败")}</div>}
               </div>}
             </article>;
           })}
@@ -891,7 +937,7 @@ function LegacySettingsWindow() {
   });
 
   useEffect(() => {
-    if (!isTauriDesktop) return;
+    if (!isTauriDesktop()) return;
     let cancelled = false;
     void nativeInvoke<ProviderConfigResponse | null>("get_provider_config", { provider: selectedSettingsProviderId })
       .then((config) => {
@@ -1069,16 +1115,26 @@ function SettingsWindow() {
   const [notice, setNotice] = useState("");
   const [showApiKey, setShowApiKey] = useState(false);
   const [providerSearch, setProviderSearch] = useState("");
-  const [enabledProviders, setEnabledProviders] = useState<Partial<Record<SettingsProviderId, boolean>>>({ deepseek: true });
+  const [enabledProviders, setEnabledProviders] = useState<Partial<Record<SettingsProviderId, boolean>>>({});
+  const [enabledProviderIds, setEnabledProviderIds] = useState<SettingsProviderId[]>([]);
   const [addedGenericProviders, setAddedGenericProviders] = useState<GenericProviderId[]>([]);
   const [isAddingProvider, setIsAddingProvider] = useState(false);
   const [addProviderId, setAddProviderId] = useState<GenericProviderId>("openai");
   const [addProviderName, setAddProviderName] = useState(GENERIC_PROVIDERS[0].vendor);
   const [useResponsesApi, setUseResponsesApi] = useState(false);
+  const [fetchedModels, setFetchedModels] = useState<Partial<Record<SettingsProviderId, string[]>>>({});
+  const [fetchingProviderId, setFetchingProviderId] = useState<SettingsProviderId | null>(null);
 
   useEffect(() => {
     if (preferencesError) setNotice(preferencesError);
   }, [preferencesError]);
+
+  useEffect(() => {
+    if (!isTauriDesktop()) return;
+    void nativeInvoke<SettingsProviderId[]>("get_enabled_providers")
+      .then((providers) => setEnabledProviderIds(providers ?? []))
+      .catch((error) => setNotice(String(error)));
+  }, []);
 
   const selectedSettingsProvider = ALL_SETTINGS_PROVIDERS.find((provider) => provider.id === selectedSettingsProviderId) ?? SETTINGS_PROVIDERS[0];
   const selectedDraft = providerDrafts[selectedSettingsProvider.id];
@@ -1094,7 +1150,7 @@ function SettingsWindow() {
   const activeNavPage = isProviderPage ? "providers" : settingsPage;
 
   useEffect(() => {
-    if (!isTauriDesktop) return;
+    if (!isTauriDesktop()) return;
     let cancelled = false;
     void Promise.all(GENERIC_PROVIDERS.map(async (provider) => {
       try {
@@ -1118,7 +1174,7 @@ function SettingsWindow() {
   }, []);
 
   useEffect(() => {
-    if (!isTauriDesktop) return;
+    if (!isTauriDesktop()) return;
     let cancelled = false;
     void nativeInvoke<ProviderConfigResponse | null>("get_provider_config", { provider: selectedSettingsProviderId })
       .then((config) => {
@@ -1193,18 +1249,23 @@ function SettingsWindow() {
   async function addGenericProvider() {
     const provider = addProviderDefinition;
     const draft = providerDrafts[provider.id];
+    const shouldEnable = enabledProviders[provider.id] ?? true;
     if (!draft.apiKey.trim() || !draft.baseUrl.trim() || !draft.model.trim()) {
       setNotice("请填写 API Key、Base URL 和模型名称。");
       return;
     }
     try {
       await nativeInvoke("save_provider_config", { provider: provider.id, apiKey: draft.apiKey, baseUrl: draft.baseUrl, model: draft.model });
+      if (shouldEnable) {
+        const providers = await nativeInvoke<SettingsProviderId[]>("set_provider_enabled", { provider: provider.id, enabled: true });
+        setEnabledProviderIds(providers);
+      }
       setAddedGenericProviders((providers) => providers.includes(provider.id as GenericProviderId) ? providers : [...providers, provider.id as GenericProviderId]);
       setSelectedSettingsProviderId(provider.id);
-      setEnabledProviders((providers) => ({ ...providers, [provider.id]: true }));
+      setEnabledProviders((providers) => ({ ...providers, [provider.id]: shouldEnable }));
       setProviderDrafts((drafts) => ({ ...drafts, [provider.id]: { ...drafts[provider.id], saved: true } }));
       setIsAddingProvider(false);
-      setNotice(`${addProviderName || provider.vendor} 已添加并启用。`);
+      setNotice(`${addProviderName || provider.vendor} 已添加${shouldEnable ? "并加入翻译" : "。"}`);
     } catch (error) {
       setNotice(String(error));
     }
@@ -1244,6 +1305,32 @@ function SettingsWindow() {
     }
   }
 
+  async function setSelectedProviderEnabled(enabled: boolean) {
+    const provider = selectedSettingsProvider;
+    const draft = providerDrafts[provider.id];
+    try {
+      if (enabled) {
+        if ((!draft.saved && !draft.apiKey.trim()) || !draft.baseUrl.trim() || !draft.model.trim()) {
+          setNotice("请先填写 API Key、URL 和模型名称。");
+          return;
+        }
+        await nativeInvoke("save_provider_config", {
+          provider: provider.id,
+          apiKey: draft.apiKey,
+          baseUrl: draft.baseUrl,
+          model: draft.model,
+        });
+        setProviderDrafts((drafts) => ({ ...drafts, [provider.id]: { ...drafts[provider.id], saved: true } }));
+        setEnabledProviders((providers) => ({ ...providers, [provider.id]: true }));
+      }
+      const providers = await nativeInvoke<SettingsProviderId[]>("set_provider_enabled", { provider: provider.id, enabled });
+      setEnabledProviderIds(providers);
+      setNotice("");
+    } catch (error) {
+      setNotice(String(error));
+    }
+  }
+
   async function testConnection() {
     const provider = selectedSettingsProvider;
     const draft = providerDrafts[provider.id];
@@ -1258,23 +1345,48 @@ function SettingsWindow() {
     }
   }
 
+  async function fetchProviderModels() {
+    const provider = selectedSettingsProvider;
+    const draft = providerDrafts[provider.id];
+    if (!draft.baseUrl.trim()) {
+      setNotice("请先填写 URL。");
+      return;
+    }
+    setFetchingProviderId(provider.id);
+    setNotice("");
+    try {
+      const models = await nativeInvoke<string[]>("fetch_provider_models", {
+        provider: provider.id,
+        apiKey: draft.apiKey,
+        baseUrl: draft.baseUrl,
+      });
+      setFetchedModels((current) => ({ ...current, [provider.id]: models }));
+      setNotice(`已获取 ${models.length} 个 ${provider.vendor} 模型，点击列表即可选择。`);
+    } catch (error) {
+      setNotice(String(error));
+    } finally {
+      setFetchingProviderId(null);
+    }
+  }
+
   function renderProviderDetails() {
     const apiPath = selectedSettingsProvider.protocol === "google" ? "/models/{model}:generateContent" : selectedSettingsProvider.protocol === "anthropic" ? "/messages" : "/chat/completions";
-    const isEnabled = enabledProviders[selectedSettingsProvider.id] ?? selectedDraft.saved;
+    const isEnabledForTranslation = enabledProviderIds.includes(selectedSettingsProvider.id);
+    const availableModels = fetchedModels[selectedSettingsProvider.id] ?? [];
+    const isFetchingModels = fetchingProviderId === selectedSettingsProvider.id;
     return <div className="provider-detail-page">
       <h1 className="sr-only">{settingsPage === "generic" ? "通用接口配置" : "厂商接口配置"}</h1>
       <div className="provider-detail-intro">
         <div><h2>{selectedSettingsProvider.vendor}</h2></div>
-        <label className="settings-switch" title={isEnabled ? "停用当前接口" : "启用当前接口"}><input type="checkbox" checked={isEnabled} onChange={(event) => setEnabledProviders((providers) => ({ ...providers, [selectedSettingsProvider.id]: event.target.checked }))} /><span aria-hidden="true" /></label>
+        <label className="settings-switch" title={isEnabledForTranslation ? "从翻译中移除" : "加入翻译"}><input type="checkbox" checked={isEnabledForTranslation} onChange={(event) => void setSelectedProviderEnabled(event.target.checked)} aria-label="启用此翻译模型" /><span aria-hidden="true" /></label>
       </div>
       <section className="settings-form-card provider-config-card">
-        <div className="settings-field-group"><div className="settings-label-row"><label className="field-label" htmlFor="provider-api-key">API Key</label><button className="inline-test" type="button" onClick={() => void testConnection()} disabled={connectionState.status === "testing"}><span aria-hidden="true">♡</span>{connectionState.status === "testing" ? "测试中" : "测试连接"}</button></div><div className="api-key-input-wrap"><input id="provider-api-key" value={selectedDraft.apiKey} onChange={(event) => updateSelectedDraft("apiKey", event.target.value)} type={showApiKey ? "text" : "password"} placeholder={selectedDraft.saved ? "已保存，留空以保留当前 Key" : "粘贴 API Key"} /><button type="button" className="api-key-toggle" onClick={() => setShowApiKey((visible) => !visible)} aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"} title={showApiKey ? "隐藏 API Key" : "显示 API Key"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-5.5 9.5-5.5 9.5 5.5 9.5 5.5-3.4 5.5-9.5 5.5S2.5 12 2.5 12Z" /><circle cx="12" cy="12" r="2.5" /></svg></button></div></div>
+        <div className="settings-field-group"><div className="settings-label-row"><label className="field-label" htmlFor="provider-api-key">API Key</label><div className="connection-test-cluster">{connectionState.providerId === selectedSettingsProvider.id && connectionState.status !== "idle" && <span className={`connection-inline-result ${connectionState.status}`} role="status" title={connectionState.message}>{connectionState.message}</span>}<button className="inline-test" type="button" onClick={() => void testConnection()} disabled={connectionState.status === "testing"}><span aria-hidden="true">♡</span>{connectionState.status === "testing" ? "测试中" : "测试连接"}</button></div></div><div className="api-key-input-wrap"><input id="provider-api-key" value={selectedDraft.apiKey} onChange={(event) => updateSelectedDraft("apiKey", event.target.value)} type={showApiKey ? "text" : "password"} placeholder={selectedDraft.saved ? "已保存，留空以保留当前 Key" : "粘贴 API Key"} /><button type="button" className="api-key-toggle" onClick={() => setShowApiKey((visible) => !visible)} aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"} title={showApiKey ? "隐藏 API Key" : "显示 API Key"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-5.5 9.5-5.5 9.5 5.5 9.5 5.5-3.4 5.5-9.5 5.5S2.5 12 2.5 12Z" /><circle cx="12" cy="12" r="2.5" /></svg></button></div></div>
         <div className="settings-field-group"><label className="field-label" htmlFor="provider-base-url">URL</label><input id="provider-base-url" value={selectedDraft.baseUrl} onChange={(event) => updateSelectedDraft("baseUrl", event.target.value)} spellCheck={false} /></div>
         <div className="settings-field-group"><label className="field-label" htmlFor="provider-api-path">API 路径</label><input id="provider-api-path" value={apiPath} readOnly spellCheck={false} /></div>
-        <div className="model-section provider-model-section"><div className="model-section-header"><div className="model-section-title"><h3>模型</h3><span>{selectedDraft.model ? "1" : "0"}</span></div><div className="model-toolbar"><button type="button" aria-label="添加模型" title="添加模型"><ModelAddIcon /></button><button className="fetch-models" type="button" onClick={() => setNotice("模型列表刷新功能暂未接入，当前使用手动填写的模型。")}><ModelRefreshIcon /><span>获取</span></button></div></div><div className="model-group"><div className="model-group-heading"><strong>{selectedSettingsProvider.vendor}</strong></div><div className="model-row"><ProviderIcon provider={selectedSettingsProvider} /><label className="model-input-label" htmlFor="provider-model"><span className="sr-only">模型名称</span><input id="provider-model" value={selectedDraft.model} onChange={(event) => updateSelectedDraft("model", event.target.value)} spellCheck={false} /></label><button type="button" className="model-remove-button" onClick={() => updateSelectedDraft("model", "")} aria-label="移除模型" title="移除模型">−</button></div></div></div>
+        <div className="model-section provider-model-section"><div className="model-section-header"><div className="model-section-title"><h3>模型</h3><span>{availableModels.length || (selectedDraft.model ? 1 : 0)}</span></div><div className="model-toolbar"><button type="button" aria-label="添加模型" title="添加模型"><ModelAddIcon /></button><button className="fetch-models" type="button" onClick={() => void fetchProviderModels()} disabled={isFetchingModels}><ModelRefreshIcon /><span>{isFetchingModels ? "获取中…" : "获取"}</span></button></div></div><div className="model-group"><div className="model-group-heading"><strong>{selectedSettingsProvider.vendor}</strong></div><div className="model-row"><ProviderIcon provider={selectedSettingsProvider} /><label className="model-input-label" htmlFor="provider-model"><span className="sr-only">模型名称</span><input id="provider-model" value={selectedDraft.model} onChange={(event) => updateSelectedDraft("model", event.target.value)} spellCheck={false} /></label><button type="button" className="model-remove-button" onClick={() => updateSelectedDraft("model", "")} aria-label="移除模型" title="移除模型">−</button></div>{availableModels.length > 0 && <div className="fetched-model-list" role="listbox" aria-label={`${selectedSettingsProvider.vendor} 可用模型`}>{availableModels.map((model) => <button type="button" role="option" aria-selected={model === selectedDraft.model} className={model === selectedDraft.model ? "is-selected" : ""} key={model} onClick={() => updateSelectedDraft("model", model)}><span>{model}</span>{model === selectedDraft.model && <span aria-hidden="true">✓</span>}</button>)}</div>}</div></div>
       </section>
-      <div className="provider-detail-footer"><div className="action-row settings-actions"><button className="primary" onClick={() => void saveProviderConfig()}>保存配置</button></div></div>
-      {connectionState.providerId === selectedSettingsProvider.id && connectionState.status !== "idle" && <p className={`connection-result ${connectionState.status}`} role="status">{connectionState.message}</p>}
+      <div className="provider-detail-footer"><div className="action-row settings-actions"><button className="primary" onClick={() => void saveProviderConfig()}>保存配置</button><button className="secondary" onClick={() => void setSelectedProviderEnabled(!isEnabledForTranslation)}>{isEnabledForTranslation ? "从翻译中移除" : "加入翻译"}</button></div></div>
     </div>;
   }
 
@@ -1298,7 +1410,7 @@ function SettingsWindow() {
     const apiPath = addProviderDefinition.protocol === "google" ? "/models/{model}:generateContent" : addProviderDefinition.protocol === "anthropic" ? "/messages" : useResponsesApi ? "/responses" : "/chat/completions";
     const draft = providerDrafts[addProviderId];
     const tabLabels: Record<GenericProviderId, string> = { openai: "OpenAI", google: "Google", anthropic: "Claude" };
-    return <section className="settings-add-provider-page" aria-labelledby="add-provider-title"><div className="settings-topbar" onMouseDown={dragWindow}><div className="settings-brand settings-brand-top"><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong></div></div><div className="settings-window-actions"><button type="button" className="settings-window-button settings-minimize-button" onClick={() => void getCurrentWindow().minimize().catch(() => undefined)} aria-label="最小化" title="最小化"><Icon name="minimize" /></button><button type="button" className="settings-close-button" onClick={closeAddProvider} aria-label="关闭添加供应商" title="关闭添加供应商"><Icon name="close" /></button></div></div>
+    return <section className="settings-add-provider-page" aria-labelledby="add-provider-title"><div className="settings-topbar" onMouseDown={dragWindow}><div className="settings-brand settings-brand-top"><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong></div></div><div className="settings-window-actions"><button type="button" className="settings-window-button settings-minimize-button" onClick={() => void nativeInvoke<void>("minimize_window").catch(() => undefined)} aria-label="最小化" title="最小化"><Icon name="minimize" /></button><button type="button" className="settings-close-button" onClick={closeAddProvider} aria-label="关闭添加供应商" title="关闭添加供应商"><Icon name="close" /></button></div></div>
       <header className="add-provider-header" onMouseDown={dragWindow}><h1 id="add-provider-title">添加供应商</h1><button type="button" className="add-provider-close" onClick={closeAddProvider} aria-label="关闭添加供应商" title="关闭添加供应商"><Icon name="close" /></button></header>
       <div className="add-provider-content">
         <div className="add-provider-tabs" role="tablist" aria-label="供应商类型">{GENERIC_PROVIDERS.map((provider) => <button type="button" role="tab" aria-selected={provider.id === addProviderId} className={provider.id === addProviderId ? "is-active" : ""} key={provider.id} onClick={() => selectAddProvider(provider.id as GenericProviderId)}>{tabLabels[provider.id as GenericProviderId]}</button>)}</div>
@@ -1320,7 +1432,7 @@ function SettingsWindow() {
     return <aside className="settings-provider-column">
       <div className="provider-search"><SearchIcon /><input aria-label="搜索供应商或分组" value={providerSearch} onChange={(event) => setProviderSearch(event.target.value)} placeholder="搜索供应商或分组" /></div>
       <div className="provider-list-heading"><span>可用接口</span><strong>{filteredProviders.length}</strong></div>
-      <nav className="provider-list-nav" aria-label="供应商列表">{filteredProviders.map((provider) => { const enabled = enabledProviders[provider.id] ?? providerDrafts[provider.id].saved; return <button type="button" className={`provider-list-item ${provider.id === selectedSettingsProvider.id ? "is-selected" : ""}`} key={provider.id} onClick={() => selectSettingsProvider(provider.id)}><ProviderIcon provider={provider} /><span className="provider-list-copy"><strong>{provider.vendor}</strong></span><span className={`provider-list-status ${enabled ? "is-enabled" : ""}`}>{enabled ? "启用" : "禁用"}</span></button>; })}</nav>
+      <nav className="provider-list-nav" aria-label="供应商列表">{filteredProviders.map((provider) => { const enabled = enabledProviderIds.includes(provider.id); return <button type="button" className={`provider-list-item ${provider.id === selectedSettingsProvider.id ? "is-selected" : ""}`} key={provider.id} onClick={() => selectSettingsProvider(provider.id)}><ProviderIcon provider={provider} /><span className="provider-list-copy"><strong>{provider.vendor}</strong></span><span className={`provider-list-status-dot ${enabled ? "is-enabled" : ""}`} aria-hidden="true" /><span className="sr-only">{enabled ? "已启用" : "未启用"}</span></button>; })}</nav>
       <div className="provider-column-footer"><button type="button" className="provider-add-button" onClick={() => openAddProvider()}>＋ 添加</button></div>
     </aside>;
   }
@@ -1329,7 +1441,7 @@ function SettingsWindow() {
     return <main className="app-shell settings-window-shell"><section className="settings-add-provider-shell">{renderAddProviderPage()}</section></main>;
   }
 
-  return <main className="app-shell settings-window-shell"><section className={`settings-shell settings-shell-${isProviderPage ? "providers" : "single"}`}><div className="settings-topbar" onMouseDown={dragWindow}><div className="settings-brand settings-brand-top"><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong></div></div><div className="settings-window-actions"><button type="button" className="settings-window-button settings-minimize-button" onClick={() => void getCurrentWindow().minimize().catch(() => undefined)} aria-label="最小化" title="最小化"><Icon name="minimize" /></button><button type="button" className="settings-close-button" onClick={() => void nativeInvoke("hide_settings_window")} aria-label="关闭设置" title="关闭设置"><Icon name="close" /></button></div></div><aside className="settings-nav-panel"><div className="settings-brand" onMouseDown={dragWindow}><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong><small>设置中心</small></div></div><nav className="settings-primary-nav" aria-label="设置分类"><button type="button" className={activeNavPage === "general" ? "is-active" : ""} onClick={() => switchSettingsPage("general")}><SettingsNavIcon name="general" />通用设置</button><button type="button" className={activeNavPage === "interface" ? "is-active" : ""} onClick={() => switchSettingsPage("interface")}><SettingsNavIcon name="interface" />界面设置</button><button type="button" className={activeNavPage === "providers" ? "is-active" : ""} onClick={() => switchSettingsPage("providers")}><SettingsNavIcon name="providers" />供应商</button><button type="button" className={activeNavPage === "about" ? "is-active" : ""} onClick={() => switchSettingsPage("about")}><SettingsNavIcon name="about" />关于</button></nav></aside>{isProviderPage && renderProviderColumn()}<section className="settings-main">{settingsPage === "connection" ? renderConnectionPage() : settingsPage === "general" ? renderCommonPage() : settingsPage === "interface" ? renderInterfacePage() : settingsPage === "about" ? renderAboutPage() : renderProviderDetails()}{notice && <p className="notice" role="status">{notice}</p>}</section></section></main>;
+  return <main className="app-shell settings-window-shell"><section className={`settings-shell settings-shell-${isProviderPage ? "providers" : "single"}`}><div className="settings-topbar" onMouseDown={dragWindow}><div className="settings-brand settings-brand-top"><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong></div></div><div className="settings-window-actions"><button type="button" className="settings-window-button settings-minimize-button" onClick={() => void nativeInvoke<void>("minimize_window").catch(() => undefined)} aria-label="最小化" title="最小化"><Icon name="minimize" /></button><button type="button" className="settings-close-button" onClick={() => void nativeInvoke("hide_settings_window")} aria-label="关闭设置" title="关闭设置"><Icon name="close" /></button></div></div><aside className="settings-nav-panel"><div className="settings-brand" onMouseDown={dragWindow}><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong><small>设置中心</small></div></div><nav className="settings-primary-nav" aria-label="设置分类"><button type="button" className={activeNavPage === "general" ? "is-active" : ""} onClick={() => switchSettingsPage("general")}><SettingsNavIcon name="general" />通用设置</button><button type="button" className={activeNavPage === "interface" ? "is-active" : ""} onClick={() => switchSettingsPage("interface")}><SettingsNavIcon name="interface" />界面设置</button><button type="button" className={activeNavPage === "providers" ? "is-active" : ""} onClick={() => switchSettingsPage("providers")}><SettingsNavIcon name="providers" />供应商</button><button type="button" className={activeNavPage === "about" ? "is-active" : ""} onClick={() => switchSettingsPage("about")}><SettingsNavIcon name="about" />关于</button></nav></aside>{isProviderPage && renderProviderColumn()}<section className="settings-main">{settingsPage === "connection" ? renderConnectionPage() : settingsPage === "general" ? renderCommonPage() : settingsPage === "interface" ? renderInterfacePage() : settingsPage === "about" ? renderAboutPage() : renderProviderDetails()}{notice && <p className="notice" role="status">{notice}</p>}</section></section></main>;
 }
 
 function App() {

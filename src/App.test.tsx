@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 let windowLabel = "main";
 const invokeMock = vi.hoisted(() => vi.fn());
 const startDraggingMock = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
-const minimizeMock = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const onFocusChangedMock = vi.hoisted(() => vi.fn().mockResolvedValue(() => {}));
 const cursorPositionMock = vi.hoisted(() => vi.fn().mockResolvedValue({ x: 0, y: 0 }));
 
@@ -14,7 +13,7 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
 }));
 
 vi.mock("@tauri-apps/api/window", () => ({
-  getCurrentWindow: () => ({ startDragging: startDraggingMock, minimize: minimizeMock, onFocusChanged: onFocusChangedMock }),
+  getCurrentWindow: () => ({ startDragging: startDraggingMock, onFocusChanged: onFocusChangedMock }),
   cursorPosition: cursorPositionMock,
 }));
 
@@ -34,9 +33,8 @@ describe("App", () => {
 
   beforeEach(() => {
     mockWindowLabel("main");
-    invokeMock.mockReset();
+    invokeMock.mockReset().mockResolvedValue(undefined);
     startDraggingMock.mockClear();
-    minimizeMock.mockClear();
     onFocusChangedMock.mockClear();
   });
 
@@ -80,7 +78,7 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "最小化" }));
 
-    expect(minimizeMock).toHaveBeenCalledTimes(1);
+    expect(invokeMock).toHaveBeenCalledWith("minimize_window", undefined);
   });
 
   it("opens the floating translation state by default and keeps quick translation behind its entry", () => {
@@ -129,7 +127,7 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "厂商接口配置" })).toBeInTheDocument();
     expect(screen.getAllByText("DeepSeek").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: "最小化" }));
-    expect(minimizeMock).toHaveBeenCalledTimes(1);
+    expect(invokeMock).toHaveBeenCalledWith("minimize_window", undefined);
     const apiKeyInput = screen.getByLabelText("API Key");
     expect(apiKeyInput).toHaveAttribute("type", "password");
     fireEvent.click(screen.getByRole("button", { name: "显示 API Key" }));
@@ -145,6 +143,126 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "厂商接口配置" })).toBeInTheDocument();
 
     expect(screen.getAllByRole("button", { name: "测试连接" })).toHaveLength(1);
+  });
+
+  it("uses green and gray dots for enabled provider status", async () => {
+    mockWindowLabel("settings");
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_enabled_providers") return Promise.resolve(["deepseek", "xiaomi"]);
+      return Promise.resolve(undefined);
+    });
+    const { container } = render(<App />);
+
+    await waitFor(() => expect(container.querySelectorAll(".provider-list-status-dot.is-enabled")).toHaveLength(2));
+    expect(container.querySelectorAll(".provider-list-status-dot:not(.is-enabled)")).toHaveLength(3);
+    expect(screen.queryByText("翻译中")).not.toBeInTheDocument();
+    expect(screen.queryByText("未配置")).not.toBeInTheDocument();
+  });
+
+  it("adds another provider to the enabled translation models", async () => {
+    mockWindowLabel("settings");
+    invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_enabled_providers") return Promise.resolve(["deepseek"]);
+      if (command === "get_provider_config" && args?.provider === "deepseek") {
+        return Promise.resolve({ apiKey: "saved", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash" });
+      }
+      if (command === "set_provider_enabled") return Promise.resolve(["deepseek", "xiaomi"]);
+      return Promise.resolve(undefined);
+    });
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: /小米 MiMo/ }));
+    fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "mimo-key" } });
+    fireEvent.click(screen.getByRole("button", { name: "加入翻译" }));
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_provider_enabled", { provider: "xiaomi", enabled: true }));
+    expect(invokeMock).toHaveBeenCalledWith("save_provider_config", {
+      provider: "xiaomi",
+      apiKey: "mimo-key",
+      baseUrl: "https://api.xiaomimimo.com/v1",
+      model: "mimo-v2.5-pro",
+    });
+    expect(screen.queryByText(/与其他启用模型同时返回结果/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/已加入翻译/)).not.toBeInTheDocument();
+  });
+
+  it("fetches provider models and selects one from the returned list", async () => {
+    mockWindowLabel("settings");
+    invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_enabled_providers") return Promise.resolve(["deepseek"]);
+      if (command === "get_provider_config" && args?.provider === "deepseek") {
+        return Promise.resolve({ apiKey: "saved-key", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash" });
+      }
+      if (command === "fetch_provider_models") return Promise.resolve(["deepseek-chat", "deepseek-reasoner"]);
+      return Promise.resolve(undefined);
+    });
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByLabelText("API Key")).toHaveValue("saved-key"));
+    fireEvent.click(screen.getByRole("button", { name: "获取" }));
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("fetch_provider_models", {
+      provider: "deepseek",
+      apiKey: "saved-key",
+      baseUrl: "https://api.deepseek.com",
+    }));
+    const modelOption = await screen.findByRole("option", { name: "deepseek-chat" });
+    fireEvent.click(modelOption);
+    expect(screen.getByLabelText("模型名称")).toHaveValue("deepseek-chat");
+  });
+
+  it("shows connection latency beside the test button", async () => {
+    mockWindowLabel("settings");
+    invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_enabled_providers") return Promise.resolve(["deepseek"]);
+      if (command === "get_provider_config" && args?.provider === "deepseek") {
+        return Promise.resolve({ apiKey: "saved-key", baseUrl: "https://api.deepseek.com", model: "deepseek-chat" });
+      }
+      if (command === "test_provider_connection") {
+        return Promise.resolve({ latencyMs: 42, message: "连接成功" });
+      }
+      return Promise.resolve(undefined);
+    });
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByLabelText("API Key")).toHaveValue("saved-key"));
+    fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
+
+    const status = await screen.findByText("连接成功 · 42 ms");
+    expect(status).toHaveClass("connection-inline-result", "success");
+    expect(status.closest(".settings-label-row")).not.toBeNull();
+    expect(document.querySelector(".provider-detail-panel > .connection-result")).toBeNull();
+  });
+
+  it("renders translation results from multiple enabled models", async () => {
+    invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_enabled_providers") return Promise.resolve(["deepseek", "xiaomi"]);
+      if (command === "get_provider_config") {
+        return Promise.resolve(args?.provider === "xiaomi"
+          ? { apiKey: "saved", baseUrl: "https://api.xiaomimimo.com/v1", model: "mimo-v2.5-pro" }
+          : { apiKey: "saved", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash" });
+      }
+      if (command === "translate_text") return Promise.resolve({
+        source: "hello",
+        requestId: 7,
+        results: [
+          { providerId: "deepseek", model: "deepseek-v4-flash", translation: "你好" },
+          { providerId: "xiaomi", model: "mimo-v2.5-pro", translation: "您好" },
+        ],
+      });
+      return Promise.resolve(undefined);
+    });
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "快速翻译" }));
+    fireEvent.change(screen.getByLabelText("输入文本"), { target: { value: "hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "翻译" }));
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("translate_text", { text: "hello" }));
+    expect(await screen.findByText("deepseek-v4-flash/DeepSeek")).toBeInTheDocument();
+    expect(screen.getByText("mimo-v2.5-pro/小米 MiMo")).toBeInTheDocument();
+    expect(screen.getAllByText("你好")[0]).toBeInTheDocument();
+    expect(screen.getAllByText("您好")[0]).toBeInTheDocument();
   });
 
   it("invokes selection translation once while a request is pending", async () => {

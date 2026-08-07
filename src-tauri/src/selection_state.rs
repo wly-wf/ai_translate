@@ -34,6 +34,12 @@ impl SelectionController {
         self.latest_generation
     }
 
+    pub fn begin_selection_capture(&mut self) -> u64 {
+        let generation = self.begin_mouse_up();
+        self.current = None;
+        generation
+    }
+
     pub fn is_latest_generation(&self, generation: u64) -> bool {
         generation == self.latest_generation
     }
@@ -140,6 +146,24 @@ mod tests {
         let mut controller = visible_controller("selected");
         assert_eq!(controller.take_for_translation().map(|selection| selection.text), Some("selected".into()));
         assert_eq!(controller.take_for_translation(), None);
+    }
+
+    #[test]
+    fn beginning_a_new_capture_discards_the_previous_selection() {
+        let mut controller = visible_controller("previous");
+
+        let generation = controller.begin_selection_capture();
+
+        assert_eq!(generation, 2);
+        assert_eq!(controller.take_for_translation(), None);
+        assert!(matches!(
+            controller.replace_selection(generation, "current".into(), Anchor { x: 2, y: 3 }),
+            StateChange::Show(_)
+        ));
+        assert_eq!(
+            controller.take_for_translation().map(|selection| selection.text),
+            Some("current".into())
+        );
     }
 
     #[test]

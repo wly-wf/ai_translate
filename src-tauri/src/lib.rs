@@ -28,9 +28,10 @@ use tauri::{
 const KEYRING_SERVICE: &str = "ai-translate";
 const KEYRING_ACCOUNT: &str = "deepseek-api-key";
 const PREFERENCES_ACCOUNT: &str = "user-preferences";
+const ACTIVE_PROVIDER_ACCOUNT: &str = "active-provider";
+const ENABLED_PROVIDERS_ACCOUNT: &str = "enabled-providers";
 const PROVIDER_KEYRING_PREFIX: &str = "provider-config:";
 const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
-const DEEPSEEK_URL: &str = "https://api.deepseek.com/chat/completions";
 const DEEPSEEK_MODEL: &str = "deepseek-v4-flash";
 const DEEPSEEK_THINKING_DISABLED: &str = "disabled";
 const USER_PREFERENCES_VERSION: u8 = 1;
@@ -127,6 +128,18 @@ mod selection_float_tests {
         let generation = controller.begin_mouse_up();
         controller.replace_selection(generation, text.into(), Anchor { x: 0, y: 0 });
         controller
+    }
+
+    #[test]
+    fn connection_test_result_uses_frontend_field_names() {
+        let result = serde_json::to_value(ConnectionTestResult {
+            latency_ms: 42,
+            message: "连接成功".into(),
+        })
+        .unwrap();
+
+        assert_eq!(result["latencyMs"], 42);
+        assert!(result.get("latency_ms").is_none());
     }
 
     #[test]
@@ -260,12 +273,48 @@ mod selection_float_tests {
 
     #[test]
     fn deepseek_thinking_is_explicitly_disabled() {
-        let payload = serde_json::to_value(ThinkingConfig {
-            mode: DEEPSEEK_THINKING_DISABLED,
-        })
-        .unwrap();
+        let mut payload = serde_json::json!({});
+        disable_thinking_for_openai_compatible("deepseek", &mut payload);
 
-        assert_eq!(payload, serde_json::json!({ "type": "disabled" }));
+        assert_eq!(payload["thinking"], serde_json::json!({ "type": "disabled" }));
+    }
+
+    #[test]
+    fn vendor_specific_thinking_is_disabled_for_translation() {
+        for provider in ["xiaomi", "zhipu", "moonshot"] {
+            let mut payload = serde_json::json!({});
+            disable_thinking_for_openai_compatible(provider, &mut payload);
+            assert_eq!(payload["thinking"], serde_json::json!({ "type": "disabled" }));
+        }
+
+        let mut qwen = serde_json::json!({});
+        disable_thinking_for_openai_compatible("qwen", &mut qwen);
+        assert_eq!(qwen["enable_thinking"], serde_json::json!(false));
+
+        let mut openai = serde_json::json!({});
+        disable_thinking_for_openai_compatible("openai", &mut openai);
+        assert_eq!(openai, serde_json::json!({}));
+    }
+
+    #[test]
+    fn openai_compatible_model_ids_are_sorted_and_deduplicated() {
+        let payload = serde_json::json!({
+            "data": [{ "id": "model-b" }, { "id": "model-a" }, { "id": "model-b" }]
+        });
+
+        assert_eq!(parse_model_ids("qwen", &payload).unwrap(), vec!["model-a", "model-b"]);
+    }
+
+    #[test]
+    fn google_model_ids_are_normalized_and_non_generation_models_are_filtered() {
+        let payload = serde_json::json!({
+            "models": [
+                { "name": "models/gemini-flash", "supportedGenerationMethods": ["generateContent"] },
+                { "name": "models/embedding-001", "supportedGenerationMethods": ["embedContent"] }
+            ]
+        });
+
+        assert_eq!(parse_model_ids("google", &payload).unwrap(), vec!["gemini-flash"]);
     }
 
     #[test]
@@ -279,11 +328,22 @@ mod selection_float_tests {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Translation {
+struct TranslationBatch {
     source: String,
-    translation: String,
     request_id: u64,
+    results: Vec<ProviderTranslation>,
 }
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderTranslation {
+    provider_id: String,
+    model: String,
+    translation: Option<String>,
+    error: Option<String>,
+}
+
+type LatestTranslation = Mutex<Option<TranslationBatch>>;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -327,30 +387,11 @@ struct ProviderConfigResponse {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ConnectionTestResult {
     latency_ms: u128,
     message: String,
 }
-
-#[derive(Serialize)]
-struct ChatMessage<'a> { role: &'a str, content: &'a str }
-#[derive(Serialize)]
-struct ThinkingConfig { #[serde(rename = "type")] mode: &'static str }
-#[derive(Serialize)]
-struct DeepSeekRequest<'a> {
-    model: &'a str,
-    messages: Vec<ChatMessage<'a>>,
-    // DeepSeek defaults thinking to enabled, so disable it explicitly for translation.
-    thinking: ThinkingConfig,
-    stream: bool,
-    temperature: f32,
-}
-#[derive(Deserialize)]
-struct DeepSeekResponse { choices: Vec<DeepSeekChoice> }
-#[derive(Deserialize)]
-struct DeepSeekChoice { message: DeepSeekMessage }
-#[derive(Deserialize)]
-struct DeepSeekMessage { content: Option<String> }
 
 fn clamp_float_position(
     anchor: Anchor,
@@ -659,6 +700,14 @@ fn preferences_entry() -> Result<Entry, String> {
     Entry::new(KEYRING_SERVICE, PREFERENCES_ACCOUNT).map_err(|error| error.to_string())
 }
 
+fn active_provider_entry() -> Result<Entry, String> {
+    Entry::new(KEYRING_SERVICE, ACTIVE_PROVIDER_ACCOUNT).map_err(|error| error.to_string())
+}
+
+fn enabled_providers_entry() -> Result<Entry, String> {
+    Entry::new(KEYRING_SERVICE, ENABLED_PROVIDERS_ACCOUNT).map_err(|error| error.to_string())
+}
+
 fn load_preferences_sync() -> Result<UserPreferences, String> {
     let entry = preferences_entry()?;
     match entry.get_password() {
@@ -741,66 +790,175 @@ fn legacy_api_key() -> Result<String, String> {
     keyring_entry()?.get_password().map_err(|_| "请先在设置中保存 DeepSeek API Key。".to_string())
 }
 
-fn configured_deepseek() -> Result<(String, String, String), String> {
-    let config = match stored_provider_config("deepseek") {
+fn active_provider_sync() -> String {
+    active_provider_entry()
+        .and_then(|entry| entry.get_password().map_err(|error| error.to_string()))
+        .ok()
+        .filter(|provider| supported_provider(provider))
+        .unwrap_or_else(|| "deepseek".to_string())
+}
+
+fn enabled_providers_sync() -> Vec<String> {
+    enabled_providers_entry()
+        .and_then(|entry| entry.get_password().map_err(|error| error.to_string()))
+        .ok()
+        .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
+        .map(|providers| {
+            providers
+                .into_iter()
+                .filter(|provider| supported_provider(provider))
+                .fold(Vec::new(), |mut unique, provider| {
+                    if !unique.contains(&provider) {
+                        unique.push(provider);
+                    }
+                    unique
+                })
+        })
+        .unwrap_or_else(|| {
+            let provider = active_provider_sync();
+            configured_provider(&provider)
+                .is_ok()
+                .then_some(vec![provider])
+                .unwrap_or_default()
+        })
+}
+
+fn save_enabled_providers_sync(providers: &[String]) -> Result<(), String> {
+    let serialized = serde_json::to_string(providers)
+        .map_err(|error| format!("无法序列化启用模型列表：{error}"))?;
+    enabled_providers_entry()?
+        .set_password(&serialized)
+        .map_err(|error| format!("无法保存启用模型列表：{error}"))
+}
+
+fn configured_provider(provider: &str) -> Result<StoredProviderConfig, String> {
+    let config = match stored_provider_config(provider) {
         Ok(config) => config,
-        Err(_) => {
-            return Ok((
-                legacy_api_key()?,
-                DEEPSEEK_URL.to_string(),
-                DEEPSEEK_MODEL.to_string(),
-            ));
+        Err(_) if provider == "deepseek" => {
+            return Ok(StoredProviderConfig {
+                api_key: legacy_api_key()?,
+                base_url: DEEPSEEK_BASE_URL.to_string(),
+                model: DEEPSEEK_MODEL.to_string(),
+            });
         }
+        Err(error) => return Err(error),
     };
     if config.api_key.trim().is_empty() {
-        return Err("DeepSeek API Key 不能为空。".to_string());
+        return Err(format!("{provider} API Key 不能为空。"));
     }
     if config.base_url.trim().is_empty() {
-        return Err("DeepSeek Base URL 不能为空。".to_string());
+        return Err(format!("{provider} Base URL 不能为空。"));
     }
     validate_base_url(&config.base_url)?;
     if config.model.trim().is_empty() {
-        return Err("DeepSeek 模型名称不能为空。".to_string());
+        return Err(format!("{provider} 模型名称不能为空。"));
     }
-    Ok((
-        config.api_key,
-        append_endpoint(&config.base_url, "chat/completions"),
-        config.model,
-    ))
+    Ok(config)
 }
 
-async fn request_translation(text: &str) -> Result<String, String> {
-    let (key, endpoint, model) = configured_deepseek()?;
-    let target = translation_target(text);
+fn disable_thinking_for_openai_compatible(provider: &str, body: &mut serde_json::Value) {
+    match provider {
+        "qwen" => body["enable_thinking"] = serde_json::json!(false),
+        "deepseek" | "xiaomi" | "zhipu" | "moonshot" => {
+            body["thinking"] = serde_json::json!({ "type": DEEPSEEK_THINKING_DISABLED });
+        }
+        // OpenAI chat models and Anthropic Messages do not enable extended
+        // reasoning unless a reasoning/thinking option is explicitly sent.
+        _ => {}
+    }
+}
+
+async fn request_translation(provider: String, text: String) -> Result<ProviderTranslation, String> {
+    let config = configured_provider(&provider)?;
+    let target = translation_target(&text);
     let prompt = format!(
         "Translate the following text into natural {target}. The target language is fixed by the application; do not answer in the source language, even when the input mixes Chinese and English terms. Preserve product names, model names, acronyms, and technical notation. Return only the translation, without notes or quotation marks.\n\n{text}"
     );
-    let body = DeepSeekRequest {
-        model: model.trim(),
-        messages: vec![
-            ChatMessage { role: "system", content: "You are a precise translation engine." },
-            ChatMessage { role: "user", content: &prompt },
-        ],
-        thinking: ThinkingConfig { mode: DEEPSEEK_THINKING_DISABLED },
-        stream: false,
-        temperature: 0.2,
-    };
     let client = Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|error| format!("无法初始化网络连接：{error}"))?;
-    let response = client.post(endpoint).bearer_auth(key).json(&body).send().await
-        .map_err(|error| format!("无法连接 DeepSeek：{error}"))?;
+    let response = match provider.as_str() {
+        "google" => {
+            let endpoint = format!(
+                "{}/models/{}:generateContent",
+                config.base_url.trim().trim_end_matches('/'),
+                config.model.trim()
+            );
+            client.post(endpoint)
+                .header("x-goog-api-key", &config.api_key)
+                .json(&serde_json::json!({
+                    "systemInstruction": { "parts": [{ "text": "You are a precise translation engine." }] },
+                    "contents": [{ "parts": [{ "text": prompt }] }],
+                    "generationConfig": {
+                        "temperature": 0.2,
+                        "thinkingConfig": { "thinkingBudget": 0 }
+                    }
+                }))
+                .send().await
+        }
+        "anthropic" => client
+            .post(append_endpoint(&config.base_url, "messages"))
+            .header("x-api-key", &config.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&serde_json::json!({
+                "model": config.model.trim(),
+                "max_tokens": 4096,
+                "system": "You are a precise translation engine.",
+                "messages": [{ "role": "user", "content": prompt }],
+                "temperature": 0.2
+            }))
+            .send().await,
+        _ => {
+            let mut body = serde_json::json!({
+                "model": config.model.trim(),
+                "messages": [
+                    { "role": "system", "content": "You are a precise translation engine." },
+                    { "role": "user", "content": prompt }
+                ],
+                "stream": false,
+                "temperature": 0.2
+            });
+            disable_thinking_for_openai_compatible(&provider, &mut body);
+            client.post(append_endpoint(&config.base_url, "chat/completions"))
+                .bearer_auth(&config.api_key).json(&body).send().await
+        }
+    }
+    .map_err(|error| format!("无法连接 {provider}：{error}"))?;
     let status = response.status();
     if !status.is_success() {
-        let detail = response.text().await.unwrap_or_default();
-        return Err(format!("DeepSeek 请求失败（{status}）：{detail}"));
+        let detail = response.text().await.unwrap_or_default().chars().take(400).collect::<String>();
+        return Ok(ProviderTranslation {
+            provider_id: provider,
+            model: config.model,
+            translation: None,
+            error: Some(format!("请求失败（{status}）：{detail}")),
+        });
     }
-    let payload: DeepSeekResponse = response.json().await
-        .map_err(|error| format!("无法解析 DeepSeek 响应：{error}"))?;
-    payload.choices.into_iter().next().and_then(|choice| choice.message.content)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "DeepSeek 没有返回翻译结果。".to_string())
+    let payload: serde_json::Value = match response.json().await {
+        Ok(payload) => payload,
+        Err(error) => return Ok(ProviderTranslation {
+            provider_id: provider,
+            model: config.model,
+            translation: None,
+            error: Some(format!("无法解析响应：{error}")),
+        }),
+    };
+    let translation = match provider.as_str() {
+        "google" => payload.pointer("/candidates/0/content/parts/0/text"),
+        "anthropic" => payload.pointer("/content/0/text"),
+        _ => payload.pointer("/choices/0/message/content"),
+    }
+    .and_then(serde_json::Value::as_str)
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+    .map(str::to_string);
+    Ok(ProviderTranslation {
+        provider_id: provider,
+        model: config.model,
+        error: translation.is_none().then(|| "没有返回翻译结果。".to_string()),
+        translation,
+    })
 }
 
 fn append_endpoint(base_url: &str, endpoint: &str) -> String {
@@ -900,6 +1058,71 @@ async fn send_connection_test(
     Err(format!("请求失败（{status}）：{detail}"))
 }
 
+fn parse_model_ids(provider: &str, payload: &serde_json::Value) -> Result<Vec<String>, String> {
+    let entries = if provider == "google" {
+        payload.get("models").and_then(serde_json::Value::as_array)
+    } else {
+        payload.get("data").and_then(serde_json::Value::as_array)
+    }
+    .ok_or_else(|| "接口没有返回可识别的模型列表。".to_string())?;
+    let mut models = entries.iter().filter_map(|entry| {
+        if provider == "google" {
+            let supports_generate = entry.get("supportedGenerationMethods")
+                .and_then(serde_json::Value::as_array)
+                .map(|methods| methods.iter().any(|method| method.as_str() == Some("generateContent")))
+                .unwrap_or(true);
+            supports_generate.then(|| {
+                entry.get("name")?.as_str().map(|name| name.trim_start_matches("models/").to_string())
+            }).flatten()
+        } else {
+            entry.get("id")?.as_str().map(str::to_string)
+        }
+    }).filter(|model| !model.trim().is_empty()).collect::<Vec<_>>();
+    models.sort_unstable();
+    models.dedup();
+    if models.is_empty() {
+        return Err("接口返回的模型列表为空。".to_string());
+    }
+    Ok(models)
+}
+
+async fn fetch_models(
+    provider: &str,
+    api_key: &str,
+    base_url: &str,
+) -> Result<Vec<String>, String> {
+    validate_base_url(base_url)?;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| format!("无法初始化网络连接：{error}"))?;
+    let endpoint = append_endpoint(base_url, "models");
+    let response = match provider {
+        "google" => client
+            .get(format!("{endpoint}?pageSize=1000"))
+            .header("x-goog-api-key", api_key)
+            .send()
+            .await,
+        "anthropic" => client
+            .get(format!("{endpoint}?limit=1000"))
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await,
+        _ => client.get(endpoint).bearer_auth(api_key).send().await,
+    }
+    .map_err(|error| format!("获取模型列表失败：{error}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let detail = response.text().await.unwrap_or_default().chars().take(400).collect::<String>();
+        return Err(format!("获取模型列表失败（{status}）：{detail}"));
+    }
+    let payload: serde_json::Value = response.json().await
+        .map_err(|error| format!("无法解析模型列表：{error}"))?;
+    parse_model_ids(provider, &payload)
+}
+
 fn translation_target(text: &str) -> &'static str {
     if text.chars().any(is_cjk_character) {
         "English"
@@ -955,22 +1178,58 @@ fn lock_translation_window(window: &WebviewWindow) -> Result<(), String> {
     window.set_minimizable(true).map_err(|error| error.to_string())
 }
 
+fn publish_provider_result(
+    app: &AppHandle,
+    request_id: u64,
+    provider_result: &ProviderTranslation,
+) {
+    let snapshot = {
+        let latest = app.state::<LatestTranslation>();
+        let mut latest = latest.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(batch) = latest.as_mut().filter(|batch| batch.request_id == request_id) else {
+            return;
+        };
+        if let Some(result) = batch.results.iter_mut()
+            .find(|result| result.provider_id == provider_result.provider_id)
+        {
+            *result = provider_result.clone();
+        }
+        batch.clone()
+    };
+    if let Err(error) = app.emit("translation-result", snapshot) {
+        eprintln!("Incremental translation result emission failed: {error}");
+    }
+}
+
 async fn translate_and_display(
     app: AppHandle,
     text: String,
     float_placement: Option<FloatPlacement>,
     request_id: u64,
-) -> Result<Translation, String> {
+) -> Result<TranslationBatch, String> {
     let source = text.trim().to_string();
     if source.is_empty() { return Err("没有可翻译的文本。".to_string()); }
     if source.chars().count() > 12_000 {
         return Err("单次翻译最多支持 12,000 个字符。".to_string());
     }
-    let result = Translation {
-        translation: request_translation(&source).await?,
-        source,
+    let providers = enabled_providers_sync();
+    if providers.is_empty() {
+        return Err("请先在设置中启用至少一个翻译模型。".to_string());
+    }
+    let pending_result = TranslationBatch {
+        source: source.clone(),
         request_id,
+        results: providers.iter().map(|provider| ProviderTranslation {
+            provider_id: provider.clone(),
+            model: configured_provider(provider).map(|config| config.model).unwrap_or_default(),
+            translation: None,
+            error: None,
+        }).collect(),
     };
+    {
+        let latest = app.state::<LatestTranslation>();
+        *latest.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(pending_result.clone());
+    }
     let window = app.get_webview_window("main").ok_or_else(|| "未找到结果窗口。".to_string())?;
     lock_translation_window(&window)?;
     if let Some(placement) = float_placement {
@@ -982,13 +1241,68 @@ async fn translate_and_display(
     window
         .set_always_on_top(current_preferences(&app).keep_on_top)
         .map_err(|error| error.to_string())?;
-    app.emit("translation-result", &result).map_err(|error| error.to_string())?;
+    app.emit("translation-started", &pending_result).map_err(|error| error.to_string())?;
+
+    let mut pending = Vec::with_capacity(providers.len());
+    for provider in providers {
+        let request_text = source.clone();
+        let task_provider = provider.clone();
+        let task_app = app.clone();
+        pending.push((provider.clone(), tauri::async_runtime::spawn(async move {
+            let result = match request_translation(task_provider, request_text).await {
+                Ok(result) => result,
+                Err(error) => ProviderTranslation {
+                    provider_id: provider,
+                    model: String::new(),
+                    translation: None,
+                    error: Some(error),
+                },
+            };
+            publish_provider_result(&task_app, request_id, &result);
+            result
+        })));
+    }
+    let mut results = Vec::with_capacity(pending.len());
+    for (provider, task) in pending {
+        let result = match task.await {
+            Ok(result) => result,
+            Err(error) => ProviderTranslation {
+                provider_id: provider,
+                model: String::new(),
+                translation: None,
+                error: Some(format!("翻译任务失败：{error}")),
+            },
+        };
+        results.push(result);
+    }
+    let result = TranslationBatch { source, request_id, results };
+    let is_current = {
+        let latest = app.state::<LatestTranslation>();
+        let mut latest = latest.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if latest.as_ref().is_some_and(|batch| batch.request_id == request_id) {
+            *latest = Some(result.clone());
+            true
+        } else {
+            false
+        }
+    };
+    if is_current {
+        app.emit("translation-result", &result).map_err(|error| error.to_string())?;
+    }
     Ok(result)
 }
 
 #[tauri::command]
-async fn translate_text(app: AppHandle, text: String) -> Result<Translation, String> {
+async fn translate_text(app: AppHandle, text: String) -> Result<TranslationBatch, String> {
     translate_and_display(app, text, None, next_translation_request_id()).await
+}
+
+#[tauri::command]
+fn get_latest_translation(app: AppHandle) -> Option<TranslationBatch> {
+    app.state::<LatestTranslation>()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
 }
 
 #[tauri::command]
@@ -1042,16 +1356,23 @@ fn save_provider_config_sync(
 
 #[tauri::command]
 async fn save_provider_config(
+    app: AppHandle,
     provider: String,
     api_key: String,
     base_url: String,
     model: String,
 ) -> Result<(), String> {
+    let saved_provider = provider.clone();
     tauri::async_runtime::spawn_blocking(move || {
         save_provider_config_sync(provider, api_key, base_url, model)
     })
     .await
-    .map_err(|error| format!("保存配置任务失败：{error}"))?
+    .map_err(|error| format!("保存配置任务失败：{error}"))??;
+    if enabled_providers_sync().contains(&saved_provider) {
+        app.emit("enabled-providers-changed", enabled_providers_sync())
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1102,8 +1423,94 @@ async fn test_provider_connection(
 }
 
 #[tauri::command]
+async fn fetch_provider_models(
+    provider: String,
+    api_key: String,
+    base_url: String,
+) -> Result<Vec<String>, String> {
+    if !supported_provider(&provider) {
+        return Err(format!("不支持的 AI 提供商：{provider}"));
+    }
+    let key = provider_api_key(&provider, &api_key)?;
+    fetch_models(&provider, &key, &base_url).await
+}
+
+#[tauri::command]
+async fn get_active_provider() -> String {
+    tauri::async_runtime::spawn_blocking(active_provider_sync)
+        .await
+        .unwrap_or_else(|_| "deepseek".to_string())
+}
+
+#[tauri::command]
+async fn set_active_provider(app: AppHandle, provider: String) -> Result<String, String> {
+    let selected_provider = provider.clone();
+    let model = tauri::async_runtime::spawn_blocking(move || {
+        if !supported_provider(&provider) {
+            return Err(format!("不支持的 AI 提供商：{provider}"));
+        }
+        let config = configured_provider(&provider)?;
+        active_provider_entry()?
+            .set_password(&provider)
+            .map_err(|error| format!("无法保存当前翻译模型：{error}"))?;
+        Ok(config.model)
+    })
+    .await
+    .map_err(|error| format!("切换翻译模型任务失败：{error}"))??;
+    app.emit("active-provider-changed", serde_json::json!({
+        "providerId": selected_provider,
+        "model": model,
+    }))
+    .map_err(|error| error.to_string())?;
+    Ok(selected_provider)
+}
+
+#[tauri::command]
+async fn get_enabled_providers() -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(enabled_providers_sync)
+        .await
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+async fn set_provider_enabled(
+    app: AppHandle,
+    provider: String,
+    enabled: bool,
+) -> Result<Vec<String>, String> {
+    let providers = tauri::async_runtime::spawn_blocking(move || {
+        if !supported_provider(&provider) {
+            return Err(format!("不支持的 AI 提供商：{provider}"));
+        }
+        let mut providers = enabled_providers_sync();
+        if enabled {
+            configured_provider(&provider)?;
+            if !providers.contains(&provider) {
+                providers.push(provider);
+            }
+        } else {
+            providers.retain(|item| item != &provider);
+            if providers.is_empty() {
+                return Err("至少需要保留一个启用的翻译模型。".to_string());
+            }
+        }
+        save_enabled_providers_sync(&providers)?;
+        Ok(providers)
+    })
+    .await
+    .map_err(|error| format!("更新启用模型任务失败：{error}"))??;
+    app.emit("enabled-providers-changed", &providers)
+        .map_err(|error| error.to_string())?;
+    Ok(providers)
+}
+
+#[tauri::command]
 async fn has_api_key() -> bool {
-    tauri::async_runtime::spawn_blocking(|| legacy_api_key().is_ok())
+    tauri::async_runtime::spawn_blocking(|| {
+        enabled_providers_sync()
+            .iter()
+            .any(|provider| configured_provider(provider).is_ok())
+    })
         .await
         .unwrap_or(false)
 }
@@ -1152,11 +1559,17 @@ fn hide_window(app: AppHandle) -> Result<(), String> {
         .hide().map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn minimize_window(window: WebviewWindow) -> Result<(), String> {
+    window.minimize().map_err(|error| error.to_string())
+}
+
 fn show_settings_window(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("settings") {
         window.set_size(Size::Logical(LogicalSize::new(1120.0, 760.0))).map_err(|error| error.to_string())?;
         window.set_resizable(false).map_err(|error| error.to_string())?;
         window.set_minimizable(true).map_err(|error| error.to_string())?;
+        window.set_always_on_top(false).map_err(|error| error.to_string())?;
         window.unminimize().map_err(|error| error.to_string())?;
         window.show().map_err(|error| error.to_string())?;
         window.set_focus().map_err(|error| error.to_string())?;
@@ -1169,8 +1582,8 @@ fn show_settings_window(app: &AppHandle) -> Result<(), String> {
         .title("AI Translate 设置")
         .decorations(false)
         .shadow(true)
-        .transparent(true)
-        .always_on_top(true)
+        .transparent(false)
+        .always_on_top(false)
         .skip_taskbar(false)
         .minimizable(true)
         .resizable(false)
@@ -1178,6 +1591,9 @@ fn show_settings_window(app: &AppHandle) -> Result<(), String> {
         .visible(false)
         .on_page_load(|window, payload| {
             if matches!(payload.event(), PageLoadEvent::Finished) {
+                if let Err(error) = window.set_always_on_top(false) {
+                    eprintln!("Settings window topmost reset after page load failed: {error}");
+                }
                 if let Err(error) = window.show() {
                     eprintln!("Settings window show after page load failed: {error}");
                 }
@@ -1324,7 +1740,11 @@ fn initialize_selection_float(app: &tauri::App) -> Result<(), String> {
                 let mut controller = controller
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                controller.begin_mouse_up()
+                if event.selection_gesture && !event.clicked_float {
+                    controller.begin_selection_capture()
+                } else {
+                    controller.begin_mouse_up()
+                }
             };
             if event.clicked_float {
                 return;
@@ -1336,6 +1756,9 @@ fn initialize_selection_float(app: &tauri::App) -> Result<(), String> {
             if !event.selection_gesture {
                 apply_mouse_up(&mouse_app, generation, CaptureOutcome::Empty, false);
                 return;
+            }
+            if let Err(error) = hide_float(&mouse_app) {
+                eprintln!("Previous selection float hide failed before capture: {error}");
             }
             scheduler.submit(CaptureRequest {
                 generation,
@@ -1363,6 +1786,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(Mutex::<SelectionController>::default())
         .manage(Mutex::new(preferences))
+        .manage(Mutex::new(None::<TranslationBatch>))
         .setup(move |app| {
             initialize_tray_icon(app)?;
             if let Err(error) = initialize_selection_float(app) {
@@ -1372,15 +1796,22 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             translate_text,
+            get_latest_translation,
             translate_selection_float,
             save_api_key,
             save_provider_config,
             get_provider_config,
             test_provider_connection,
+            fetch_provider_models,
+            get_active_provider,
+            set_active_provider,
+            get_enabled_providers,
+            set_provider_enabled,
             has_api_key,
             get_preferences,
             save_preferences,
             hide_window,
+            minimize_window,
             open_settings_window,
             hide_settings_window,
         ])

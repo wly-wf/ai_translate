@@ -4,12 +4,12 @@
 
 鼠标选中文本后，应用会显示一个悬浮的翻译按钮。它优先使用 Windows UI Automation 读取选区；如果当前窗口不支持 UI Automation，则使用 `Ctrl + C` 复制作为兜底。由于安全限制，以更高权限运行的（如管理员权限）窗口可能无法获取选区或显示悬浮按钮。
 
-Windows 11 上的轻量级 DeepSeek 翻译工具。使用 Tauri 2、Rust 与 React 构建。
+Windows 11 上的轻量级多模型翻译工具。使用 Tauri 2、Rust 与 React 构建。
 
 ## 已实现
 
 - 鼠标选中文本后显示悬浮翻译按钮；新选区会移动并更新同一个按钮。
-- 调用 DeepSeek `deepseek-v4-flash`，关闭 thinking 以缩短取词翻译等待时间。
+- 可在设置中同时启用 DeepSeek、小米 MiMo、Qwen、智谱 GLM、Moonshot Kimi、OpenAI、Google Gemini 或 Anthropic Claude；翻译时会并发请求所有启用模型，哪个模型先完成就先展示哪个结果。翻译请求统一关闭或不启用深度思考，以缩短取词翻译等待时间。
 - 无边框、置顶、可隐藏的翻译结果浮窗；可复制译文。
 - 手动输入翻译，便于在未复制文本时使用。
 - API Key 使用 Windows Credential Manager 保存，不写入项目文件或浏览器本地存储。
@@ -21,7 +21,7 @@ cd D:\AI\ai_project\ai_translate\translator
 npm.cmd run tauri dev
 ```
 
-首次打开后，点击右上角菜单保存 DeepSeek API Key。之后选中文本并点击悬浮翻译按钮即可翻译，也可以从悬浮翻译窗口进入快速翻译并手动输入文本。
+首次打开后，点击右上角菜单，在“供应商”中保存 API Key、URL 和模型名称，再点击“加入翻译”。可以用相同方式启用多个模型；之后选中文本并点击悬浮翻译按钮，即可同时查看多个模型的译文，也可以从悬浮翻译窗口进入快速翻译并手动输入文本。
 
 ## 验证
 
