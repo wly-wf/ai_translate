@@ -20,16 +20,18 @@ use windows::{
             },
             Memory::{GlobalLock, GlobalSize, GlobalUnlock},
             Ole::{
-                OleGetClipboard, OleInitialize, OleSetClipboard, OleUninitialize,
+                OleFlushClipboard, OleGetClipboard, OleInitialize, OleSetClipboard,
+                OleUninitialize,
                 SafeArrayDestroy, CF_UNICODETEXT,
             },
         },
         UI::{
             Accessibility::{
-                CUIAutomation, IUIAutomation, IUIAutomationTextPattern, IUIAutomationTextRange,
-                UIA_TextPatternId,
+                CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationTextPattern,
+                IUIAutomationTextRange, UIA_TextPatternId,
             },
             Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL},
+            WindowsAndMessaging::{GetAncestor, GetClassNameW, WindowFromPoint, GA_ROOT},
         },
     },
 };
@@ -39,6 +41,9 @@ use crate::selection_state::Anchor;
 const MAX_SELECTION_CHARACTERS: usize = 12_000;
 const CLIPBOARD_RETRIES: usize = 8;
 const CLIPBOARD_RETRY_DELAY: Duration = Duration::from_millis(15);
+const CLIPBOARD_RESTORE_RETRIES: usize = 8;
+const CLIPBOARD_RESTORE_RETRY_DELAY: Duration = Duration::from_millis(20);
+const CLIPBOARD_RESTORE_SETTLE_DELAY: Duration = Duration::from_millis(20);
 
 #[derive(Debug)]
 pub struct CaptureError(Error);
@@ -73,6 +78,7 @@ pub enum CaptureOutcome {
 
 enum UiaAttempt {
     Outcome(CaptureOutcome),
+    Ignored,
     Unavailable,
     Failed(String),
 }
@@ -109,6 +115,10 @@ impl CapturedSelection {
 }
 
 pub fn capture_selection(point: POINT) -> CaptureOutcome {
+    if native_window_is_terminal(point) {
+        return CaptureOutcome::Empty;
+    }
+
     let attempt = match capture_with_uia(point) {
         Ok(attempt) => attempt,
         Err(error) => UiaAttempt::Failed(error.to_string()),
@@ -122,6 +132,9 @@ fn capture_with_uia(point: POINT) -> Result<UiaAttempt, CaptureError> {
         CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)?
     };
     let element = unsafe { automation.ElementFromPoint(point)? };
+    if element_is_terminal_surface(&automation, &element) {
+        return Ok(UiaAttempt::Ignored);
+    }
     let text_pattern: IUIAutomationTextPattern = match unsafe {
         element.GetCurrentPatternAs(UIA_TextPatternId)
     } {
@@ -142,6 +155,121 @@ fn capture_with_uia(point: POINT) -> Result<UiaAttempt, CaptureError> {
     Ok(UiaAttempt::Outcome(CapturedSelection::from_parts(
         text, rectangles, point,
     )))
+}
+
+fn native_window_is_terminal(point: POINT) -> bool {
+    let hit_window = unsafe { WindowFromPoint(point) };
+    if hit_window.is_invalid() {
+        return false;
+    }
+
+    let root_window = unsafe { GetAncestor(hit_window, GA_ROOT) };
+    [hit_window, root_window]
+        .into_iter()
+        .filter(|window| !window.is_invalid())
+        .filter_map(window_class_name)
+        .any(|class_name| is_native_terminal_class(&class_name))
+}
+
+fn window_class_name(window: windows::Win32::Foundation::HWND) -> Option<String> {
+    let mut buffer = [0_u16; 256];
+    let length = unsafe { GetClassNameW(window, &mut buffer) };
+    (length > 0).then(|| String::from_utf16_lossy(&buffer[..length as usize]))
+}
+
+fn is_native_terminal_class(class_name: &str) -> bool {
+    let class_name = class_name.trim().to_ascii_lowercase();
+    matches!(
+        class_name.as_str(),
+        "consolewindowclass"
+            | "cascadia_hosting_window_class"
+            | "pseudoconsolewindow"
+            | "virtualconsoleclass"
+            | "conemumain"
+            | "mintty"
+            | "putty"
+            | "alacritty"
+            | "org.wezfurlong.wezterm"
+            | "wezterm"
+    )
+}
+
+fn element_is_terminal_surface(
+    automation: &IUIAutomation,
+    element: &IUIAutomationElement,
+) -> bool {
+    let Ok(walker) = (unsafe { automation.RawViewWalker() }) else {
+        return false;
+    };
+    let mut current = element.clone();
+
+    // Chromium apps expose their DOM accessibility nodes through UIA. Walking
+    // ancestors distinguishes VS Code's integrated terminal from its editor.
+    for _ in 0..16 {
+        let name = unsafe { current.CurrentName() }
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let automation_id = unsafe { current.CurrentAutomationId() }
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let class_name = unsafe { current.CurrentClassName() }
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let control_type = unsafe { current.CurrentLocalizedControlType() }
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+
+        if is_terminal_accessibility_node(&name, &automation_id, &class_name, &control_type) {
+            return true;
+        }
+
+        let Ok(parent) = (unsafe { walker.GetParentElement(&current) }) else {
+            break;
+        };
+        current = parent;
+    }
+
+    false
+}
+
+fn is_terminal_accessibility_node(
+    name: &str,
+    automation_id: &str,
+    class_name: &str,
+    control_type: &str,
+) -> bool {
+    let name = name.trim().to_lowercase();
+    let control_type = control_type.trim().to_lowercase();
+    let structural = format!("{automation_id} {class_name}").to_lowercase();
+
+    if [
+        "xterm",
+        "terminal-wrapper",
+        "terminal-xterm",
+        "integrated-terminal",
+        "terminal-editor",
+        "terminal-view",
+    ]
+    .iter()
+    .any(|marker| structural.contains(marker))
+    {
+        return true;
+    }
+
+    let terminal_name = name == "terminal"
+        || name == "终端"
+        || name.starts_with("terminal ")
+        || name.starts_with("terminal:")
+        || name.starts_with("终端 ")
+        || name.starts_with("终端:");
+    let terminal_container = [
+        "pane", "group", "document", "custom", "edit", "text", "窗格", "组", "文档", "编辑",
+        "文本",
+    ]
+    .iter()
+    .any(|kind| control_type.contains(kind));
+
+    terminal_name && terminal_container
 }
 
 enum TextClassification {
@@ -174,6 +302,7 @@ fn resolve_uia_attempt(
             CaptureOutcome::TooLong { characters }
         }
         UiaAttempt::Outcome(CaptureOutcome::Failed(error)) => CaptureOutcome::Failed(error),
+        UiaAttempt::Ignored => CaptureOutcome::Empty,
         UiaAttempt::Outcome(CaptureOutcome::Empty) | UiaAttempt::Unavailable => fallback(),
         UiaAttempt::Failed(uia_error) => match fallback() {
             CaptureOutcome::Empty => CaptureOutcome::Failed(format!(
@@ -240,6 +369,10 @@ fn copy_fallback(point: POINT) -> CaptureOutcome {
         }
 
         let copied_text = read_plain_text();
+        // Clipboard listeners and the source application can briefly reopen the
+        // clipboard after Ctrl+C. Let that activity settle before restoring the
+        // user's original data object, then verify that no newer copy replaced it.
+        thread::sleep(CLIPBOARD_RESTORE_SETTLE_DELAY);
         match restore_clipboard_if_unchanged(copied_sequence, &original_clipboard) {
             Ok(true) => {}
             Ok(false) => {
@@ -366,6 +499,23 @@ fn should_restore_clipboard(expected_sequence: u32, observed_sequence: u32) -> b
     expected_sequence == observed_sequence
 }
 
+fn retry_clipboard_operation(
+    delay: Duration,
+    mut operation: impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    let mut last_error = None;
+    for attempt in 0..CLIPBOARD_RESTORE_RETRIES {
+        match operation() {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = Some(error),
+        }
+        if attempt + 1 < CLIPBOARD_RESTORE_RETRIES {
+            thread::sleep(delay);
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "clipboard operation failed".to_string()))
+}
+
 fn restore_clipboard_if_unchanged(
     expected_sequence: u32,
     snapshot: &ClipboardSnapshot,
@@ -376,9 +526,16 @@ fn restore_clipboard_if_unchanged(
     }
 
     match snapshot {
-        ClipboardSnapshot::DataObject(data_object) => unsafe {
-            OleSetClipboard(data_object).map_err(|error| error.to_string())?;
-        },
+        ClipboardSnapshot::DataObject(data_object) => {
+            retry_clipboard_operation(CLIPBOARD_RESTORE_RETRY_DELAY, || unsafe {
+                OleSetClipboard(data_object).map_err(|error| error.to_string())
+            })?;
+            // The capture worker uninitializes OLE after this operation. Flush
+            // delayed-rendered formats so the restored clipboard remains valid.
+            retry_clipboard_operation(CLIPBOARD_RESTORE_RETRY_DELAY, || unsafe {
+                OleFlushClipboard().map_err(|error| error.to_string())
+            })?;
+        }
         ClipboardSnapshot::Empty => {
             let _clipboard = ClipboardGuard::open()
                 .ok_or_else(|| "could not open the clipboard for restore".to_string())?;
@@ -416,6 +573,58 @@ mod tests {
 
         assert!(fallback_called.get());
         assert_eq!(outcome, CaptureOutcome::Detected(fallback_capture));
+    }
+
+    #[test]
+    fn ignored_terminal_does_not_use_clipboard_fallback() {
+        let fallback_called = Cell::new(false);
+        let outcome = resolve_uia_attempt(UiaAttempt::Ignored, || {
+            fallback_called.set(true);
+            CaptureOutcome::Failed("fallback must not run".into())
+        });
+
+        assert!(!fallback_called.get());
+        assert_eq!(outcome, CaptureOutcome::Empty);
+    }
+
+    #[test]
+    fn recognizes_native_terminal_window_classes() {
+        for class_name in [
+            "ConsoleWindowClass",
+            "CASCADIA_HOSTING_WINDOW_CLASS",
+            "mintty",
+            "org.wezfurlong.wezterm",
+        ] {
+            assert!(is_native_terminal_class(class_name), "{class_name}");
+        }
+        assert!(!is_native_terminal_class("Chrome_WidgetWin_1"));
+    }
+
+    #[test]
+    fn recognizes_integrated_terminal_accessibility_markers() {
+        assert!(is_terminal_accessibility_node(
+            "",
+            "terminal-wrapper",
+            "xterm-screen",
+            "custom"
+        ));
+        assert!(is_terminal_accessibility_node(
+            "Terminal 1, PowerShell",
+            "",
+            "",
+            "pane"
+        ));
+        assert!(is_terminal_accessibility_node("终端", "", "", "窗格"));
+    }
+
+    #[test]
+    fn ordinary_editor_named_after_terminal_is_not_excluded() {
+        assert!(!is_terminal_accessibility_node(
+            "terminal.rs",
+            "editor",
+            "monaco-editor",
+            "document"
+        ));
     }
 
     #[test]
@@ -499,5 +708,22 @@ mod tests {
     fn clipboard_restore_is_skipped_after_an_external_change() {
         assert!(should_restore_clipboard(41, 41));
         assert!(!should_restore_clipboard(41, 42));
+    }
+
+    #[test]
+    fn transient_clipboard_failures_are_retried() {
+        let attempts = Cell::new(0);
+        let result = retry_clipboard_operation(Duration::ZERO, || {
+            let attempt = attempts.get() + 1;
+            attempts.set(attempt);
+            if attempt < 3 {
+                Err("clipboard busy".to_string())
+            } else {
+                Ok(())
+            }
+        });
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(attempts.get(), 3);
     }
 }
