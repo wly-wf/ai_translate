@@ -282,49 +282,58 @@ async function nativeInvoke<T>(command: string, args?: Record<string, unknown>):
 
 function useUserPreferences() {
   const [preferences, setPreferences] = useState<UserPreferences>(DEFAULT_USER_PREFERENCES);
-  const [loaded, setLoaded] = useState(false);
   const [preferencesError, setPreferencesError] = useState("");
   const saveChain = useRef<Promise<unknown>>(Promise.resolve());
 
   useEffect(() => {
     if (!isTauriDesktop()) {
-      setLoaded(true);
       return;
     }
     let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void listen<UserPreferences>("preferences-changed", (event) => {
+      if (!cancelled) setPreferences({ ...DEFAULT_USER_PREFERENCES, ...event.payload });
+    }).then((remove) => {
+      if (cancelled) remove();
+      else unlisten = remove;
+    }).catch(() => undefined);
     void nativeInvoke<UserPreferences>("get_preferences")
       .then((stored) => {
         if (cancelled) return;
         setPreferences({ ...DEFAULT_USER_PREFERENCES, ...(stored ?? {}) });
-        setLoaded(true);
       })
       .catch((error) => {
         if (cancelled) return;
         setPreferencesError(String(error));
-        setLoaded(true);
       });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   }, []);
 
-  useEffect(() => {
-    if (!isTauriDesktop() || !loaded) return;
-    let cancelled = false;
+  function updatePreference<K extends keyof UserPreferences>(preference: K, value: UserPreferences[K]) {
+    setPreferences((current) => ({ ...current, [preference]: value }));
+    if (!isTauriDesktop()) return;
     saveChain.current = saveChain.current
       .catch(() => undefined)
-      .then(() => nativeInvoke("save_preferences", preferences))
+      .then(() => nativeInvoke<UserPreferences>("set_user_preference", { preference, value }))
+      .then((saved) => {
+        setPreferences((current) => ({ ...current, [preference]: saved ? saved[preference] : value }));
+        setPreferencesError("");
+      })
       .catch((error) => {
-        if (!cancelled) setPreferencesError(String(error));
+        setPreferencesError(String(error));
       });
-    return () => { cancelled = true; };
-  }, [loaded, preferences]);
+  }
 
   return {
     autoSelection: preferences.autoSelection,
     keepOnTop: preferences.keepOnTop,
     quickTranslateProvider: preferences.quickTranslateProvider,
-    setAutoSelection: (value: boolean) => setPreferences((current) => ({ ...current, autoSelection: value })),
-    setKeepOnTop: (value: boolean) => setPreferences((current) => ({ ...current, keepOnTop: value })),
-    setQuickTranslateProvider: (value: ProviderId | null) => setPreferences((current) => ({ ...current, quickTranslateProvider: value })),
+    setAutoSelection: (value: boolean) => updatePreference("autoSelection", value),
+    setKeepOnTop: (value: boolean) => updatePreference("keepOnTop", value),
+    setQuickTranslateProvider: (value: ProviderId | null) => updatePreference("quickTranslateProvider", value),
     preferencesError,
   };
 }
@@ -437,13 +446,7 @@ function SettingsNavIcon({ name }: { name: "general" | "interface" | "providers"
 function MainWindow() {
   const [result, setResult] = useState<Translation | null>(null);
   const [text, setText] = useState("");
-  const [showSettings, setShowSettings] = useState(false);
-  const [settingsPage, setSettingsPage] = useState<SettingsPage>("providers");
-  const [selectedSettingsProviderId, setSelectedSettingsProviderId] = useState<SettingsProviderId>("deepseek");
-  const [providerDrafts, setProviderDrafts] = useState<Record<SettingsProviderId, ProviderDraft>>(createProviderDrafts);
-  const [connectionState, setConnectionState] = useState<ConnectionState>({ providerId: null, status: "idle", message: "" });
-  const [showApiKey, setShowApiKey] = useState(false);
-  const { autoSelection, keepOnTop, quickTranslateProvider, setAutoSelection, setKeepOnTop, preferencesError } = useUserPreferences();
+  const { keepOnTop, quickTranslateProvider, setKeepOnTop, preferencesError } = useUserPreferences();
   const [hasApiKey, setHasApiKey] = useState(false);
   const [activeProviderId, setActiveProviderId] = useState<ProviderId>(DEFAULT_PROVIDER_ID);
   const [activeProviderModel, setActiveProviderModel] = useState(SETTINGS_PROVIDERS[0].model);
@@ -544,7 +547,6 @@ function MainWindow() {
     setExpandedProviderIds(snapshot.results.map((item) => item.providerId));
     setLoading(translationIsPending(snapshot));
     setNotice("");
-    setShowSettings(false);
     setShowQuickTranslate(false);
   }
 
@@ -620,16 +622,13 @@ function MainWindow() {
       setLoading(false);
       setNotice(event.payload.message);
     });
-    const settingsListener = listen("open-settings", () => { switchSettingsPage("providers"); setShowSettings(true); setShowQuickTranslate(false); setNotice(""); });
     const windowListener = listen("translation-window:open", () => {
       activationGraceUntilRef.current = Date.now() + 500;
-      setShowSettings(false);
       setShowQuickTranslate(false);
       setNotice("");
     });
     const quickTranslateListener = listen("quick-translate:open", () => {
       activationGraceUntilRef.current = Date.now() + 500;
-      setShowSettings(false);
       setShowQuickTranslate(true);
       setNotice("");
     });
@@ -654,7 +653,6 @@ function MainWindow() {
       void startedListener.then((remove) => remove());
       void resultListener.then((remove) => remove());
       void errorListener.then((remove) => remove());
-      void settingsListener.then((remove) => remove());
       void windowListener.then((remove) => remove());
       void quickTranslateListener.then((remove) => remove());
       void activeProviderListener.then((remove) => remove());
@@ -689,7 +687,7 @@ function MainWindow() {
   }, [enabledProviderIds, quickTranslateProvider]);
 
   async function translate() {
-    if (!text.trim()) return;
+    if (!text.trim() || quickTranslateChoices.length === 0) return;
     const attempt = latestTranslationAttempt.current + 1;
     latestTranslationAttempt.current = attempt;
     setLoading(true);
@@ -711,74 +709,12 @@ function MainWindow() {
     }
   }
 
-  function switchSettingsPage(page: SettingsPage) {
-    setSettingsPage(page);
-    if (page === "providers" && !SETTINGS_PROVIDERS.some((provider) => provider.id === selectedSettingsProviderId)) {
-      setSelectedSettingsProviderId(SETTINGS_PROVIDERS[0].id);
-    }
-    if (page === "generic" && !GENERIC_PROVIDERS.some((provider) => provider.id === selectedSettingsProviderId)) {
-      setSelectedSettingsProviderId(GENERIC_PROVIDERS[0].id);
-    }
-  }
-
-  function selectSettingsProvider(providerId: SettingsProviderId) {
-    setSelectedSettingsProviderId(providerId);
-    setConnectionState({ providerId: null, status: "idle", message: "" });
-  }
-
-  function updateSelectedDraft(field: keyof ProviderDraft, value: string | boolean) {
-    setProviderDrafts((drafts) => ({
-      ...drafts,
-      [selectedSettingsProviderId]: { ...drafts[selectedSettingsProviderId], [field]: value },
-    }));
-  }
-
-  async function saveProviderConfig() {
-    const provider = ALL_SETTINGS_PROVIDERS.find((item) => item.id === selectedSettingsProviderId);
-    const draft = providerDrafts[selectedSettingsProviderId];
-    if (!provider || !draft.baseUrl.trim() || !draft.model.trim()) {
-      setNotice("请填写完整的 Base URL 和模型名称。");
-      return;
-    }
-    try {
-      await nativeInvoke("save_provider_config", {
-        provider: provider.id,
-        apiKey: draft.apiKey,
-        baseUrl: draft.baseUrl,
-        model: draft.model,
-      });
-      setProviderDrafts((drafts) => ({ ...drafts, [provider.id]: { ...drafts[provider.id], apiKey: "", saved: true } }));
-      if (provider.id === "deepseek") setHasApiKey(true);
-      setNotice(`${provider.vendor} 配置已安全保存。`);
-    } catch (error) { setNotice(String(error)); }
-  }
-
-  async function testConnection() {
-    const provider = ALL_SETTINGS_PROVIDERS.find((item) => item.id === selectedSettingsProviderId);
-    const draft = providerDrafts[selectedSettingsProviderId];
-    if (!provider) return;
-    setConnectionState({ providerId: provider.id, status: "testing", message: "正在发送测试请求…" });
-    try {
-      const result = await nativeInvoke<{ latencyMs: number; message: string }>("test_provider_connection", {
-        provider: provider.id,
-        apiKey: draft.apiKey,
-        baseUrl: draft.baseUrl,
-        model: draft.model,
-      });
-      setConnectionState({ providerId: provider.id, status: "success", message: `${result.message} · ${result.latencyMs} ms` });
-    } catch (error) {
-      setConnectionState({ providerId: provider.id, status: "error", message: String(error) });
-    }
-  }
-
   function openQuickTranslate() {
-    setShowSettings(false);
     setShowQuickTranslate(true);
     setNotice("");
   }
 
   function returnToFloatingTranslate() {
-    setShowSettings(false);
     setShowQuickTranslate(false);
     setNotice("");
   }
@@ -797,101 +733,6 @@ function MainWindow() {
     const provider = AVAILABLE_TRANSLATION_PROVIDERS.find((item) => item.id === providerId);
     return provider ? { providerId, model: enabledProviderModels[providerId] ?? provider.model } : null;
   }).filter((choice): choice is ModelChoice => choice !== null);
-  const selectedSettingsProvider = ALL_SETTINGS_PROVIDERS.find((provider) => provider.id === selectedSettingsProviderId) ?? SETTINGS_PROVIDERS[0];
-  const selectedDraft = providerDrafts[selectedSettingsProvider.id];
-  const settingsCollection = settingsPage === "generic" ? GENERIC_PROVIDERS : SETTINGS_PROVIDERS;
-
-  function renderProviderSettings() {
-    return <>
-      <div className="settings-page-heading">
-        <div><p className="eyebrow">{settingsPage === "generic" ? "通用接口" : "AI 提供商"}</p><h1>{settingsPage === "generic" ? "通用接口配置" : "厂商接口配置"}</h1></div>
-        <span className="settings-page-meta">{settingsCollection.length} 个接口</span>
-      </div>
-      <p className="settings-description">{settingsPage === "generic" ? "使用标准协议连接 OpenAI、Google Gemini 或 Anthropic，也可以替换为兼容这些协议的服务。" : "选择一个厂商，配置 API Key 和模型。密钥保存到 Windows 凭据管理器。"}</p>
-      <div className="settings-provider-grid">
-        {settingsCollection.map((provider) => <button className={`settings-provider-card ${provider.id === selectedSettingsProvider.id ? "is-selected" : ""}`} key={provider.id} onClick={() => selectSettingsProvider(provider.id)}>
-          <ProviderIcon provider={provider} />
-          <span className="settings-provider-card-copy"><strong>{provider.vendor}</strong><small>{provider.model}</small></span>
-          <span className="settings-protocol-badge">{provider.protocol === "openai" ? "OpenAI 兼容" : provider.protocol === "google" ? "Gemini" : "Messages"}</span>
-        </button>)}
-      </div>
-      <div className="settings-form-card">
-        <div className="settings-form-heading"><div><p className="eyebrow">当前配置</p><h2>{selectedSettingsProvider.vendor}</h2></div><span className="settings-form-model">{selectedSettingsProvider.model}</span></div>
-        <label className="field-label" htmlFor="provider-api-key">API Key</label>
-        <input id="provider-api-key" value={selectedDraft.apiKey} onChange={(event) => updateSelectedDraft("apiKey", event.target.value)} type="password" placeholder={selectedDraft.saved ? "已保存，留空以保留当前 Key" : "粘贴 API Key"} />
-        <label className="field-label settings-field-label" htmlFor="provider-base-url">Base URL</label>
-        <input id="provider-base-url" value={selectedDraft.baseUrl} onChange={(event) => updateSelectedDraft("baseUrl", event.target.value)} spellCheck={false} />
-        <label className="field-label settings-field-label" htmlFor="provider-model">模型名称</label>
-        <input id="provider-model" value={selectedDraft.model} onChange={(event) => updateSelectedDraft("model", event.target.value)} spellCheck={false} />
-        <p className="settings-form-help">{selectedSettingsProvider.summary}</p>
-        {connectionState.providerId === selectedSettingsProvider.id && connectionState.status !== "idle" && <p className={`connection-result ${connectionState.status}`} role="status">{connectionState.message}</p>}
-        <div className="action-row settings-actions"><button className="primary" onClick={() => void saveProviderConfig()}>保存配置</button><button className="secondary" onClick={() => void testConnection()} disabled={connectionState.status === "testing"}>{connectionState.status === "testing" ? "测试中…" : "测试连接"}</button></div>
-      </div>
-    </>;
-  }
-
-  function renderProviderSettingsWithKey() {
-    const generic = settingsPage === "generic";
-    return <>
-      <div className="settings-page-heading"><div><p className="eyebrow">{generic ? "通用接口" : "AI 提供商"}</p><h1>{generic ? "通用接口配置" : "厂商接口配置"}</h1></div><span className="settings-page-meta">{settingsCollection.length} 个接口</span></div>
-      <p className="settings-description">{generic ? "使用 OpenAI、Google Gemini 或 Anthropic 的标准接口，也可以替换为兼容这些协议的服务。" : "选择一个厂商，配置 API Key、Base URL 和模型。密钥由 Windows 凭据管理器保护。"}</p>
-      <div className="settings-provider-grid">
-        {settingsCollection.map((provider) => <button className={`settings-provider-card ${provider.id === selectedSettingsProvider.id ? "is-selected" : ""}`} key={provider.id} onClick={() => selectSettingsProvider(provider.id)}>
-          <ProviderIcon provider={provider} />
-          <span className="settings-provider-card-copy"><strong>{provider.vendor}</strong><small>{provider.model}</small></span>
-          <span className="settings-protocol-badge">{provider.protocol === "openai" ? "OpenAI 兼容" : provider.protocol === "google" ? "Gemini" : "Messages"}</span>
-        </button>)}
-      </div>
-      <div className="settings-form-card">
-        <div className="settings-form-heading"><div><p className="eyebrow">当前配置</p><h2>{selectedSettingsProvider.vendor}</h2></div><span className="settings-form-model">{selectedSettingsProvider.model}</span></div>
-        <label className="field-label" htmlFor="provider-api-key">API Key</label>
-        <div className="api-key-input-wrap">
-          <input id="provider-api-key" value={selectedDraft.apiKey} onChange={(event) => updateSelectedDraft("apiKey", event.target.value)} type={showApiKey ? "text" : "password"} placeholder={selectedDraft.saved ? "已保存，留空以保留当前 Key" : "粘贴 API Key"} />
-          <button type="button" className="api-key-toggle" onClick={() => setShowApiKey((visible) => !visible)} aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"} title={showApiKey ? "隐藏 API Key" : "显示 API Key"}>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-5.5 9.5-5.5 9.5 5.5 9.5 5.5-3.4 5.5-9.5 5.5S2.5 12 2.5 12Z" /><circle cx="12" cy="12" r="2.5" /></svg>
-          </button>
-        </div>
-        <label className="field-label settings-field-label" htmlFor="provider-base-url">Base URL</label>
-        <input id="provider-base-url" value={selectedDraft.baseUrl} onChange={(event) => updateSelectedDraft("baseUrl", event.target.value)} spellCheck={false} />
-        <label className="field-label settings-field-label" htmlFor="provider-model">模型名称</label>
-        <input id="provider-model" value={selectedDraft.model} onChange={(event) => updateSelectedDraft("model", event.target.value)} spellCheck={false} />
-        <p className="settings-form-help">{selectedSettingsProvider.summary}</p>
-        {connectionState.providerId === selectedSettingsProvider.id && connectionState.status !== "idle" && <p className={`connection-result ${connectionState.status}`} role="status">{connectionState.message}</p>}
-        <div className="action-row settings-actions"><button className="primary" onClick={() => void saveProviderConfig()}>保存配置</button><button className="secondary" onClick={() => void testConnection()} disabled={connectionState.status === "testing"}>{connectionState.status === "testing" ? "测试中…" : "测试连接"}</button></div>
-      </div>
-    </>;
-  }
-
-  function renderConnectionPage() {
-    return <>
-      <div className="settings-page-heading"><div><p className="eyebrow">连通性</p><h1>连接测试</h1></div><span className="settings-page-meta">实时请求</span></div>
-      <p className="settings-description">选择一个已配置的接口，发送最小测试请求，确认地址、密钥和模型都可用。</p>
-      <div className="connection-selector-card">
-        <label className="field-label" htmlFor="connection-provider">测试接口</label>
-        <select id="connection-provider" value={selectedSettingsProvider.id} onChange={(event) => selectSettingsProvider(event.target.value as SettingsProviderId)}>
-          <optgroup label="AI 提供商">{SETTINGS_PROVIDERS.map((provider) => <option value={provider.id} key={provider.id}>{provider.vendor} · {provider.model}</option>)}</optgroup>
-          <optgroup label="通用接口">{GENERIC_PROVIDERS.map((provider) => <option value={provider.id} key={provider.id}>{provider.vendor} · {provider.model}</option>)}</optgroup>
-        </select>
-        <div className="connection-summary"><ProviderIcon provider={selectedSettingsProvider} /><div><strong>{selectedSettingsProvider.vendor}</strong><span>{selectedDraft.baseUrl}</span><span>{selectedDraft.model}</span></div></div>
-        {connectionState.providerId === selectedSettingsProvider.id && connectionState.status !== "idle" && <p className={`connection-result ${connectionState.status}`} role="status">{connectionState.message}</p>}
-        <button className="primary connection-test-button" onClick={() => void testConnection()} disabled={connectionState.status === "testing"}>{connectionState.status === "testing" ? "正在测试…" : "开始测试连接"}</button>
-      </div>
-      <div className="connection-note"><span className="note-mark">i</span><p>测试只发送一条“Reply with OK only.”请求，不会触发翻译，也不会保存明文 API Key。</p></div>
-    </>;
-  }
-
-  function renderGeneralPage() {
-    return <>
-      <div className="settings-page-heading"><div><p className="eyebrow">偏好</p><h1>界面设置</h1></div></div>
-      <p className="settings-description">调整悬浮翻译按钮和翻译结果窗口的显示方式。</p>
-      <div className="preference-list">
-        <label className="preference-row"><span><strong>选中文本自动显示悬浮按钮</strong><small>鼠标完成选区后显示翻译入口</small></span><input type="checkbox" checked={autoSelection} onChange={(event) => setAutoSelection(event.target.checked)} /></label>
-        <label className="preference-row"><span><strong>翻译窗口保持置顶</strong><small>结果窗口不会被其他窗口遮挡</small></span><input type="checkbox" checked={keepOnTop} onChange={(event) => setKeepOnTop(event.target.checked)} /></label>
-      </div>
-      <div className="settings-info-card"><strong>接口扩展</strong><p>新增厂商时，请先在对应页面填写 Base URL、模型和 API Key，再用连接测试确认配置可用。</p></div>
-    </>;
-  }
-
   return <main className="app-shell">
     <header className="titlebar" onMouseDown={beginTitlebarDrag} onMouseUp={finishTitlebarDrag}>
       <div className="titlebar-start">
@@ -917,22 +758,7 @@ function MainWindow() {
       </div>
     </header>
 
-    {showSettings ? <section className="settings-shell">
-      <aside className="settings-sidebar">
-        <div className="settings-sidebar-title"><span className="sidebar-mark">AI</span><div><strong>设置中心</strong><small>AI Translate</small></div></div>
-        <nav className="settings-nav" aria-label="设置页面">
-          <button aria-label="AI 提供商" className={settingsPage === "providers" ? "is-active" : ""} onClick={() => switchSettingsPage("providers")}><span aria-hidden="true">◈</span>AI 提供商</button>
-          <button aria-label="通用接口" className={settingsPage === "generic" ? "is-active" : ""} onClick={() => switchSettingsPage("generic")}><span aria-hidden="true">◇</span>通用接口</button>
-          <button aria-label="连接测试" className={settingsPage === "connection" ? "is-active" : ""} onClick={() => switchSettingsPage("connection")}><span aria-hidden="true">⌁</span>连接测试</button>
-          <button aria-label="界面设置" className={settingsPage === "general" ? "is-active" : ""} onClick={() => switchSettingsPage("general")}><span aria-hidden="true">⚙</span>界面设置</button>
-        </nav>
-        <button className="settings-back" onClick={() => setShowSettings(false)}>← 返回翻译</button>
-      </aside>
-      <div className="settings-main">
-        {settingsPage === "connection" ? renderConnectionPage() : settingsPage === "general" ? renderGeneralPage() : settingsPage === "providers" || settingsPage === "generic" ? renderProviderSettingsWithKey() : renderProviderSettings()}
-        {notice && <p className="notice" role="status">{notice}</p>}
-      </div>
-    </section> : <section className={`content${showQuickTranslate ? " quick-content" : ""}`}>
+    <section className={`content${showQuickTranslate ? " quick-content" : ""}`}>
       {showQuickTranslate ? <div className="quick-translate-page">
         <div className="quick-translate-heading"><p className="eyebrow">快速翻译</p></div>
         {!hasApiKey && <div className="warning"><span className="warning-icon" aria-hidden="true">!</span><p>请先在设置中配置并选择一个翻译模型。</p></div>}
@@ -940,7 +766,7 @@ function MainWindow() {
         <div className="input-card"><div className="input-head"><label className="field-label" htmlFor="translation-input">输入文本</label><span className="character-count">{text.length} 字符</span></div>
           <textarea ref={inputRef} id="translation-input" className={/[A-Za-z]/.test(text) ? "is-mixed-language" : undefined} value={text} onChange={(event) => setText(event.target.value)} placeholder="输入要翻译的文字…" />
         </div>
-        <div className="quick-translate-action"><button className="primary" disabled={loading || !text.trim()} onClick={() => void translate()}>{loading ? "翻译中…" : "翻译"}</button></div>
+        <div className="quick-translate-action"><button className="primary" disabled={loading || !text.trim() || quickTranslateChoices.length === 0} onClick={() => void translate()}>{loading ? "翻译中…" : "翻译"}</button></div>
       </div> : result ? <div className="translation-result">
         <div className="provider-list">
           {result.results.map((providerResult) => {
@@ -969,199 +795,6 @@ function MainWindow() {
         <p className="hint">在任意应用中选中文本，翻译入口会出现在选区旁边。</p>
         <div className="floating-empty-tip"><span>选中文本后，点击悬浮翻译按钮即可开始</span></div>
       </div>}{notice && <p className="notice" role="status">{notice}</p>}
-    </section>}
-  </main>;
-}
-
-function LegacySettingsWindow() {
-  const [settingsPage, setSettingsPage] = useState<SettingsPage>("providers");
-  const [selectedSettingsProviderId, setSelectedSettingsProviderId] = useState<SettingsProviderId>("deepseek");
-  const [providerDrafts, setProviderDrafts] = useState<Record<SettingsProviderId, ProviderDraft>>(createProviderDrafts);
-  const [connectionState, setConnectionState] = useState<ConnectionState>({ providerId: null, status: "idle", message: "" });
-  const { autoSelection, keepOnTop, setAutoSelection, setKeepOnTop, preferencesError } = useUserPreferences();
-  const [notice, setNotice] = useState("");
-  const [showApiKey, setShowApiKey] = useState(false);
-  const [providerSearch, setProviderSearch] = useState("");
-  const [enabledProviders, setEnabledProviders] = useState<Partial<Record<SettingsProviderId, boolean>>>({ deepseek: true });
-
-  useEffect(() => {
-    if (preferencesError) setNotice(preferencesError);
-  }, [preferencesError]);
-
-  const selectedSettingsProvider = ALL_SETTINGS_PROVIDERS.find((provider) => provider.id === selectedSettingsProviderId) ?? SETTINGS_PROVIDERS[0];
-  const selectedDraft = providerDrafts[selectedSettingsProvider.id];
-  const settingsCollection = settingsPage === "generic" ? GENERIC_PROVIDERS : SETTINGS_PROVIDERS;
-  const filteredProviders = settingsCollection.filter((provider) => {
-    const query = providerSearch.trim().toLowerCase();
-    return !query || `${provider.vendor} ${provider.model}`.toLowerCase().includes(query);
-  });
-
-  useEffect(() => {
-    if (!isTauriDesktop()) return;
-    let cancelled = false;
-    void nativeInvoke<ProviderConfigResponse | null>("get_provider_config", { provider: selectedSettingsProviderId })
-      .then((config) => {
-        if (cancelled || !config) return;
-        setProviderDrafts((drafts) => ({
-          ...drafts,
-          [selectedSettingsProviderId]: { apiKey: config.apiKey, baseUrl: config.baseUrl, model: config.model, saved: true },
-        }));
-        setEnabledProviders((providers) => ({ ...providers, [selectedSettingsProviderId]: true }));
-      })
-      .catch(() => undefined);
-    return () => { cancelled = true; };
-  }, [selectedSettingsProviderId]);
-
-  function dragWindow(event: MouseEvent<HTMLElement>) {
-    if ((event.target as HTMLElement).closest("button, input, textarea, select")) return;
-    void getCurrentWindow().startDragging();
-  }
-
-  function switchSettingsPage(page: SettingsPage) {
-    setSettingsPage(page);
-    if (page === "providers" && !SETTINGS_PROVIDERS.some((provider) => provider.id === selectedSettingsProviderId)) {
-      setSelectedSettingsProviderId(SETTINGS_PROVIDERS[0].id);
-    }
-    if (page === "generic" && !GENERIC_PROVIDERS.some((provider) => provider.id === selectedSettingsProviderId)) {
-      setSelectedSettingsProviderId(GENERIC_PROVIDERS[0].id);
-    }
-  }
-
-  function selectSettingsProvider(providerId: SettingsProviderId) {
-    setSelectedSettingsProviderId(providerId);
-    setSettingsPage(GENERIC_PROVIDERS.some((provider) => provider.id === providerId) ? "generic" : "providers");
-    setConnectionState({ providerId: null, status: "idle", message: "" });
-    setShowApiKey(false);
-  }
-
-  function updateSelectedDraft(field: keyof ProviderDraft, value: string) {
-    setProviderDrafts((drafts) => ({
-      ...drafts,
-      [selectedSettingsProviderId]: { ...drafts[selectedSettingsProviderId], [field]: value },
-    }));
-  }
-
-  async function saveProviderConfig() {
-    const provider = selectedSettingsProvider;
-    const draft = providerDrafts[provider.id];
-    if (!draft.baseUrl.trim() || !draft.model.trim()) {
-      setNotice("请填写完整的 Base URL 和模型名称。");
-      return;
-    }
-    try {
-      await nativeInvoke("save_provider_config", { provider: provider.id, apiKey: draft.apiKey, baseUrl: draft.baseUrl, model: draft.model });
-      const savedConfig = await nativeInvoke<ProviderConfigResponse | null>("get_provider_config", { provider: provider.id });
-      setProviderDrafts((drafts) => ({
-        ...drafts,
-        [provider.id]: {
-          ...drafts[provider.id],
-          apiKey: savedConfig?.apiKey ?? draft.apiKey,
-          baseUrl: savedConfig?.baseUrl ?? draft.baseUrl,
-          model: savedConfig?.model ?? draft.model,
-          saved: true,
-        },
-      }));
-      setEnabledProviders((providers) => ({ ...providers, [provider.id]: true }));
-      setNotice(`${provider.vendor} 配置已安全保存。`);
-    } catch (error) {
-      setNotice(String(error));
-    }
-  }
-
-  async function testConnection() {
-    const provider = selectedSettingsProvider;
-    const draft = providerDrafts[provider.id];
-    setConnectionState({ providerId: provider.id, status: "testing", message: "正在发送测试请求…" });
-    try {
-      const result = await nativeInvoke<{ latencyMs: number; message: string }>("test_provider_connection", {
-        provider: provider.id, apiKey: draft.apiKey, baseUrl: draft.baseUrl, model: draft.model,
-      });
-      setConnectionState({ providerId: provider.id, status: "success", message: `${result.message} · ${result.latencyMs} ms` });
-    } catch (error) {
-      setConnectionState({ providerId: provider.id, status: "error", message: String(error) });
-    }
-  }
-
-  function renderProviderDetails() {
-    const apiPath = selectedSettingsProvider.protocol === "google" ? "/models/{model}:generateContent" : selectedSettingsProvider.protocol === "anthropic" ? "/messages" : "/chat/completions";
-    const isEnabled = enabledProviders[selectedSettingsProvider.id] ?? selectedDraft.saved;
-    return <div className="provider-detail-content">
-      <h1 className="sr-only">{settingsPage === "generic" ? "通用接口配置" : "厂商接口配置"}</h1>
-      <header className="settings-detail-heading" onMouseDown={dragWindow}>
-        <div className="settings-detail-title"><h1>{selectedSettingsProvider.vendor}</h1><button className="detail-gear" type="button" onClick={() => setSettingsPage("general")} aria-label="打开偏好设置" title="偏好设置">⚙</button></div>
-        <label className="settings-switch" title={isEnabled ? "停用当前接口" : "启用当前接口"}>
-          <input type="checkbox" checked={isEnabled} onChange={(event) => setEnabledProviders((providers) => ({ ...providers, [selectedSettingsProvider.id]: event.target.checked }))} />
-          <span aria-hidden="true" />
-        </label>
-      </header>
-
-      <div className="settings-form-layout">
-        <div className="settings-field-group">
-          <div className="settings-label-row"><label className="field-label" htmlFor="provider-api-key">API Key</label><button className="inline-test" type="button" onClick={() => void testConnection()} disabled={connectionState.status === "testing"}><span aria-hidden="true">♡</span>{connectionState.status === "testing" ? "测试中" : "测试"}</button></div>
-          <div className="api-key-input-wrap"><input id="provider-api-key" value={selectedDraft.apiKey} onChange={(event) => updateSelectedDraft("apiKey", event.target.value)} type={showApiKey ? "text" : "password"} placeholder={selectedDraft.saved ? "已保存，留空以保留当前 Key" : "粘贴 API Key"} /><button type="button" className="api-key-toggle" onClick={() => setShowApiKey((visible) => !visible)} aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"} title={showApiKey ? "隐藏 API Key" : "显示 API Key"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-5.5 9.5-5.5 9.5 5.5 9.5 5.5-3.4 5.5-9.5 5.5S2.5 12 2.5 12Z" /><circle cx="12" cy="12" r="2.5" /></svg></button></div>
-        </div>
-        <div className="settings-field-group"><label className="field-label" htmlFor="provider-base-url">API Base URL</label><input id="provider-base-url" value={selectedDraft.baseUrl} onChange={(event) => updateSelectedDraft("baseUrl", event.target.value)} spellCheck={false} /></div>
-        <div className="settings-field-group"><label className="field-label" htmlFor="provider-api-path">API 路径</label><input id="provider-api-path" value={apiPath} readOnly spellCheck={false} /></div>
-      </div>
-
-      <section className="model-section">
-        <div className="model-section-header"><div className="model-section-title"><h2>模型</h2><span>{selectedDraft.model ? "1" : "0"}</span></div><div className="model-toolbar"><button type="button" aria-label="添加模型" title="添加模型"><ModelAddIcon /></button><button className="fetch-models" type="button" onClick={() => setNotice("模型列表已刷新。")}><ModelRefreshIcon /><span>获取</span></button></div></div>
-        <div className="model-group"><div className="model-group-heading"><strong>{selectedSettingsProvider.vendor}</strong></div><div className="model-row"><ProviderIcon provider={selectedSettingsProvider} /><label className="model-input-label" htmlFor="provider-model"><span className="sr-only">模型名称</span><input id="provider-model" value={selectedDraft.model} onChange={(event) => updateSelectedDraft("model", event.target.value)} spellCheck={false} /></label><div className="model-row-actions"><button type="button" aria-label="固定模型" title="固定模型">⌖</button><button type="button" aria-label="模型参数" title="模型参数">⌘</button><button type="button" aria-label="模型设置" title="模型设置">☷</button><button type="button" aria-label="移除模型" title="移除模型">−</button></div></div></div>
-      </section>
-
-      <div className="provider-detail-footer"><div className="action-row settings-actions"><button className="primary" onClick={() => void saveProviderConfig()}>保存配置</button></div></div>
-      {connectionState.providerId === selectedSettingsProvider.id && connectionState.status !== "idle" && <p className={`connection-result ${connectionState.status}`} role="status">{connectionState.message}</p>}
-    </div>;
-  }
-
-  function renderConnectionPage() {
-    return <>
-      <div className="settings-page-heading"><div><p className="eyebrow">连通性</p><h1>连接测试</h1></div><span className="settings-page-meta">实时请求</span></div>
-      <p className="settings-description">选择一个已配置的接口，发送最小测试请求，确认地址、密钥和模型都可用。</p>
-      <div className="connection-selector-card">
-        <label className="field-label" htmlFor="connection-provider">测试接口</label>
-        <select id="connection-provider" value={selectedSettingsProvider.id} onChange={(event) => selectSettingsProvider(event.target.value as SettingsProviderId)}>
-          <optgroup label="AI 提供商">{SETTINGS_PROVIDERS.map((provider) => <option value={provider.id} key={provider.id}>{provider.vendor} · {provider.model}</option>)}</optgroup>
-          <optgroup label="通用接口">{GENERIC_PROVIDERS.map((provider) => <option value={provider.id} key={provider.id}>{provider.vendor} · {provider.model}</option>)}</optgroup>
-        </select>
-        <div className="connection-summary"><ProviderIcon provider={selectedSettingsProvider} /><div><strong>{selectedSettingsProvider.vendor}</strong><span>{selectedDraft.baseUrl}</span><span>{selectedDraft.model}</span></div></div>
-        {connectionState.providerId === selectedSettingsProvider.id && connectionState.status !== "idle" && <p className={`connection-result ${connectionState.status}`} role="status">{connectionState.message}</p>}
-        <button className="primary connection-test-button" onClick={() => void testConnection()} disabled={connectionState.status === "testing"}>{connectionState.status === "testing" ? "正在测试…" : "开始测试连接"}</button>
-      </div>
-      <div className="connection-note"><span className="note-mark">i</span><p>测试只发送一条最小请求，不会触发翻译，也不会保存明文 API Key。</p></div>
-    </>;
-  }
-
-  function renderGeneralPage() {
-    return <>
-      <div className="settings-page-heading"><div><p className="eyebrow">偏好</p><h1>界面设置</h1></div></div>
-      <p className="settings-description">调整悬浮翻译按钮和翻译结果窗口的显示方式。</p>
-      <div className="preference-list">
-        <label className="preference-row"><span><strong>选中文本自动显示悬浮按钮</strong><small>鼠标完成选区后显示翻译入口</small></span><input type="checkbox" checked={autoSelection} onChange={(event) => setAutoSelection(event.target.checked)} /></label>
-        <label className="preference-row"><span><strong>翻译窗口保持置顶</strong><small>结果窗口不会被其他窗口遮挡</small></span><input type="checkbox" checked={keepOnTop} onChange={(event) => setKeepOnTop(event.target.checked)} /></label>
-      </div>
-      <div className="settings-info-card"><strong>接口扩展</strong><p>新增厂商时，在对应页面填写 Base URL、模型和 API Key，再使用连接测试确认配置可用。</p></div>
-    </>;
-  }
-
-  function renderProviderPanel() {
-    return <aside className="settings-provider-panel">
-      <div className="provider-panel-heading" onMouseDown={dragWindow}><div><p className="provider-panel-kicker">AI Translate</p><h2>接口供应商</h2></div><button className="panel-add-icon" type="button" onClick={() => setNotice("请从列表中选择一个供应商进行配置。")} aria-label="添加供应商" title="添加供应商">＋</button></div>
-      <div className="provider-search"><SearchIcon /><input aria-label="搜索供应商或分组" value={providerSearch} onChange={(event) => setProviderSearch(event.target.value)} placeholder="搜索供应商或分组" /></div>
-      <div className="provider-mode-switch" aria-label="接口类型"><button type="button" className={settingsPage === "providers" ? "is-active" : ""} onClick={() => switchSettingsPage("providers")}>厂商接口</button><button type="button" className={settingsPage === "generic" ? "is-active" : ""} onClick={() => switchSettingsPage("generic")}>通用接口</button></div>
-      <div className="provider-list-heading"><span>{settingsPage === "generic" ? "通用接口" : "AI 提供商"}</span><strong>{filteredProviders.length}</strong></div>
-      <nav className="provider-list-nav" aria-label="供应商列表">{filteredProviders.map((provider) => { const enabled = enabledProviders[provider.id] ?? providerDrafts[provider.id].saved; return <button type="button" className={`provider-list-item ${provider.id === selectedSettingsProvider.id ? "is-selected" : ""}`} key={provider.id} onClick={() => selectSettingsProvider(provider.id)}><ProviderIcon provider={provider} /><span className="provider-list-copy"><strong>{provider.vendor}</strong></span><span className={`provider-list-status ${enabled ? "is-enabled" : ""}`}>{enabled ? "启用" : "禁用"}</span></button>; })}</nav>
-      <div className="provider-panel-footer"><button type="button" className={settingsPage === "connection" ? "is-active" : ""} onClick={() => setSettingsPage("connection")}><span aria-hidden="true">◌</span>连接测试</button><button type="button" className={settingsPage === "general" ? "is-active" : ""} onClick={() => setSettingsPage("general")}><span aria-hidden="true">⚙</span>界面设置</button><button type="button" className="provider-add-button" onClick={() => setNotice("请从列表中选择一个供应商进行配置。")}>＋ 添加</button></div>
-    </aside>;
-  }
-
-  return <main className="app-shell settings-window-shell">
-    <section className="settings-shell">
-      {renderProviderPanel()}
-      <div className="settings-main">
-        {settingsPage === "connection" ? renderConnectionPage() : settingsPage === "general" ? renderGeneralPage() : renderProviderDetails()}
-        {notice && <p className="notice" role="status">{notice}</p>}
-      </div>
     </section>
   </main>;
 }
@@ -1175,18 +808,15 @@ function SettingsWindow() {
   const [notice, setNotice] = useState("");
   const [showApiKey, setShowApiKey] = useState(false);
   const [providerSearch, setProviderSearch] = useState("");
-  const [enabledProviders, setEnabledProviders] = useState<Partial<Record<SettingsProviderId, boolean>>>({});
   const [enabledProviderIds, setEnabledProviderIds] = useState<SettingsProviderId[]>([]);
   const [settingsEnabledProviderModels, setSettingsEnabledProviderModels] = useState<Partial<Record<ProviderId, string>>>({});
   const [addedGenericProviders, setAddedGenericProviders] = useState<GenericProviderId[]>([]);
-  const [isAddingProvider, setIsAddingProvider] = useState(false);
-  const [addProviderId, setAddProviderId] = useState<GenericProviderId>("openai");
-  const [addProviderName, setAddProviderName] = useState(GENERIC_PROVIDERS[0].vendor);
-  const [useResponsesApi, setUseResponsesApi] = useState(false);
   const [fetchedModels, setFetchedModels] = useState<Partial<Record<SettingsProviderId, string[]>>>({});
   const [fetchingProviderId, setFetchingProviderId] = useState<SettingsProviderId | null>(null);
   const [modelFetchMessage, setModelFetchMessage] = useState<{ providerId: SettingsProviderId | null; message: string }>({ providerId: null, message: "" });
   const [manualModelProviderIds, setManualModelProviderIds] = useState<SettingsProviderId[]>([]);
+  const connectionRequestId = useRef(0);
+  const modelFetchRequestId = useRef(0);
 
   useEffect(() => {
     if (preferencesError) setNotice(preferencesError);
@@ -1197,6 +827,21 @@ function SettingsWindow() {
     void nativeInvoke<SettingsProviderId[]>("get_enabled_providers")
       .then((providers) => setEnabledProviderIds(providers ?? []))
       .catch((error) => setNotice(String(error)));
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriDesktop()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<SettingsProviderId[]>("enabled-providers-changed", (event) => setEnabledProviderIds(event.payload ?? []))
+      .then((stopListening) => {
+        if (disposed) stopListening();
+        else unlisten = stopListening;
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -1218,7 +863,6 @@ function SettingsWindow() {
 
   const selectedSettingsProvider = ALL_SETTINGS_PROVIDERS.find((provider) => provider.id === selectedSettingsProviderId) ?? SETTINGS_PROVIDERS[0];
   const selectedDraft = providerDrafts[selectedSettingsProvider.id];
-  const addProviderDefinition = GENERIC_PROVIDERS.find((provider) => provider.id === addProviderId) ?? GENERIC_PROVIDERS[0];
   const providerCollection = settingsPage === "connection"
     ? [...SETTINGS_PROVIDERS, ...GENERIC_PROVIDERS.filter((provider) => addedGenericProviders.includes(provider.id as GenericProviderId))]
     : [...SETTINGS_PROVIDERS, ...GENERIC_PROVIDERS.filter((provider) => addedGenericProviders.includes(provider.id as GenericProviderId))];
@@ -1248,9 +892,39 @@ function SettingsWindow() {
         ...nextDrafts,
         [provider.id]: { apiKey: config.apiKey, baseUrl: config.baseUrl, model: config.model, saved: true },
       }), drafts));
-      setEnabledProviders((providers) => configured.reduce((nextProviders, { provider }) => ({ ...nextProviders, [provider.id]: true }), providers));
     });
     return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriDesktop()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<string>("provider-config-saved", (event) => {
+      const provider = GENERIC_PROVIDERS.find((item) => item.id === event.payload);
+      if (!provider) return;
+      void Promise.all([
+        nativeInvoke<ProviderConfigResponse | null>("get_provider_config", { provider: provider.id }),
+        nativeInvoke<SettingsProviderId[]>("get_enabled_providers"),
+      ]).then(([config, enabledIds]) => {
+        if (disposed || !config) return;
+        setAddedGenericProviders((providers) => providers.includes(provider.id as GenericProviderId) ? providers : [...providers, provider.id as GenericProviderId]);
+        setProviderDrafts((drafts) => ({ ...drafts, [provider.id]: { apiKey: config.apiKey, baseUrl: config.baseUrl, model: config.model, saved: true } }));
+        setEnabledProviderIds(enabledIds);
+        setSelectedSettingsProviderId(provider.id);
+        setSettingsPage("generic");
+        setNotice(`${provider.vendor} 已添加。`);
+      }).catch((error) => {
+        if (!disposed) setNotice(String(error));
+      });
+    }).then((stopListening) => {
+      if (disposed) stopListening();
+      else unlisten = stopListening;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -1263,7 +937,6 @@ function SettingsWindow() {
           ...drafts,
           [selectedSettingsProviderId]: { apiKey: config.apiKey, baseUrl: config.baseUrl, model: config.model, saved: true },
         }));
-        setEnabledProviders((providers) => ({ ...providers, [selectedSettingsProviderId]: true }));
       })
       .catch(() => undefined);
     return () => { cancelled = true; };
@@ -1286,6 +959,7 @@ function SettingsWindow() {
   }
 
   function selectSettingsProvider(providerId: SettingsProviderId) {
+    connectionRequestId.current += 1;
     setSelectedSettingsProviderId(providerId);
     if (settingsPage === "providers" || settingsPage === "generic") {
       setSettingsPage(GENERIC_PROVIDERS.some((provider) => provider.id === providerId) ? "generic" : "providers");
@@ -1296,60 +970,9 @@ function SettingsWindow() {
     setNotice("");
   }
 
-  function updateAddDraft(field: keyof ProviderDraft, value: string) {
-    setProviderDrafts((drafts) => ({
-      ...drafts,
-      [addProviderId]: { ...drafts[addProviderId], [field]: value },
-    }));
-  }
-
-  function openAddProvider(providerId: GenericProviderId = "openai") {
-    const provider = GENERIC_PROVIDERS.find((item) => item.id === providerId) ?? GENERIC_PROVIDERS[0];
-    setAddProviderId(provider.id as GenericProviderId);
-    setAddProviderName(provider.vendor);
-    setUseResponsesApi(false);
-    setShowApiKey(false);
-    setSettingsPage("providers");
+  function openAddProvider() {
     setNotice("");
-    setIsAddingProvider(true);
-  }
-
-  function closeAddProvider() {
-    setIsAddingProvider(false);
-    setNotice("");
-  }
-
-  function selectAddProvider(providerId: GenericProviderId) {
-    const provider = GENERIC_PROVIDERS.find((item) => item.id === providerId) ?? GENERIC_PROVIDERS[0];
-    setAddProviderId(provider.id as GenericProviderId);
-    setAddProviderName(provider.vendor);
-    setUseResponsesApi(false);
-    setNotice("");
-  }
-
-  async function addGenericProvider() {
-    const provider = addProviderDefinition;
-    const draft = providerDrafts[provider.id];
-    const shouldEnable = enabledProviders[provider.id] ?? true;
-    if (!draft.apiKey.trim() || !draft.baseUrl.trim() || !draft.model.trim()) {
-      setNotice("请填写 API Key、Base URL 和模型名称。");
-      return;
-    }
-    try {
-      await nativeInvoke("save_provider_config", { provider: provider.id, apiKey: draft.apiKey, baseUrl: draft.baseUrl, model: draft.model });
-      if (shouldEnable) {
-        const providers = await nativeInvoke<SettingsProviderId[]>("set_provider_enabled", { provider: provider.id, enabled: true });
-        setEnabledProviderIds(providers);
-      }
-      setAddedGenericProviders((providers) => providers.includes(provider.id as GenericProviderId) ? providers : [...providers, provider.id as GenericProviderId]);
-      setSelectedSettingsProviderId(provider.id);
-      setEnabledProviders((providers) => ({ ...providers, [provider.id]: shouldEnable }));
-      setProviderDrafts((drafts) => ({ ...drafts, [provider.id]: { ...drafts[provider.id], saved: true } }));
-      setIsAddingProvider(false);
-      setNotice(`${addProviderName || provider.vendor} 已添加${shouldEnable ? "并加入翻译" : "。"}`);
-    } catch (error) {
-      setNotice(String(error));
-    }
+    void nativeInvoke("open_add_provider_window").catch((error) => setNotice(String(error)));
   }
 
   function updateSelectedDraft(field: keyof ProviderDraft, value: string) {
@@ -1379,7 +1002,6 @@ function SettingsWindow() {
           saved: true,
         },
       }));
-      setEnabledProviders((providers) => ({ ...providers, [provider.id]: true }));
       setNotice(`${provider.vendor} 配置已安全保存。`);
     } catch (error) {
       setNotice(String(error));
@@ -1402,7 +1024,6 @@ function SettingsWindow() {
           model: draft.model,
         });
         setProviderDrafts((drafts) => ({ ...drafts, [provider.id]: { ...drafts[provider.id], saved: true } }));
-        setEnabledProviders((providers) => ({ ...providers, [provider.id]: true }));
       }
       const providers = await nativeInvoke<SettingsProviderId[]>("set_provider_enabled", { provider: provider.id, enabled });
       setEnabledProviderIds(providers);
@@ -1415,13 +1036,17 @@ function SettingsWindow() {
   async function testConnection() {
     const provider = selectedSettingsProvider;
     const draft = providerDrafts[provider.id];
+    const requestId = connectionRequestId.current + 1;
+    connectionRequestId.current = requestId;
     setConnectionState({ providerId: provider.id, status: "testing", message: "正在发送测试请求…" });
     try {
       const result = await nativeInvoke<{ latencyMs: number; message: string }>("test_provider_connection", {
         provider: provider.id, apiKey: draft.apiKey, baseUrl: draft.baseUrl, model: draft.model,
       });
+      if (requestId !== connectionRequestId.current) return;
       setConnectionState({ providerId: provider.id, status: "success", message: `${result.message} · ${result.latencyMs} ms` });
     } catch (error) {
+      if (requestId !== connectionRequestId.current) return;
       setConnectionState({ providerId: provider.id, status: "error", message: String(error) });
     }
   }
@@ -1433,6 +1058,8 @@ function SettingsWindow() {
       setModelFetchMessage({ providerId: provider.id, message: "请先填写 URL。" });
       return;
     }
+    const requestId = modelFetchRequestId.current + 1;
+    modelFetchRequestId.current = requestId;
     setFetchingProviderId(provider.id);
     setModelFetchMessage({ providerId: provider.id, message: "" });
     try {
@@ -1441,13 +1068,15 @@ function SettingsWindow() {
         apiKey: draft.apiKey,
         baseUrl: draft.baseUrl,
       });
+      if (requestId !== modelFetchRequestId.current) return;
       setFetchedModels((current) => ({ ...current, [provider.id]: models }));
       setModelFetchMessage({ providerId: provider.id, message: "" });
     } catch (error) {
+      if (requestId !== modelFetchRequestId.current) return;
       const message = String(error).replace(provider.id, provider.vendor);
       setModelFetchMessage({ providerId: provider.id, message });
     } finally {
-      setFetchingProviderId(null);
+      if (requestId === modelFetchRequestId.current) setFetchingProviderId(null);
     }
   }
 
@@ -1493,42 +1122,84 @@ function SettingsWindow() {
     return <div className="settings-page-view about-page"><div className="about-brand"><img src={appIcon} alt="AI Translate 图标" /><div><p className="settings-page-eyebrow">AI Translate</p><h1>关于</h1><p>轻量、快速的桌面翻译工具。</p></div></div><section className="about-card"><div><span>当前版本</span><strong>0.1.0</strong></div><div><span>翻译引擎</span><strong>DeepSeek</strong></div></section><div className="settings-info-card"><strong>更多信息</strong><p>更新日志、反馈入口和自动更新功能将在后续版本接入。</p></div></div>;
   }
 
-  function renderAddProviderPage() {
-    const apiPath = addProviderDefinition.protocol === "google" ? "/models/{model}:generateContent" : addProviderDefinition.protocol === "anthropic" ? "/messages" : useResponsesApi ? "/responses" : "/chat/completions";
-    const draft = providerDrafts[addProviderId];
-    const tabLabels: Record<GenericProviderId, string> = { openai: "OpenAI", google: "Google", anthropic: "Claude" };
-    return <section className="settings-add-provider-page" aria-labelledby="add-provider-title"><div className="settings-topbar" onMouseDown={dragWindow}><div className="settings-brand settings-brand-top"><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong></div></div><div className="settings-window-actions"><button type="button" className="settings-window-button settings-minimize-button" onClick={() => void nativeInvoke<void>("minimize_window").catch(() => undefined)} aria-label="最小化" title="最小化"><Icon name="minimize" /></button><button type="button" className="settings-close-button" onClick={closeAddProvider} aria-label="关闭添加供应商" title="关闭添加供应商"><Icon name="close" /></button></div></div>
-      <header className="add-provider-header" onMouseDown={dragWindow}><h1 id="add-provider-title">添加供应商</h1><button type="button" className="add-provider-close" onClick={closeAddProvider} aria-label="关闭添加供应商" title="关闭添加供应商"><Icon name="close" /></button></header>
-      <div className="add-provider-content">
-        <div className="add-provider-tabs" role="tablist" aria-label="供应商类型">{GENERIC_PROVIDERS.map((provider) => <button type="button" role="tab" aria-selected={provider.id === addProviderId} className={provider.id === addProviderId ? "is-active" : ""} key={provider.id} onClick={() => selectAddProvider(provider.id as GenericProviderId)}>{tabLabels[provider.id as GenericProviderId]}</button>)}</div>
-        <div className="add-provider-form">
-          <label className="add-provider-option"><span>是否启用</span><span className="settings-switch"><input type="checkbox" checked={enabledProviders[addProviderId] ?? true} onChange={(event) => setEnabledProviders((providers) => ({ ...providers, [addProviderId]: event.target.checked }))} /><span aria-hidden="true" /></span></label>
-          {addProviderDefinition.protocol === "openai" && <label className="add-provider-option"><span>Use Responses API</span><span className="settings-switch settings-switch-muted"><input type="checkbox" checked={useResponsesApi} onChange={(event) => setUseResponsesApi(event.target.checked)} /><span aria-hidden="true" /></span></label>}
-          <div className="add-provider-field"><label htmlFor="add-provider-name">名称</label><input id="add-provider-name" value={addProviderName} onChange={(event) => setAddProviderName(event.target.value)} /></div>
-          <div className="add-provider-field"><label htmlFor="add-provider-api-key">API Key</label><div className="api-key-input-wrap"><input id="add-provider-api-key" value={draft.apiKey} onChange={(event) => updateAddDraft("apiKey", event.target.value)} type={showApiKey ? "text" : "password"} placeholder="" /><button type="button" className="api-key-toggle" onClick={() => setShowApiKey((visible) => !visible)} aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"} title={showApiKey ? "隐藏 API Key" : "显示 API Key"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-5.5 9.5-5.5 9.5 5.5 9.5 5.5-3.4 5.5-9.5 5.5S2.5 12 2.5 12Z" /><circle cx="12" cy="12" r="2.5" /></svg></button></div></div>
-          <div className="add-provider-field"><label htmlFor="add-provider-base-url">Base URL</label><input id="add-provider-base-url" value={draft.baseUrl} onChange={(event) => updateAddDraft("baseUrl", event.target.value)} spellCheck={false} /></div>
-          <div className="add-provider-field"><label htmlFor="add-provider-api-path">API 路径</label><input id="add-provider-api-path" value={apiPath} readOnly spellCheck={false} /></div>
-        </div>
-        {notice && <p className="notice add-provider-notice" role="status">{notice}</p>}
-        <div className="add-provider-actions"><button className="primary" type="button" onClick={() => void addGenericProvider()}>＋ 添加</button></div>
-      </div>
-    </section>;
-  }
-
   function renderProviderColumn() {
     return <aside className="settings-provider-column">
       <div className="provider-search"><SearchIcon /><input aria-label="搜索供应商或分组" value={providerSearch} onChange={(event) => setProviderSearch(event.target.value)} placeholder="搜索供应商或分组" /></div>
       <div className="provider-list-heading"><span>可用接口</span><strong>{filteredProviders.length}</strong></div>
       <nav className="provider-list-nav" aria-label="供应商列表">{filteredProviders.map((provider) => { const enabled = enabledProviderIds.includes(provider.id); return <button type="button" className={`provider-list-item ${provider.id === selectedSettingsProvider.id ? "is-selected" : ""}`} key={provider.id} onClick={() => selectSettingsProvider(provider.id)}><ProviderIcon provider={provider} /><span className="provider-list-copy"><strong>{provider.vendor}</strong></span><span className={`provider-list-status-dot ${enabled ? "is-enabled" : ""}`} aria-hidden="true" /><span className="sr-only">{enabled ? "已启用" : "未启用"}</span></button>; })}</nav>
-      <div className="provider-column-footer"><button type="button" className="provider-add-button" onClick={() => openAddProvider()}>＋ 添加</button></div>
+      <div className="provider-column-footer"><button type="button" className="provider-add-button" onClick={() => openAddProvider()}>＋ 添加自定义供应商</button></div>
     </aside>;
   }
 
-  if (isAddingProvider) {
-    return <main className="app-shell settings-window-shell"><section className="settings-add-provider-shell">{renderAddProviderPage()}</section></main>;
+  return <main className="app-shell settings-window-shell"><section className={`settings-shell settings-shell-${isProviderPage ? "providers" : "single"}`}><div className="settings-topbar" onMouseDown={dragWindow}><div className="settings-brand settings-brand-top"><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong></div></div><div className="settings-window-actions"><button type="button" className="settings-window-button settings-minimize-button" onClick={() => void nativeInvoke<void>("minimize_window").catch(() => undefined)} aria-label="最小化" title="最小化"><Icon name="minimize" /></button><button type="button" className="settings-close-button" onClick={() => void nativeInvoke("hide_settings_window")} aria-label="关闭设置" title="关闭设置"><Icon name="close" /></button></div></div><aside className="settings-nav-panel"><div className="settings-brand" onMouseDown={dragWindow}><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong><small>设置中心</small></div></div><nav className="settings-primary-nav" aria-label="设置分类"><button type="button" className={activeNavPage === "general" ? "is-active" : ""} onClick={() => switchSettingsPage("general")}><SettingsNavIcon name="general" />通用设置</button><button type="button" className={activeNavPage === "interface" ? "is-active" : ""} onClick={() => switchSettingsPage("interface")}><SettingsNavIcon name="interface" />界面设置</button><button type="button" className={activeNavPage === "providers" ? "is-active" : ""} onClick={() => switchSettingsPage("providers")}><SettingsNavIcon name="providers" />供应商</button><button type="button" className={activeNavPage === "about" ? "is-active" : ""} onClick={() => switchSettingsPage("about")}><SettingsNavIcon name="about" />关于</button></nav></aside>{isProviderPage && renderProviderColumn()}<section className="settings-main">{settingsPage === "connection" ? renderConnectionPage() : settingsPage === "general" ? renderCommonPage() : settingsPage === "interface" ? renderInterfacePage() : settingsPage === "about" ? renderAboutPage() : renderProviderDetails()}{notice && <p className="notice" role="status">{notice}</p>}</section></section></main>;
+}
+
+function AddProviderWindow() {
+  const [providerId, setProviderId] = useState<GenericProviderId>("openai");
+  const [providerDrafts, setProviderDrafts] = useState<Record<SettingsProviderId, ProviderDraft>>(createProviderDrafts);
+  const [enabled, setEnabled] = useState(true);
+  const [showApiKey, setShowApiKey] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [saving, setSaving] = useState(false);
+  const provider = GENERIC_PROVIDERS.find((item) => item.id === providerId) ?? GENERIC_PROVIDERS[0];
+  const draft = providerDrafts[providerId];
+  const apiPath = provider.protocol === "google" ? "/models/{model}:generateContent" : provider.protocol === "anthropic" ? "/messages" : "/chat/completions";
+  const tabLabels: Record<GenericProviderId, string> = { openai: "OpenAI", google: "Google", anthropic: "Claude" };
+
+  function dragWindow(event: MouseEvent<HTMLElement>) {
+    if ((event.target as HTMLElement).closest("button, input")) return;
+    void getCurrentWindow().startDragging();
   }
 
-  return <main className="app-shell settings-window-shell"><section className={`settings-shell settings-shell-${isProviderPage ? "providers" : "single"}`}><div className="settings-topbar" onMouseDown={dragWindow}><div className="settings-brand settings-brand-top"><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong></div></div><div className="settings-window-actions"><button type="button" className="settings-window-button settings-minimize-button" onClick={() => void nativeInvoke<void>("minimize_window").catch(() => undefined)} aria-label="最小化" title="最小化"><Icon name="minimize" /></button><button type="button" className="settings-close-button" onClick={() => void nativeInvoke("hide_settings_window")} aria-label="关闭设置" title="关闭设置"><Icon name="close" /></button></div></div><aside className="settings-nav-panel"><div className="settings-brand" onMouseDown={dragWindow}><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong><small>设置中心</small></div></div><nav className="settings-primary-nav" aria-label="设置分类"><button type="button" className={activeNavPage === "general" ? "is-active" : ""} onClick={() => switchSettingsPage("general")}><SettingsNavIcon name="general" />通用设置</button><button type="button" className={activeNavPage === "interface" ? "is-active" : ""} onClick={() => switchSettingsPage("interface")}><SettingsNavIcon name="interface" />界面设置</button><button type="button" className={activeNavPage === "providers" ? "is-active" : ""} onClick={() => switchSettingsPage("providers")}><SettingsNavIcon name="providers" />供应商</button><button type="button" className={activeNavPage === "about" ? "is-active" : ""} onClick={() => switchSettingsPage("about")}><SettingsNavIcon name="about" />关于</button></nav></aside>{isProviderPage && renderProviderColumn()}<section className="settings-main">{settingsPage === "connection" ? renderConnectionPage() : settingsPage === "general" ? renderCommonPage() : settingsPage === "interface" ? renderInterfacePage() : settingsPage === "about" ? renderAboutPage() : renderProviderDetails()}{notice && <p className="notice" role="status">{notice}</p>}</section></section></main>;
+  function updateDraft(field: keyof ProviderDraft, value: string) {
+    setProviderDrafts((drafts) => ({ ...drafts, [providerId]: { ...drafts[providerId], [field]: value } }));
+  }
+
+  function selectProvider(nextProviderId: GenericProviderId) {
+    setProviderId(nextProviderId);
+    setShowApiKey(false);
+    setNotice("");
+  }
+
+  function returnToSettings() {
+    void nativeInvoke("return_to_settings_window").catch((error) => setNotice(String(error)));
+  }
+
+  async function addProvider() {
+    if (!draft.apiKey.trim() || !draft.baseUrl.trim() || !draft.model.trim()) {
+      setNotice("请填写 API Key、Base URL 和模型名称。");
+      return;
+    }
+    setSaving(true);
+    setNotice("");
+    try {
+      await nativeInvoke("save_provider_config", { provider: provider.id, apiKey: draft.apiKey, baseUrl: draft.baseUrl, model: draft.model });
+      await nativeInvoke("set_provider_enabled", { provider: provider.id, enabled });
+      await nativeInvoke("return_to_settings_window");
+    } catch (error) {
+      setNotice(String(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return <main className="app-shell add-provider-window-shell"><section className="settings-add-provider-page" aria-labelledby="add-provider-title">
+    <div className="add-provider-titlebar" onMouseDown={dragWindow}>
+      <h1 id="add-provider-title">添加自定义供应商</h1>
+      <button type="button" className="titlebar-icon-button titlebar-close add-provider-window-close" onClick={returnToSettings} aria-label="关闭添加自定义供应商" title="关闭"><Icon name="close" /></button>
+    </div>
+    <div className="add-provider-content">
+      <div className="add-provider-tabs" role="tablist" aria-label="供应商类型">{GENERIC_PROVIDERS.map((item) => <button type="button" role="tab" aria-selected={item.id === providerId} className={item.id === providerId ? "is-active" : ""} key={item.id} onClick={() => selectProvider(item.id as GenericProviderId)}>{tabLabels[item.id as GenericProviderId]}</button>)}</div>
+      <div className="add-provider-form">
+        <label className="add-provider-option"><span><strong>添加后启用</strong><small>立即加入翻译模型列表</small></span><span className="settings-switch"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} aria-label="添加后启用" /><span aria-hidden="true" /></span></label>
+        <div className="add-provider-field"><label htmlFor="add-provider-api-key">API Key</label><div className="api-key-input-wrap"><input id="add-provider-api-key" value={draft.apiKey} onChange={(event) => updateDraft("apiKey", event.target.value)} type={showApiKey ? "text" : "password"} autoComplete="off" /><button type="button" className="api-key-toggle" onClick={() => setShowApiKey((visible) => !visible)} aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"} title={showApiKey ? "隐藏 API Key" : "显示 API Key"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-5.5 9.5-5.5 9.5 5.5 9.5 5.5-3.4 5.5-9.5 5.5S2.5 12 2.5 12Z" /><circle cx="12" cy="12" r="2.5" /></svg></button></div></div>
+        <div className="add-provider-field"><label htmlFor="add-provider-base-url">Base URL</label><input id="add-provider-base-url" value={draft.baseUrl} onChange={(event) => updateDraft("baseUrl", event.target.value)} spellCheck={false} /></div>
+        <div className="add-provider-field"><label htmlFor="add-provider-api-path">API 路径</label><input id="add-provider-api-path" value={apiPath} readOnly spellCheck={false} /></div>
+      </div>
+      {notice && <p className="notice add-provider-notice" role="status">{notice}</p>}
+      <div className="add-provider-actions"><button type="button" className="secondary" onClick={returnToSettings}>取消</button><button className="primary" type="button" onClick={() => void addProvider()} disabled={saving}>{saving ? "添加中…" : "添加接口"}</button></div>
+    </div>
+  </section></main>;
 }
 
 function App() {
@@ -1540,7 +1211,7 @@ function App() {
   }
   if (label === "selection-float") return <SelectionFloat />;
   if (label === "settings") return <SettingsWindow />;
-  if (label === "settings-legacy") return <LegacySettingsWindow />;
+  if (label === "add-provider") return <AddProviderWindow />;
   return <MainWindow />;
 }
 

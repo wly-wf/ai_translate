@@ -28,6 +28,16 @@ function mockWindowLabel(label: string) {
   windowLabel = label;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("App", () => {
   afterEach(cleanup);
 
@@ -147,16 +157,28 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "移除模型" }));
     expect(screen.queryByLabelText("模型名称")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /^＋ 添加$/ }));
-    expect(screen.getByRole("heading", { name: "添加供应商" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "OpenAI" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByLabelText("名称")).toHaveValue("OpenAI");
-    fireEvent.click(screen.getByRole("tab", { name: "Google" }));
-    expect(screen.getByLabelText("Base URL")).toHaveValue("https://generativelanguage.googleapis.com/v1beta");
-    fireEvent.click(screen.getAllByRole("button", { name: "关闭添加供应商" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "＋ 添加自定义供应商" }));
+    expect(invokeMock).toHaveBeenCalledWith("open_add_provider_window", undefined);
     expect(screen.getByRole("heading", { name: "厂商接口配置" })).toBeInTheDocument();
 
     expect(screen.getAllByRole("button", { name: "测试连接" })).toHaveLength(1);
+  });
+
+  it("renders add-provider in its own window with a unified close action", () => {
+    mockWindowLabel("add-provider");
+    render(<App />);
+
+    expect(screen.getByRole("heading", { name: "添加自定义供应商" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "返回设置" })).not.toBeInTheDocument();
+    expect(screen.queryByText("AI Translate")).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "OpenAI" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.queryByText("Use Responses API")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("API 路径")).toHaveValue("/chat/completions");
+    expect(screen.queryByLabelText("名称")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "Google" }));
+    expect(screen.getByLabelText("Base URL")).toHaveValue("https://generativelanguage.googleapis.com/v1beta");
+    fireEvent.click(screen.getByRole("button", { name: "关闭添加自定义供应商" }));
+    expect(invokeMock).toHaveBeenCalledWith("return_to_settings_window", undefined);
   });
 
   it("uses green and gray dots for enabled provider status", async () => {
@@ -272,6 +294,60 @@ describe("App", () => {
     expect(document.querySelector(".provider-detail-panel > .connection-result")).toBeNull();
   });
 
+  it("ignores stale connection-test responses after switching providers", async () => {
+    mockWindowLabel("settings");
+    const deepseekRequest = deferred<{ latencyMs: number; message: string }>();
+    const xiaomiRequest = deferred<{ latencyMs: number; message: string }>();
+    invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_enabled_providers") return Promise.resolve(["deepseek", "xiaomi"]);
+      if (command === "get_provider_config") {
+        if (args?.provider === "deepseek") return Promise.resolve({ apiKey: "saved", baseUrl: "https://api.deepseek.com", model: "deepseek-chat" });
+        if (args?.provider === "xiaomi") return Promise.resolve({ apiKey: "saved", baseUrl: "https://api.xiaomimimo.com/v1", model: "mimo-v2.5-pro" });
+        return Promise.resolve(null);
+      }
+      if (command === "test_provider_connection") {
+        return args?.provider === "xiaomi" ? xiaomiRequest.promise : deepseekRequest.promise;
+      }
+      return Promise.resolve(undefined);
+    });
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
+    fireEvent.click(screen.getByRole("button", { name: /Xiaomi MiMo/ }));
+    fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
+
+    xiaomiRequest.resolve({ latencyMs: 20, message: "Xiaomi ok" });
+    expect(await screen.findByText("Xiaomi ok · 20 ms")).toBeInTheDocument();
+    deepseekRequest.resolve({ latencyMs: 80, message: "DeepSeek stale" });
+    await waitFor(() => expect(screen.getByText("Xiaomi ok · 20 ms")).toBeInTheDocument());
+    expect(screen.queryByText(/DeepSeek stale/)).not.toBeInTheDocument();
+  });
+
+  it("keeps the current model fetch busy when an older request finishes", async () => {
+    mockWindowLabel("settings");
+    const deepseekRequest = deferred<string[]>();
+    const xiaomiRequest = deferred<string[]>();
+    invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_enabled_providers") return Promise.resolve(["deepseek", "xiaomi"]);
+      if (command === "get_provider_config") return Promise.resolve(null);
+      if (command === "fetch_provider_models") {
+        return args?.provider === "xiaomi" ? xiaomiRequest.promise : deepseekRequest.promise;
+      }
+      return Promise.resolve(undefined);
+    });
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "获取" }));
+    fireEvent.click(screen.getByRole("button", { name: /Xiaomi MiMo/ }));
+    fireEvent.click(screen.getByRole("button", { name: "获取" }));
+
+    deepseekRequest.resolve(["deepseek-chat"]);
+    await waitFor(() => expect(screen.getByRole("button", { name: "获取中…" })).toBeDisabled());
+    xiaomiRequest.resolve(["mimo-v2.5-pro"]);
+    expect(await screen.findByRole("option", { name: "mimo-v2.5-pro" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "deepseek-chat" })).not.toBeInTheDocument();
+  });
+
   it("uses the model selected from the quick translation picker", async () => {
     invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
       if (command === "get_enabled_providers") return Promise.resolve(["deepseek", "xiaomi"]);
@@ -327,11 +403,27 @@ describe("App", () => {
     fireEvent.click(defaultPicker);
     fireEvent.click(await screen.findByRole("option", { name: /mimo-v2.5-pro.*Xiaomi MiMo/ }));
 
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("save_preferences", {
-      autoSelection: true,
-      keepOnTop: false,
-      quickTranslateProvider: "xiaomi",
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_user_preference", {
+      preference: "quickTranslateProvider",
+      value: "xiaomi",
     }));
+  });
+
+  it("disables quick translation when no provider is enabled", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_enabled_providers") return Promise.resolve([]);
+      if (command === "get_preferences") return Promise.resolve({ autoSelection: true, keepOnTop: false, quickTranslateProvider: null });
+      return Promise.resolve(undefined);
+    });
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "快速翻译" }));
+    fireEvent.change(screen.getByLabelText("输入文本"), { target: { value: "hello" } });
+    const translateButton = screen.getByRole("button", { name: "翻译" });
+
+    await waitFor(() => expect(translateButton).toBeDisabled());
+    fireEvent.click(translateButton);
+    expect(invokeMock).not.toHaveBeenCalledWith("translate_text", expect.anything());
   });
 
   it("invokes selection translation once while a request is pending", async () => {
