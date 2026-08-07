@@ -44,13 +44,20 @@ pub(crate) const FLOAT_CORNER_RADIUS: i32 = 10;
 
 static NEXT_TRANSLATION_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 
-fn shape_float_window_as_round_rect(hwnd: windows::Win32::Foundation::HWND) -> Result<(), String> {
+fn physical_float_metric(logical_pixels: i32, scale_factor: f64) -> i32 {
+    (f64::from(logical_pixels) * scale_factor).round().max(1.0) as i32
+}
+
+fn shape_float_window_as_round_rect(
+    hwnd: windows::Win32::Foundation::HWND,
+    scale_factor: f64,
+) -> Result<(), String> {
     use windows::Win32::{
         Foundation::RECT,
         Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, HGDIOBJ, SetWindowRgn},
         UI::WindowsAndMessaging::{
             GetClientRect, GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_STYLE,
-            SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+            SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
             WINDOW_STYLE, WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU,
             WS_THICKFRAME,
         },
@@ -69,9 +76,9 @@ fn shape_float_window_as_round_rect(hwnd: windows::Win32::Foundation::HWND) -> R
             None,
             0,
             0,
-            0,
-            0,
-            SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
+            physical_float_metric(FLOAT_SIZE, scale_factor),
+            physical_float_metric(FLOAT_SIZE, scale_factor),
+            SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOZORDER,
         )
     }
     .map_err(|error| error.to_string())?;
@@ -85,8 +92,8 @@ fn shape_float_window_as_round_rect(hwnd: windows::Win32::Foundation::HWND) -> R
             client.top,
             client.right,
             client.bottom,
-            FLOAT_CORNER_RADIUS * 2,
-            FLOAT_CORNER_RADIUS * 2,
+            physical_float_metric(FLOAT_CORNER_RADIUS * 2, scale_factor),
+            physical_float_metric(FLOAT_CORNER_RADIUS * 2, scale_factor),
         )
     };
     if region.is_invalid() {
@@ -148,6 +155,12 @@ mod selection_float_tests {
             clamp_float_position(Anchor { x: 188, y: 4 }, 0, 0, 200, 100),
             Anchor { x: 168, y: 8 },
         );
+    }
+
+    #[test]
+    fn float_native_size_respects_monitor_scale_factor() {
+        assert_eq!(physical_float_metric(FLOAT_SIZE, 1.0), 32);
+        assert_eq!(physical_float_metric(FLOAT_SIZE, 1.5), 48);
     }
 
     #[test]
@@ -689,8 +702,21 @@ pub fn show_float(app: &AppHandle, anchor: Anchor, generation: u64) -> Result<()
         work_area.size.height,
     );
 
-    window.set_position(Position::Physical(PhysicalPosition::new(position.x, position.y)))
-        .map_err(|error| error.to_string())?;
+    let hwnd = window.hwnd().map_err(|error| error.to_string())?;
+    unsafe {
+        windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
+            hwnd,
+            None,
+            position.x,
+            position.y,
+            0,
+            0,
+            windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE
+                | windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE
+                | windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER,
+        )
+    }
+    .map_err(|error| error.to_string())?;
     window.show().map_err(|error| error.to_string())?;
     window.emit("selection-float:show", serde_json::json!({ "generation": generation }))
         .map_err(|error| error.to_string())
@@ -1834,7 +1860,8 @@ fn initialize_selection_float(app: &tauri::App) -> Result<(), String> {
 
     let result = (|| {
         let float_window = window.hwnd().map_err(|error| error.to_string())?;
-        shape_float_window_as_round_rect(float_window)?;
+        let scale_factor = window.scale_factor().map_err(|error| error.to_string())?;
+        shape_float_window_as_round_rect(float_window, scale_factor)?;
         let mouse_app = app.handle().clone();
         let scheduler = CaptureScheduler::start(mouse_app.clone())?;
         mouse_hook::start_mouse_hook(float_window, move |event| {

@@ -78,7 +78,7 @@ enum UiaAttempt {
 }
 
 impl CapturedSelection {
-    fn from_parts(text: String, rectangles: Vec<RECT>) -> CaptureOutcome {
+    fn from_parts(text: String, rectangles: Vec<RECT>, point: POINT) -> CaptureOutcome {
         match classify_text(&text) {
             TextClassification::Empty => return CaptureOutcome::Empty,
             TextClassification::TooLong(characters) => {
@@ -87,12 +87,12 @@ impl CapturedSelection {
             TextClassification::Usable => {}
         }
 
-        let Some(rectangle) = rectangles.into_iter().rev().find(is_visible_rectangle) else {
+        if !rectangles.iter().any(is_visible_rectangle) {
             return CaptureOutcome::Empty;
-        };
+        }
         CaptureOutcome::Detected(Self {
             text,
-            anchor: Anchor { x: rectangle.right, y: rectangle.bottom },
+            anchor: Anchor { x: point.x, y: point.y },
         })
     }
 
@@ -139,7 +139,9 @@ fn capture_with_uia(point: POINT) -> Result<UiaAttempt, CaptureError> {
         rectangles.extend(rectangles_for_range(&automation, &range)?);
     }
 
-    Ok(UiaAttempt::Outcome(CapturedSelection::from_parts(text, rectangles)))
+    Ok(UiaAttempt::Outcome(CapturedSelection::from_parts(
+        text, rectangles, point,
+    )))
 }
 
 enum TextClassification {
@@ -394,7 +396,7 @@ mod tests {
     #[test]
     fn empty_selection_is_not_a_capture() {
         assert_eq!(
-            CapturedSelection::from_parts("  ".into(), vec![]),
+            CapturedSelection::from_parts("  ".into(), vec![], POINT { x: 1, y: 2 }),
             CaptureOutcome::Empty
         );
     }
@@ -440,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn last_visible_rectangle_sets_the_anchor() {
+    fn mouse_release_point_sets_the_anchor() {
         let outcome = CapturedSelection::from_parts(
             "selected".into(),
             vec![
@@ -463,13 +465,14 @@ mod tests {
                     bottom: 80,
                 },
             ],
+            POINT { x: 25, y: 35 },
         );
 
         assert_eq!(
             outcome,
             CaptureOutcome::Detected(CapturedSelection {
                 text: "selected".into(),
-                anchor: Anchor { x: 70, y: 80 },
+                anchor: Anchor { x: 25, y: 35 },
             })
         );
     }
