@@ -61,6 +61,7 @@ impl std::error::Error for HookError {}
 #[derive(Clone, Copy, Debug)]
 pub struct MouseUpEvent {
     pub point: POINT,
+    pub start_point: Option<POINT>,
     pub clicked_float: bool,
     pub selection_gesture: bool,
 }
@@ -93,6 +94,7 @@ pub fn start_mouse_hook(
                 });
                 on_mouse_up(MouseUpEvent {
                     point: event.point,
+                    start_point: event.start_point,
                     clicked_float,
                     selection_gesture,
                 });

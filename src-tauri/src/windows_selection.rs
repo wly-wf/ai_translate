@@ -19,7 +19,10 @@ use windows::{
                 GetClipboardSequenceNumber, OpenClipboard,
             },
             Memory::{GlobalLock, GlobalSize, GlobalUnlock},
-            Ole::{OleGetClipboard, OleSetClipboard, SafeArrayDestroy, CF_UNICODETEXT},
+            Ole::{
+                OleGetClipboard, OleInitialize, OleSetClipboard, OleUninitialize,
+                SafeArrayDestroy, CF_UNICODETEXT,
+            },
         },
         UI::{
             Accessibility::{
@@ -211,9 +214,9 @@ fn rectangles_for_range(
 }
 
 fn copy_fallback(point: POINT) -> CaptureOutcome {
-    let Ok(_apartment) = ComApartment::initialize() else {
+    let Ok(_apartment) = OleApartment::initialize() else {
         return CaptureOutcome::Failed(
-            "could not initialize COM for clipboard fallback".to_string(),
+            "could not initialize OLE for clipboard fallback".to_string(),
         );
     };
     let original_clipboard = match snapshot_clipboard() {
@@ -285,6 +288,21 @@ impl ComApartment {
 impl Drop for ComApartment {
     fn drop(&mut self) {
         unsafe { CoUninitialize() };
+    }
+}
+
+struct OleApartment;
+
+impl OleApartment {
+    fn initialize() -> Result<Self, CaptureError> {
+        unsafe { OleInitialize(None)? };
+        Ok(Self)
+    }
+}
+
+impl Drop for OleApartment {
+    fn drop(&mut self) {
+        unsafe { OleUninitialize() };
     }
 }
 

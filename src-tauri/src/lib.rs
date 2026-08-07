@@ -38,8 +38,8 @@ const USER_PREFERENCES_VERSION: u8 = 1;
 const FLOAT_BUTTON_SIZE: i32 = 28;
 const FLOAT_SIZE: i32 = FLOAT_BUTTON_SIZE + 4;
 pub(crate) const FLOAT_PADDING: i32 = (FLOAT_SIZE - FLOAT_BUTTON_SIZE) / 2;
-const TRANSLATION_WINDOW_WIDTH: f64 = 500.0;
-const TRANSLATION_WINDOW_HEIGHT: f64 = 700.0;
+const TRANSLATION_WINDOW_WIDTH: f64 = 480.0;
+const TRANSLATION_WINDOW_HEIGHT: f64 = 660.0;
 pub(crate) const FLOAT_CORNER_RADIUS: i32 = 10;
 
 static NEXT_TRANSLATION_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -576,6 +576,41 @@ fn is_latest_generation(app: &AppHandle, generation: u64) -> bool {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     controller.is_latest_generation(generation)
+}
+
+fn point_hits_app_window(app: &AppHandle, point: windows::Win32::Foundation::POINT) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, WindowFromPoint, GA_ROOT};
+
+    let hit_window = unsafe { WindowFromPoint(point) };
+    if hit_window.is_invalid() {
+        return false;
+    }
+    let hit_root = unsafe { GetAncestor(hit_window, GA_ROOT) };
+    let hit_root = if hit_root.is_invalid() {
+        hit_window
+    } else {
+        hit_root
+    };
+
+    app.webview_windows().values().any(|window| {
+        let Ok(app_window) = window.hwnd() else {
+            return false;
+        };
+        let app_root = unsafe { GetAncestor(app_window, GA_ROOT) };
+        let app_root = if app_root.is_invalid() {
+            app_window
+        } else {
+            app_root
+        };
+        app_root == hit_root
+    })
+}
+
+fn selection_gesture_hits_app_window(app: &AppHandle, event: &mouse_hook::MouseUpEvent) -> bool {
+    event
+        .start_point
+        .is_some_and(|point| point_hits_app_window(app, point))
+        || point_hits_app_window(app, event.point)
 }
 
 fn apply_mouse_up(
@@ -1815,6 +1850,10 @@ fn initialize_selection_float(app: &tauri::App) -> Result<(), String> {
                 }
             };
             if event.clicked_float {
+                return;
+            }
+            if selection_gesture_hits_app_window(&mouse_app, &event) {
+                apply_mouse_up(&mouse_app, generation, CaptureOutcome::Empty, false);
                 return;
             }
             if !is_auto_selection_enabled(&mouse_app) {

@@ -269,7 +269,7 @@ function ModelPicker({ value, choices, onChange, ariaLabel, disabled = false }: 
       <span className="model-picker-value">{selectedChoice && selectedProvider ? <><strong>{selectedChoice.model}</strong><small>{selectedProvider.vendor}</small></> : <strong>未设置默认模型</strong>}</span>
       <svg className="model-picker-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
     </button>
-    {open && <div className="model-picker-menu" role="listbox" aria-label={ariaLabel}>{choices.map((choice) => { const provider = AVAILABLE_TRANSLATION_PROVIDERS.find((item) => item.id === choice.providerId); if (!provider) return null; const selected = choice.providerId === value; return <button className={`model-picker-option${selected ? " is-selected" : ""}`} type="button" role="option" aria-selected={selected} key={choice.providerId} onClick={() => { onChange(choice.providerId); setOpen(false); }}><ProviderIcon provider={provider} /><span><strong>{choice.model}</strong><small>{provider.vendor}</small></span>{selected && <span className="model-picker-check" aria-hidden="true">✓</span>}</button>; })}</div>}
+    {open && <div className="model-picker-menu" role="listbox" aria-label={ariaLabel}>{choices.map((choice) => { const provider = AVAILABLE_TRANSLATION_PROVIDERS.find((item) => item.id === choice.providerId); if (!provider) return null; const selected = choice.providerId === value; return <button className={`model-picker-option${selected ? " is-selected" : ""}`} type="button" role="option" aria-selected={selected} key={choice.providerId} onClick={() => { onChange(choice.providerId); setOpen(false); }}><ProviderIcon provider={provider} /><span><strong>{choice.model}</strong><small>{provider.vendor}</small></span>{selected && <span className="model-picker-selected-dot" aria-hidden="true" />}</button>; })}</div>}
   </div>;
 }
 
@@ -932,13 +932,13 @@ function MainWindow() {
         {settingsPage === "connection" ? renderConnectionPage() : settingsPage === "general" ? renderGeneralPage() : settingsPage === "providers" || settingsPage === "generic" ? renderProviderSettingsWithKey() : renderProviderSettings()}
         {notice && <p className="notice" role="status">{notice}</p>}
       </div>
-    </section> : <section className="content">
+    </section> : <section className={`content${showQuickTranslate ? " quick-content" : ""}`}>
       {showQuickTranslate ? <div className="quick-translate-page">
         <div className="quick-translate-heading"><p className="eyebrow">快速翻译</p></div>
         {!hasApiKey && <div className="warning"><span className="warning-icon" aria-hidden="true">!</span><p>请先在设置中配置并选择一个翻译模型。</p></div>}
         <div className="quick-model-picker"><ModelPicker value={quickTranslateProviderId} choices={quickTranslateChoices} onChange={setQuickTranslateProviderId} ariaLabel="选择翻译模型" disabled={!enabledProviderIds.length} /></div>
         <div className="input-card"><div className="input-head"><label className="field-label" htmlFor="translation-input">输入文本</label><span className="character-count">{text.length} 字符</span></div>
-          <textarea ref={inputRef} id="translation-input" value={text} onChange={(event) => setText(event.target.value)} placeholder="输入要翻译的文字…" />
+          <textarea ref={inputRef} id="translation-input" className={/[A-Za-z]/.test(text) ? "is-mixed-language" : undefined} value={text} onChange={(event) => setText(event.target.value)} placeholder="输入要翻译的文字…" />
         </div>
         <div className="quick-translate-action"><button className="primary" disabled={loading || !text.trim()} onClick={() => void translate()}>{loading ? "翻译中…" : "翻译"}</button></div>
       </div> : result ? <div className="translation-result">

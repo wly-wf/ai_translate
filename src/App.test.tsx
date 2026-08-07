@@ -95,11 +95,13 @@ describe("App", () => {
     expect(screen.queryByText("支持中英文自动识别")).not.toBeInTheDocument();
     expect(screen.queryByText("已接入")).not.toBeInTheDocument();
     expect(screen.getByLabelText("输入文本")).toBeInTheDocument();
+    expect(document.querySelector(".content")).toHaveClass("quick-content");
 
     fireEvent.click(screen.getByRole("button", { name: "返回悬浮翻译" }));
 
     expect(screen.getByRole("heading", { name: "选中文本开始翻译" })).toBeInTheDocument();
     expect(screen.queryByLabelText("输入文本")).not.toBeInTheDocument();
+    expect(document.querySelector(".content")).not.toHaveClass("quick-content");
   });
 
   it("provides a separate settings-window entry point", () => {
@@ -297,6 +299,7 @@ describe("App", () => {
     fireEvent.click(await screen.findByRole("option", { name: /mimo-v2.5-pro.*Xiaomi MiMo/ }));
     expect(screen.queryByText("设为默认快速翻译模型")).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("输入文本"), { target: { value: "hello" } });
+    expect(screen.getByLabelText("输入文本")).toHaveClass("is-mixed-language");
     fireEvent.click(screen.getByRole("button", { name: "翻译" }));
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("translate_text", { text: "hello", provider: "xiaomi" }));
