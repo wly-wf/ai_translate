@@ -126,12 +126,24 @@ describe("App", () => {
 
     expect(screen.getByRole("heading", { name: "厂商接口配置" })).toBeInTheDocument();
     expect(screen.getAllByText("DeepSeek").length).toBeGreaterThan(0);
+    const xiaomiButton = screen.getByRole("button", { name: /Xiaomi MiMo/ });
+    const bailianButton = screen.getByRole("button", { name: /阿里云百炼/ });
+    const zhipuButton = screen.getByRole("button", { name: /智谱开放平台/ });
+    expect(screen.getByRole("button", { name: /Moonshot/ })).toBeInTheDocument();
+    expect(xiaomiButton.querySelector(".provider-mimo-mark .provider-brand-image")).not.toBeNull();
+    expect(bailianButton.querySelector(".provider-bailian-mark .provider-brand-image")).not.toBeNull();
+    expect(zhipuButton.querySelector(".provider-zhipu-mark .provider-brand-image")).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "最小化" }));
     expect(invokeMock).toHaveBeenCalledWith("minimize_window", undefined);
     const apiKeyInput = screen.getByLabelText("API Key");
     expect(apiKeyInput).toHaveAttribute("type", "password");
     fireEvent.click(screen.getByRole("button", { name: "显示 API Key" }));
     expect(apiKeyInput).toHaveAttribute("type", "text");
+    expect(screen.queryByLabelText("模型名称")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "添加模型" }));
+    expect(screen.getByLabelText("模型名称")).toHaveValue("");
+    fireEvent.click(screen.getByRole("button", { name: "移除模型" }));
+    expect(screen.queryByLabelText("模型名称")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /^＋ 添加$/ }));
     expect(screen.getByRole("heading", { name: "添加供应商" })).toBeInTheDocument();
@@ -171,9 +183,11 @@ describe("App", () => {
     });
     render(<App />);
 
-    fireEvent.click(screen.getByRole("button", { name: /小米 MiMo/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Xiaomi MiMo/ }));
     fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "mimo-key" } });
-    fireEvent.click(screen.getByRole("button", { name: "加入翻译" }));
+    fireEvent.click(screen.getByRole("button", { name: "添加模型" }));
+    fireEvent.change(screen.getByLabelText("模型名称"), { target: { value: "mimo-v2.5-pro" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "启用此翻译模型" }));
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_provider_enabled", { provider: "xiaomi", enabled: true }));
     expect(invokeMock).toHaveBeenCalledWith("save_provider_config", {
@@ -209,6 +223,28 @@ describe("App", () => {
     const modelOption = await screen.findByRole("option", { name: "deepseek-chat" });
     fireEvent.click(modelOption);
     expect(screen.getByLabelText("模型名称")).toHaveValue("deepseek-chat");
+    expect(screen.queryByText(/已获取.*模型/)).not.toBeInTheDocument();
+  });
+
+  it("shows model fetch errors beside the fetch button", async () => {
+    mockWindowLabel("settings");
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_enabled_providers") return Promise.resolve([]);
+      if (command === "get_provider_config") return Promise.resolve(null);
+      if (command === "fetch_provider_models") return Promise.reject("请先保存 qwen 的 API Key。");
+      return Promise.resolve(undefined);
+    });
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: /阿里云百炼/ }));
+    fireEvent.click(screen.getByRole("button", { name: "获取" }));
+
+    const message = await screen.findByRole("status");
+    const fetchButton = screen.getByRole("button", { name: "获取" });
+    expect(message).toHaveClass("model-fetch-message");
+    expect(message).toHaveTextContent("请先保存 阿里云百炼 的 API Key。");
+    expect(message.closest(".model-toolbar")).not.toBeNull();
+    expect(message.compareDocumentPosition(fetchButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("shows connection latency beside the test button", async () => {
@@ -234,9 +270,10 @@ describe("App", () => {
     expect(document.querySelector(".provider-detail-panel > .connection-result")).toBeNull();
   });
 
-  it("renders translation results from multiple enabled models", async () => {
+  it("uses the model selected from the quick translation picker", async () => {
     invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
       if (command === "get_enabled_providers") return Promise.resolve(["deepseek", "xiaomi"]);
+      if (command === "get_preferences") return Promise.resolve({ autoSelection: true, keepOnTop: false, quickTranslateProvider: "deepseek" });
       if (command === "get_provider_config") {
         return Promise.resolve(args?.provider === "xiaomi"
           ? { apiKey: "saved", baseUrl: "https://api.xiaomimimo.com/v1", model: "mimo-v2.5-pro" }
@@ -246,7 +283,6 @@ describe("App", () => {
         source: "hello",
         requestId: 7,
         results: [
-          { providerId: "deepseek", model: "deepseek-v4-flash", translation: "你好" },
           { providerId: "xiaomi", model: "mimo-v2.5-pro", translation: "您好" },
         ],
       });
@@ -255,14 +291,44 @@ describe("App", () => {
     render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: "快速翻译" }));
+    const modelPicker = screen.getByRole("button", { name: "选择翻译模型" });
+    await waitFor(() => expect(modelPicker).toHaveTextContent("deepseek-v4-flash"));
+    fireEvent.click(modelPicker);
+    fireEvent.click(await screen.findByRole("option", { name: /mimo-v2.5-pro.*Xiaomi MiMo/ }));
+    expect(screen.queryByText("设为默认快速翻译模型")).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("输入文本"), { target: { value: "hello" } });
     fireEvent.click(screen.getByRole("button", { name: "翻译" }));
 
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("translate_text", { text: "hello" }));
-    expect(await screen.findByText("deepseek-v4-flash/DeepSeek")).toBeInTheDocument();
-    expect(screen.getByText("mimo-v2.5-pro/小米 MiMo")).toBeInTheDocument();
-    expect(screen.getAllByText("你好")[0]).toBeInTheDocument();
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("translate_text", { text: "hello", provider: "xiaomi" }));
+    expect(screen.getByText("mimo-v2.5-pro/Xiaomi MiMo")).toBeInTheDocument();
     expect(screen.getAllByText("您好")[0]).toBeInTheDocument();
+  });
+
+  it("sets the default quick translation model from general settings", async () => {
+    mockWindowLabel("settings");
+    invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_enabled_providers") return Promise.resolve(["deepseek", "xiaomi"]);
+      if (command === "get_preferences") return Promise.resolve({ autoSelection: true, keepOnTop: false, quickTranslateProvider: "deepseek" });
+      if (command === "get_provider_config") {
+        return Promise.resolve(args?.provider === "xiaomi"
+          ? { apiKey: "saved", baseUrl: "https://api.xiaomimimo.com/v1", model: "mimo-v2.5-pro" }
+          : { apiKey: "saved", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash" });
+      }
+      return Promise.resolve(undefined);
+    });
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "通用设置" }));
+    const defaultPicker = screen.getByRole("button", { name: "设置默认快速翻译模型" });
+    await waitFor(() => expect(defaultPicker).toHaveTextContent("deepseek-v4-flash"));
+    fireEvent.click(defaultPicker);
+    fireEvent.click(await screen.findByRole("option", { name: /mimo-v2.5-pro.*Xiaomi MiMo/ }));
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("save_preferences", {
+      autoSelection: true,
+      keepOnTop: false,
+      quickTranslateProvider: "xiaomi",
+    }));
   });
 
   it("invokes selection translation once while a request is pending", async () => {

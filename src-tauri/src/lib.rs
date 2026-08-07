@@ -297,12 +297,26 @@ mod selection_float_tests {
     }
 
     #[test]
-    fn openai_compatible_model_ids_are_sorted_and_deduplicated() {
+    fn openai_compatible_model_ids_keep_only_text_generation_models() {
         let payload = serde_json::json!({
-            "data": [{ "id": "model-b" }, { "id": "model-a" }, { "id": "model-b" }]
+            "data": [
+                { "id": "qwen-plus" },
+                { "id": "qwen-vl-max" },
+                { "id": "qwen-plus" },
+                { "id": "text-embedding-v3" },
+                { "id": "gte-multilingual-base" },
+                { "id": "gte-rerank-v2" },
+                { "id": "qwen-image" },
+                { "id": "paraformer-asr" },
+                { "id": "gpt-4o-realtime-preview" },
+                { "id": "creative-v1", "output_modalities": ["image"] }
+            ]
         });
 
-        assert_eq!(parse_model_ids("qwen", &payload).unwrap(), vec!["model-a", "model-b"]);
+        assert_eq!(
+            parse_model_ids("qwen", &payload).unwrap(),
+            vec!["qwen-plus", "qwen-vl-max"]
+        );
     }
 
     #[test]
@@ -310,6 +324,7 @@ mod selection_float_tests {
         let payload = serde_json::json!({
             "models": [
                 { "name": "models/gemini-flash", "supportedGenerationMethods": ["generateContent"] },
+                { "name": "models/gemini-image-generation", "supportedGenerationMethods": ["generateContent"] },
                 { "name": "models/embedding-001", "supportedGenerationMethods": ["embedContent"] }
             ]
         });
@@ -351,6 +366,8 @@ struct UserPreferences {
     auto_selection: bool,
     keep_on_top: bool,
     #[serde(default)]
+    quick_translate_provider: Option<String>,
+    #[serde(default)]
     preference_version: u8,
 }
 
@@ -359,6 +376,7 @@ impl Default for UserPreferences {
         Self {
             auto_selection: true,
             keep_on_top: false,
+            quick_translate_provider: None,
             preference_version: USER_PREFERENCES_VERSION,
         }
     }
@@ -1058,6 +1076,49 @@ async fn send_connection_test(
     Err(format!("请求失败（{status}）：{detail}"))
 }
 
+fn modality_list_supports(entry: &serde_json::Value, keys: &[&str], modality: &str) -> Option<bool> {
+    keys.iter().find_map(|key| {
+        entry.get(key).and_then(serde_json::Value::as_array).map(|modalities| {
+            modalities.iter().any(|value| {
+                value.as_str().is_some_and(|value| value.eq_ignore_ascii_case(modality))
+            })
+        })
+    })
+}
+
+fn model_id_is_suitable_for_translation(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    const NON_TEXT_MODEL_MARKERS: &[&str] = &[
+        "embedding", "embed-", "-embed", "rerank", "moderation", "classifier",
+        "guard", "bge-", "gte-", "text2vec", "whisper", "transcri", "speech",
+        "tts", "-asr", "audio", "voice", "realtime", "computer-use",
+        "dall-e", "image", "imagen", "stable-diffusion", "cogview", "flux",
+        "video", "sora", "veo-", "wanx", "-t2v", "-i2v", "cogvideo", "ocr",
+    ];
+
+    !NON_TEXT_MODEL_MARKERS.iter().any(|marker| model.contains(marker))
+}
+
+fn model_entry_supports_translation(provider: &str, entry: &serde_json::Value, model: &str) -> bool {
+    if provider == "google" {
+        let supports_generate = entry.get("supportedGenerationMethods")
+            .and_then(serde_json::Value::as_array)
+            .map(|methods| methods.iter().any(|method| method.as_str() == Some("generateContent")))
+            .unwrap_or(false);
+        if !supports_generate {
+            return false;
+        }
+    }
+
+    if modality_list_supports(entry, &["input_modalities", "supported_input_modalities"], "text") == Some(false)
+        || modality_list_supports(entry, &["output_modalities", "supported_output_modalities"], "text") == Some(false)
+    {
+        return false;
+    }
+
+    model_id_is_suitable_for_translation(model)
+}
+
 fn parse_model_ids(provider: &str, payload: &serde_json::Value) -> Result<Vec<String>, String> {
     let entries = if provider == "google" {
         payload.get("models").and_then(serde_json::Value::as_array)
@@ -1066,22 +1127,18 @@ fn parse_model_ids(provider: &str, payload: &serde_json::Value) -> Result<Vec<St
     }
     .ok_or_else(|| "接口没有返回可识别的模型列表。".to_string())?;
     let mut models = entries.iter().filter_map(|entry| {
-        if provider == "google" {
-            let supports_generate = entry.get("supportedGenerationMethods")
-                .and_then(serde_json::Value::as_array)
-                .map(|methods| methods.iter().any(|method| method.as_str() == Some("generateContent")))
-                .unwrap_or(true);
-            supports_generate.then(|| {
-                entry.get("name")?.as_str().map(|name| name.trim_start_matches("models/").to_string())
-            }).flatten()
+        let model = if provider == "google" {
+            entry.get("name")?.as_str()?.trim_start_matches("models/")
         } else {
-            entry.get("id")?.as_str().map(str::to_string)
-        }
-    }).filter(|model| !model.trim().is_empty()).collect::<Vec<_>>();
+            entry.get("id")?.as_str()?
+        };
+        (!model.trim().is_empty() && model_entry_supports_translation(provider, entry, model))
+            .then(|| model.to_string())
+    }).collect::<Vec<_>>();
     models.sort_unstable();
     models.dedup();
     if models.is_empty() {
-        return Err("接口返回的模型列表为空。".to_string());
+        return Err("接口没有返回可用于文本翻译的模型。".to_string());
     }
     Ok(models)
 }
@@ -1205,6 +1262,7 @@ async fn translate_and_display(
     app: AppHandle,
     text: String,
     float_placement: Option<FloatPlacement>,
+    requested_provider: Option<String>,
     request_id: u64,
 ) -> Result<TranslationBatch, String> {
     let source = text.trim().to_string();
@@ -1212,10 +1270,18 @@ async fn translate_and_display(
     if source.chars().count() > 12_000 {
         return Err("单次翻译最多支持 12,000 个字符。".to_string());
     }
-    let providers = enabled_providers_sync();
-    if providers.is_empty() {
+    let enabled_providers = enabled_providers_sync();
+    if enabled_providers.is_empty() {
         return Err("请先在设置中启用至少一个翻译模型。".to_string());
     }
+    let providers = if let Some(provider) = requested_provider {
+        if !enabled_providers.contains(&provider) {
+            return Err("所选模型未启用，请重新选择。".to_string());
+        }
+        vec![provider]
+    } else {
+        enabled_providers
+    };
     let pending_result = TranslationBatch {
         source: source.clone(),
         request_id,
@@ -1293,8 +1359,8 @@ async fn translate_and_display(
 }
 
 #[tauri::command]
-async fn translate_text(app: AppHandle, text: String) -> Result<TranslationBatch, String> {
-    translate_and_display(app, text, None, next_translation_request_id()).await
+async fn translate_text(app: AppHandle, text: String, provider: Option<String>) -> Result<TranslationBatch, String> {
+    translate_and_display(app, text, None, provider, next_translation_request_id()).await
 }
 
 #[tauri::command]
@@ -1525,10 +1591,12 @@ async fn save_preferences(
     app: AppHandle,
     auto_selection: bool,
     keep_on_top: bool,
+    quick_translate_provider: Option<String>,
 ) -> Result<UserPreferences, String> {
     let preferences = UserPreferences {
         auto_selection,
         keep_on_top,
+        quick_translate_provider,
         preference_version: USER_PREFERENCES_VERSION,
     };
     let saved_preferences = preferences.clone();
@@ -1648,7 +1716,7 @@ async fn translate_selection_float(app: AppHandle) -> Result<(), String> {
     if let Err(error) = hide_float(&app) {
         eprintln!("Selection float hide failed before translation: {error}");
     }
-    match translate_and_display(app.clone(), text, float_placement, request_id).await {
+    match translate_and_display(app.clone(), text, float_placement, None, request_id).await {
         Ok(_) => Ok(()),
         Err(error) => {
             let restored = {
