@@ -164,6 +164,26 @@ describe("App", () => {
     expect(screen.getAllByRole("button", { name: "测试连接" })).toHaveLength(1);
   });
 
+  it("renders the about page information and future project links", () => {
+    mockWindowLabel("settings");
+    const { container } = render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "关于" }));
+
+    const brand = container.querySelector(".about-brand");
+    expect(brand).toHaveTextContent("AI Translate");
+    expect(brand).not.toHaveTextContent("关于");
+    expect(screen.getByRole("heading", { level: 1, name: "AI Translate" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "软件介绍" })).toBeInTheDocument();
+    expect(screen.getByText("v0.1.0")).toBeInTheDocument();
+    expect(screen.getByText("GitHub 开源仓库")).toBeInTheDocument();
+    expect(screen.getByText("GitHub Issues")).toBeInTheDocument();
+    expect(screen.getByText("https://github.com/<owner>/<repository>")).toBeInTheDocument();
+    expect(screen.getByText("https://github.com/<owner>/<repository>/issues")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "检查更新" })).toBeDisabled();
+    expect(screen.getAllByText("待配置")).toHaveLength(2);
+  });
+
   it("renders add-provider in its own window with a unified close action", () => {
     mockWindowLabel("add-provider");
     render(<App />);
@@ -219,6 +239,7 @@ describe("App", () => {
       apiKey: "mimo-key",
       baseUrl: "https://api.xiaomimimo.com/v1",
       model: "mimo-v2.5-pro",
+      models: ["mimo-v2.5-pro"],
     });
     expect(screen.queryByText(/与其他启用模型同时返回结果/)).not.toBeInTheDocument();
     expect(screen.queryByText(/已加入翻译/)).not.toBeInTheDocument();
@@ -226,12 +247,13 @@ describe("App", () => {
 
   it("fetches provider models and selects one from the returned list", async () => {
     mockWindowLabel("settings");
+    const modelRequest = deferred<string[]>();
     invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
       if (command === "get_enabled_providers") return Promise.resolve(["deepseek"]);
       if (command === "get_provider_config" && args?.provider === "deepseek") {
         return Promise.resolve({ apiKey: "saved-key", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash" });
       }
-      if (command === "fetch_provider_models") return Promise.resolve(["deepseek-chat", "deepseek-reasoner"]);
+      if (command === "fetch_provider_models") return modelRequest.promise;
       return Promise.resolve(undefined);
     });
     render(<App />);
@@ -239,15 +261,52 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByLabelText("API Key")).toHaveValue("saved-key"));
     fireEvent.click(screen.getByRole("button", { name: "获取" }));
 
+    const dialog = await screen.findByRole("dialog", { name: "DeepSeek 可用模型" });
+    expect(dialog).toHaveClass("model-dialog-card");
+    expect(screen.getByRole("status", { name: "正在获取 DeepSeek 模型" })).toHaveTextContent("正在获取模型");
+    expect(screen.getByRole("button", { name: "获取" })).toBeDisabled();
+    expect(screen.queryByText("获取中…")).not.toBeInTheDocument();
+
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("fetch_provider_models", {
       provider: "deepseek",
       apiKey: "saved-key",
       baseUrl: "https://api.deepseek.com",
     }));
-    const modelOption = await screen.findByRole("option", { name: "deepseek-chat" });
-    fireEvent.click(modelOption);
-    expect(screen.getByLabelText("模型名称")).toHaveValue("deepseek-chat");
-    expect(screen.queryByText(/已获取.*模型/)).not.toBeInTheDocument();
+    modelRequest.resolve(["deepseek-chat", "deepseek-reasoner"]);
+    await waitFor(() => expect(screen.getByRole("button", { name: "添加模型 deepseek-chat" })).toBeInTheDocument());
+    expect(dialog).not.toHaveTextContent("模型目录");
+    expect(dialog).not.toHaveTextContent("已获取 2 个可用模型");
+    expect(document.querySelector(".fetched-model-list")).toBeNull();
+    const addModelButton = await screen.findByRole("button", { name: "添加模型 deepseek-chat" });
+    expect(addModelButton.closest(".model-dialog-card")).toBe(dialog);
+    expect(addModelButton.closest(".model-dialog-option")).toHaveTextContent("deepseek-chat");
+    expect(addModelButton.closest(".model-dialog-option")?.querySelector("small")).toBeNull();
+    expect(dialog.querySelector(".model-dialog-check")).toBeNull();
+    expect(dialog.querySelector(".is-selected")).toBeNull();
+    fireEvent.click(addModelButton);
+    expect(screen.getAllByLabelText("模型名称").map((input) => (input as HTMLInputElement).value)).toEqual([
+      "deepseek-v4-flash",
+      "deepseek-chat",
+    ]);
+    fireEvent.click(screen.getByRole("button", { name: "添加模型 deepseek-reasoner" }));
+    expect(screen.getAllByLabelText("模型名称").map((input) => (input as HTMLInputElement).value)).toEqual([
+      "deepseek-v4-flash",
+      "deepseek-chat",
+      "deepseek-reasoner",
+    ]);
+    const removeModelButton = dialog.querySelector<HTMLButtonElement>('[aria-label="移除模型 deepseek-chat"]');
+    expect(removeModelButton).not.toBeNull();
+    fireEvent.click(removeModelButton!);
+    expect(screen.getAllByLabelText("模型名称").map((input) => (input as HTMLInputElement).value)).toEqual([
+      "deepseek-v4-flash",
+      "deepseek-reasoner",
+    ]);
+    expect(screen.getByRole("button", { name: "添加模型 deepseek-chat" })).toBeInTheDocument();
+    expect(dialog).toBeInTheDocument();
+    expect(document.querySelector(".model-fetch-message")).toBeNull();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "DeepSeek 可用模型" })).not.toBeInTheDocument());
   });
 
   it("shows model fetch errors beside the fetch button", async () => {
@@ -258,17 +317,18 @@ describe("App", () => {
       if (command === "fetch_provider_models") return Promise.reject("请先保存 qwen 的 API Key。");
       return Promise.resolve(undefined);
     });
-    render(<App />);
+    const { container } = render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: /阿里云百炼/ }));
     fireEvent.click(screen.getByRole("button", { name: "获取" }));
 
-    const message = await screen.findByRole("status");
+    await waitFor(() => expect(container.querySelector(".model-fetch-message")).toHaveTextContent("请先保存 阿里云百炼 的 API Key。"));
+    const message = container.querySelector<HTMLElement>(".model-fetch-message");
     const fetchButton = screen.getByRole("button", { name: "获取" });
     expect(message).toHaveClass("model-fetch-message");
     expect(message).toHaveTextContent("请先保存 阿里云百炼 的 API Key。");
-    expect(message.closest(".model-toolbar")).not.toBeNull();
-    expect(message.compareDocumentPosition(fetchButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(message?.closest(".model-toolbar")).not.toBeNull();
+    expect(message && (message.compareDocumentPosition(fetchButton) & Node.DOCUMENT_POSITION_FOLLOWING)).toBeTruthy();
   });
 
   it("shows connection latency beside the test button", async () => {
@@ -342,10 +402,10 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "获取" }));
 
     deepseekRequest.resolve(["deepseek-chat"]);
-    await waitFor(() => expect(screen.getByRole("button", { name: "获取中…" })).toBeDisabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: "获取" })).toBeDisabled());
     xiaomiRequest.resolve(["mimo-v2.5-pro"]);
-    expect(await screen.findByRole("option", { name: "mimo-v2.5-pro" })).toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: "deepseek-chat" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "添加模型 mimo-v2.5-pro" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "添加模型 deepseek-chat" })).not.toBeInTheDocument();
   });
 
   it("uses the model selected from the quick translation picker", async () => {
@@ -438,6 +498,48 @@ describe("App", () => {
     await waitFor(() => expect(button).toBeDisabled());
     expect(invokeMock).toHaveBeenCalledTimes(1);
     expect(invokeMock).toHaveBeenCalledWith("translate_selection_float");
+  });
+
+  it("shows the known source text while the provider translation is pending", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_enabled_providers") return Promise.resolve(["deepseek"]);
+      if (command === "get_latest_translation") return Promise.resolve({
+        source: "Known source text",
+        requestId: 12,
+        results: [{ providerId: "deepseek", model: "deepseek-v4-flash" }],
+      });
+      return Promise.resolve(undefined);
+    });
+
+    const { container } = render(<App />);
+
+    await waitFor(() => {
+      expect(container.querySelector(".source:not(.text-measure)")).toHaveTextContent("Known source text");
+    });
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("翻译中…");
+    expect(container.querySelector(".provider-body")).toHaveAttribute("aria-busy", "true");
+    expect(container.querySelector(".translation-line")).toContainElement(status);
+  });
+
+  it("preserves captured source line breaks instead of merging them into a paragraph", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_enabled_providers") return Promise.resolve(["deepseek"]);
+      if (command === "get_latest_translation") return Promise.resolve({
+        source: "第一项\r\n第二项\r第三项",
+        requestId: 13,
+        results: [{ providerId: "deepseek", model: "deepseek-v4-flash", translation: "First\nSecond\nThird" }],
+      });
+      return Promise.resolve(undefined);
+    });
+
+    const { container } = render(<App />);
+
+    await waitFor(() => {
+      const sourceParagraphs = Array.from(container.querySelectorAll(".source:not(.text-measure) .text-paragraph"));
+      expect(sourceParagraphs.map((paragraph) => paragraph.textContent)).toEqual(["第一项", "第二项", "第三项"]);
+      expect(container.querySelectorAll(".translation:not(.text-measure) .text-paragraph")).toHaveLength(3);
+    });
   });
 
   it("reenables selection translation when the native command reports an error", async () => {

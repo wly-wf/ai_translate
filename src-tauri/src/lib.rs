@@ -352,6 +352,32 @@ mod selection_float_tests {
         assert!(validate_base_url("http://127.0.0.1:8080/v1").is_ok());
         assert!(validate_base_url("http://api.example.com/v1").is_err());
     }
+
+    #[test]
+    fn multiple_models_are_trimmed_deduplicated_and_keep_primary_first() {
+        assert_eq!(
+            normalize_models(
+                " deepseek-v4-flash ",
+                &["deepseek-v4-pro".into(), "deepseek-v4-flash".into(), " ".into()],
+            ),
+            vec!["deepseek-v4-flash", "deepseek-v4-pro"]
+        );
+    }
+
+    #[test]
+    fn legacy_single_model_provider_config_still_deserializes() {
+        let config: StoredProviderConfig = serde_json::from_value(serde_json::json!({
+            "api_key": "secret",
+            "base_url": "https://api.example.com",
+            "model": "legacy-model"
+        }))
+        .unwrap();
+
+        assert_eq!(
+            normalize_models(&config.model, &config.models),
+            vec!["legacy-model"]
+        );
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -408,7 +434,10 @@ struct TranslationError {
 struct StoredProviderConfig {
     api_key: String,
     base_url: String,
+    #[serde(default)]
     model: String,
+    #[serde(default)]
+    models: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -417,6 +446,7 @@ struct ProviderConfigResponse {
     api_key: String,
     base_url: String,
     model: String,
+    models: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -570,11 +600,11 @@ impl CaptureScheduler {
                     continue;
                 }
                 if !is_auto_selection_enabled(&app) {
-                    apply_mouse_up(&app, request.generation, CaptureOutcome::Empty, false);
+                    dispatch_mouse_up(&app, request.generation, CaptureOutcome::Empty, false);
                     continue;
                 }
                 let outcome = capture_selection(request.point);
-                apply_mouse_up(&app, request.generation, outcome, false);
+                dispatch_mouse_up(&app, request.generation, outcome, false);
             })
             .map_err(|error| format!("could not start selection capture worker: {error}"))?;
         Ok(Self { pending })
@@ -670,6 +700,20 @@ fn apply_mouse_up(
             }
         }
         StateChange::Unchanged => {}
+    }
+}
+
+fn dispatch_mouse_up(
+    app: &AppHandle,
+    generation: u64,
+    captured: CaptureOutcome,
+    clicked_float: bool,
+) {
+    let callback_app = app.clone();
+    if let Err(error) = app.run_on_main_thread(move || {
+        apply_mouse_up(&callback_app, generation, captured, clicked_float);
+    }) {
+        eprintln!("Could not dispatch selection result to the main thread: {error}");
     }
 }
 
@@ -912,14 +956,28 @@ fn save_enabled_providers_sync(providers: &[String]) -> Result<(), String> {
         .map_err(|error| format!("无法保存启用模型列表：{error}"))
 }
 
+fn normalize_models(primary_model: &str, models: &[String]) -> Vec<String> {
+    std::iter::once(primary_model)
+        .chain(models.iter().map(String::as_str))
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .fold(Vec::new(), |mut unique, model| {
+            if !unique.iter().any(|item| item == model) {
+                unique.push(model.to_string());
+            }
+            unique
+        })
+}
+
 fn configured_provider(provider: &str) -> Result<StoredProviderConfig, String> {
-    let config = match stored_provider_config(provider) {
+    let mut config = match stored_provider_config(provider) {
         Ok(config) => config,
         Err(_) if provider == "deepseek" => {
             return Ok(StoredProviderConfig {
                 api_key: legacy_api_key()?,
                 base_url: DEEPSEEK_BASE_URL.to_string(),
                 model: DEEPSEEK_MODEL.to_string(),
+                models: vec![DEEPSEEK_MODEL.to_string()],
             });
         }
         Err(error) => return Err(error),
@@ -931,9 +989,12 @@ fn configured_provider(provider: &str) -> Result<StoredProviderConfig, String> {
         return Err(format!("{provider} Base URL 不能为空。"));
     }
     validate_base_url(&config.base_url)?;
-    if config.model.trim().is_empty() {
-        return Err(format!("{provider} 模型名称不能为空。"));
-    }
+    config.models = normalize_models(&config.model, &config.models);
+    config.model = config
+        .models
+        .first()
+        .cloned()
+        .ok_or_else(|| format!("{provider} 模型名称不能为空。"))?;
     Ok(config)
 }
 
@@ -949,8 +1010,16 @@ fn disable_thinking_for_openai_compatible(provider: &str, body: &mut serde_json:
     }
 }
 
-async fn request_translation(provider: String, text: String) -> Result<ProviderTranslation, String> {
+async fn request_translation(
+    provider: String,
+    model: String,
+    text: String,
+) -> Result<ProviderTranslation, String> {
     let config = configured_provider(&provider)?;
+    let model = model.trim().to_string();
+    if !config.models.contains(&model) {
+        return Err(format!("{provider} 模型 {model} 未配置。"));
+    }
     let target = translation_target(&text);
     let prompt = format!(
         "Translate the following text into natural {target}. The target language is fixed by the application; do not answer in the source language, even when the input mixes Chinese and English terms. Preserve product names, model names, acronyms, and technical notation. Return only the translation, without notes or quotation marks.\n\n{text}"
@@ -964,7 +1033,7 @@ async fn request_translation(provider: String, text: String) -> Result<ProviderT
             let endpoint = format!(
                 "{}/models/{}:generateContent",
                 config.base_url.trim().trim_end_matches('/'),
-                config.model.trim()
+                model
             );
             client.post(endpoint)
                 .header("x-goog-api-key", &config.api_key)
@@ -983,7 +1052,7 @@ async fn request_translation(provider: String, text: String) -> Result<ProviderT
             .header("x-api-key", &config.api_key)
             .header("anthropic-version", "2023-06-01")
             .json(&serde_json::json!({
-                "model": config.model.trim(),
+                "model": model,
                 "max_tokens": 4096,
                 "system": "You are a precise translation engine.",
                 "messages": [{ "role": "user", "content": prompt }],
@@ -992,7 +1061,7 @@ async fn request_translation(provider: String, text: String) -> Result<ProviderT
             .send().await,
         _ => {
             let mut body = serde_json::json!({
-                "model": config.model.trim(),
+                "model": model,
                 "messages": [
                     { "role": "system", "content": "You are a precise translation engine." },
                     { "role": "user", "content": prompt }
@@ -1011,7 +1080,7 @@ async fn request_translation(provider: String, text: String) -> Result<ProviderT
         let detail = response.text().await.unwrap_or_default().chars().take(400).collect::<String>();
         return Ok(ProviderTranslation {
             provider_id: provider,
-            model: config.model,
+            model,
             translation: None,
             error: Some(format!("请求失败（{status}）：{detail}")),
         });
@@ -1020,7 +1089,7 @@ async fn request_translation(provider: String, text: String) -> Result<ProviderT
         Ok(payload) => payload,
         Err(error) => return Ok(ProviderTranslation {
             provider_id: provider,
-            model: config.model,
+            model,
             translation: None,
             error: Some(format!("无法解析响应：{error}")),
         }),
@@ -1036,7 +1105,7 @@ async fn request_translation(provider: String, text: String) -> Result<ProviderT
     .map(str::to_string);
     Ok(ProviderTranslation {
         provider_id: provider,
-        model: config.model,
+        model,
         error: translation.is_none().then(|| "没有返回翻译结果。".to_string()),
         translation,
     })
@@ -1309,8 +1378,10 @@ fn publish_provider_result(
         let Some(batch) = latest.as_mut().filter(|batch| batch.request_id == request_id) else {
             return;
         };
-        if let Some(result) = batch.results.iter_mut()
-            .find(|result| result.provider_id == provider_result.provider_id)
+        if let Some(result) = batch.results.iter_mut().find(|result| {
+            result.provider_id == provider_result.provider_id
+                && result.model == provider_result.model
+        })
         {
             *result = provider_result.clone();
         }
@@ -1345,12 +1416,22 @@ async fn translate_and_display(
     } else {
         enabled_providers
     };
+    let mut targets = Vec::new();
+    for provider in providers {
+        let config = configured_provider(&provider)?;
+        targets.extend(
+            config
+                .models
+                .into_iter()
+                .map(|model| (provider.clone(), model)),
+        );
+    }
     let pending_result = TranslationBatch {
         source: source.clone(),
         request_id,
-        results: providers.iter().map(|provider| ProviderTranslation {
+        results: targets.iter().map(|(provider, model)| ProviderTranslation {
             provider_id: provider.clone(),
-            model: configured_provider(provider).map(|config| config.model).unwrap_or_default(),
+            model: model.clone(),
             translation: None,
             error: None,
         }).collect(),
@@ -1372,32 +1453,36 @@ async fn translate_and_display(
         .map_err(|error| error.to_string())?;
     app.emit("translation-started", &pending_result).map_err(|error| error.to_string())?;
 
-    let mut pending = Vec::with_capacity(providers.len());
-    for provider in providers {
+    let mut pending = Vec::with_capacity(targets.len());
+    for (provider, model) in targets {
         let request_text = source.clone();
         let task_provider = provider.clone();
+        let task_model = model.clone();
         let task_app = app.clone();
-        pending.push((provider.clone(), tauri::async_runtime::spawn(async move {
-            let result = match request_translation(task_provider, request_text).await {
-                Ok(result) => result,
-                Err(error) => ProviderTranslation {
-                    provider_id: provider,
-                    model: String::new(),
-                    translation: None,
-                    error: Some(error),
-                },
-            };
-            publish_provider_result(&task_app, request_id, &result);
-            result
-        })));
+        pending.push((
+            (provider.clone(), model.clone()),
+            tauri::async_runtime::spawn(async move {
+                let result = match request_translation(task_provider, task_model, request_text).await {
+                    Ok(result) => result,
+                    Err(error) => ProviderTranslation {
+                        provider_id: provider,
+                        model,
+                        translation: None,
+                        error: Some(error),
+                    },
+                };
+                publish_provider_result(&task_app, request_id, &result);
+                result
+            }),
+        ));
     }
     let mut results = Vec::with_capacity(pending.len());
-    for (provider, task) in pending {
+    for ((provider, model), task) in pending {
         let result = match task.await {
             Ok(result) => result,
             Err(error) => ProviderTranslation {
                 provider_id: provider,
-                model: String::new(),
+                model,
                 translation: None,
                 error: Some(format!("翻译任务失败：{error}")),
             },
@@ -1446,12 +1531,14 @@ fn save_provider_config_sync(
     api_key: String,
     base_url: String,
     model: String,
+    models: Option<Vec<String>>,
 ) -> Result<(), String> {
     if !supported_provider(&provider) {
         return Err(format!("不支持的 AI 提供商：{provider}"));
     }
-    if base_url.trim().is_empty() || model.trim().is_empty() {
-        return Err("Base URL 和模型名称不能为空。".to_string());
+    let models = normalize_models(&model, models.as_deref().unwrap_or_default());
+    if base_url.trim().is_empty() || models.is_empty() {
+        return Err("Base URL 不能为空，并且至少需要配置一个模型。".to_string());
     }
     validate_base_url(&base_url)?;
     let key = if api_key.trim().is_empty() {
@@ -1471,7 +1558,8 @@ fn save_provider_config_sync(
     let config = StoredProviderConfig {
         api_key: key.clone(),
         base_url: base_url.trim().trim_end_matches('/').to_string(),
-        model: model.trim().to_string(),
+        model: models[0].clone(),
+        models,
     };
     let serialized = serde_json::to_string(&config).map_err(|error| format!("无法序列化配置：{error}"))?;
     provider_keyring_entry(&provider)?.set_password(&serialized)
@@ -1490,10 +1578,11 @@ async fn save_provider_config(
     api_key: String,
     base_url: String,
     model: String,
+    models: Option<Vec<String>>,
 ) -> Result<(), String> {
     let saved_provider = provider.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        save_provider_config_sync(provider, api_key, base_url, model)
+        save_provider_config_sync(provider, api_key, base_url, model, models)
     })
     .await
     .map_err(|error| format!("保存配置任务失败：{error}"))??;
@@ -1517,6 +1606,7 @@ async fn get_provider_config(provider: String) -> Result<Option<ProviderConfigRe
                         api_key,
                         base_url: DEEPSEEK_BASE_URL.to_string(),
                         model: DEEPSEEK_MODEL.to_string(),
+                        models: vec![DEEPSEEK_MODEL.to_string()],
                     }));
                 }
             }
@@ -1524,10 +1614,13 @@ async fn get_provider_config(provider: String) -> Result<Option<ProviderConfigRe
         };
         let config: StoredProviderConfig = serde_json::from_str(&password)
             .map_err(|error| format!("无法读取 {provider} 配置：{error}"))?;
+        let models = normalize_models(&config.model, &config.models);
+        let model = models.first().cloned().unwrap_or_default();
         Ok(Some(ProviderConfigResponse {
             api_key: config.api_key,
             base_url: config.base_url,
-            model: config.model,
+            model,
+            models,
         }))
     })
     .await
@@ -1730,6 +1823,7 @@ fn show_settings_window(app: &AppHandle) -> Result<(), String> {
         window.set_size(Size::Logical(LogicalSize::new(1120.0, 760.0))).map_err(|error| error.to_string())?;
         window.set_resizable(false).map_err(|error| error.to_string())?;
         window.set_minimizable(true).map_err(|error| error.to_string())?;
+        window.set_shadow(true).map_err(|error| error.to_string())?;
         window.set_always_on_top(false).map_err(|error| error.to_string())?;
         window.unminimize().map_err(|error| error.to_string())?;
         window.show().map_err(|error| error.to_string())?;
@@ -1768,17 +1862,37 @@ fn show_settings_window(app: &AppHandle) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+fn center_child_window(child: &WebviewWindow, parent: &WebviewWindow) -> Result<(), String> {
+    let parent_position = parent.outer_position().map_err(|error| error.to_string())?;
+    let parent_size = parent.outer_size().map_err(|error| error.to_string())?;
+    let child_size = child.outer_size().map_err(|error| error.to_string())?;
+    let x = parent_position.x
+        + (parent_size.width.saturating_sub(child_size.width) / 2) as i32;
+    let y = parent_position.y
+        + (parent_size.height.saturating_sub(child_size.height) / 2) as i32;
+    child
+        .set_position(Position::Physical(PhysicalPosition::new(x, y)))
+        .map_err(|error| error.to_string())
+}
+
 fn show_add_provider_window(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("add-provider") {
         window.set_size(Size::Logical(LogicalSize::new(640.0, 540.0))).map_err(|error| error.to_string())?;
         window.set_resizable(false).map_err(|error| error.to_string())?;
+        if let Some(parent) = app.get_webview_window("settings") {
+            center_child_window(&window, &parent)?;
+        } else {
+            window.center().map_err(|error| error.to_string())?;
+        }
         window.unminimize().map_err(|error| error.to_string())?;
         window.show().map_err(|error| error.to_string())?;
         window.set_focus().map_err(|error| error.to_string())?;
         return Ok(());
     }
 
-    WebviewWindowBuilder::new(app, "add-provider", WebviewUrl::App("index.html".into()))
+    let settings_parent = app.get_webview_window("settings");
+    let center_parent = settings_parent.clone();
+    let builder = WebviewWindowBuilder::new(app, "add-provider", WebviewUrl::App("index.html".into()))
         .inner_size(640.0, 540.0)
         .min_inner_size(560.0, 520.0)
         .title("添加自定义供应商")
@@ -1790,10 +1904,23 @@ fn show_add_provider_window(app: &AppHandle) -> Result<(), String> {
         .minimizable(false)
         .resizable(false)
         .focused(false)
-        .visible(false)
-        .center()
-        .on_page_load(|window, payload| {
+        .visible(false);
+    let builder = if let Some(parent) = settings_parent.as_ref() {
+        builder.parent(parent).map_err(|error| error.to_string())?
+    } else {
+        builder
+    };
+    builder
+        .on_page_load(move |window, payload| {
             if matches!(payload.event(), PageLoadEvent::Finished) {
+                let position_result = if let Some(parent) = center_parent.as_ref() {
+                    center_child_window(&window, parent)
+                } else {
+                    window.center().map_err(|error| error.to_string())
+                };
+                if let Err(error) = position_result {
+                    eprintln!("Add-provider window centering failed: {error}");
+                }
                 if let Err(error) = window.show() {
                     eprintln!("Add-provider window show after page load failed: {error}");
                 }
@@ -1964,15 +2091,15 @@ fn initialize_selection_float(app: &tauri::App) -> Result<(), String> {
                 return;
             }
             if selection_gesture_hits_app_window(&mouse_app, &event) {
-                apply_mouse_up(&mouse_app, generation, CaptureOutcome::Empty, false);
+                dispatch_mouse_up(&mouse_app, generation, CaptureOutcome::Empty, false);
                 return;
             }
             if !is_auto_selection_enabled(&mouse_app) {
-                apply_mouse_up(&mouse_app, generation, CaptureOutcome::Empty, false);
+                dispatch_mouse_up(&mouse_app, generation, CaptureOutcome::Empty, false);
                 return;
             }
             if !event.selection_gesture {
-                apply_mouse_up(&mouse_app, generation, CaptureOutcome::Empty, false);
+                dispatch_mouse_up(&mouse_app, generation, CaptureOutcome::Empty, false);
                 return;
             }
             if let Err(error) = hide_float(&mouse_app) {

@@ -81,7 +81,9 @@ pub fn start_mouse_hook(
                     .map(|point| clicked_float_at_event(HWND(float_window as *mut _), point))
                     .unwrap_or(false)
                     || clicked_float_at_event(HWND(float_window as *mut _), event.point);
-                let selection_gesture = event.start_point.map_or(true, |start_point| {
+                // A release without a matching press can happen when the hook is
+                // installed mid-gesture. Treat it as unknown, never as a selection.
+                let selection_gesture = event.start_point.is_some_and(|start_point| {
                     let start = MouseDown { point: start_point };
                     is_selection_gesture(
                         start,

@@ -1,18 +1,22 @@
 use std::{
+    env,
+    ffi::{OsStr, OsString},
+    io::{Read, Write},
     mem::size_of,
-    ptr::null_mut,
+    process::{Command, Stdio},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
+use serde::{Deserialize, Serialize};
 use windows::{
     core::Error,
     Win32::{
-        Foundation::{HGLOBAL, POINT, RECT},
+        Foundation::{HGLOBAL, POINT},
         System::{
             Com::{
-                CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
-                CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+                CoCreateInstance, CoInitializeEx, CoUninitialize,
+                CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
             },
             DataExchange::{
                 CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
@@ -21,14 +25,15 @@ use windows::{
             Memory::{GlobalLock, GlobalSize, GlobalUnlock},
             Ole::{
                 OleFlushClipboard, OleGetClipboard, OleInitialize, OleSetClipboard,
-                OleUninitialize,
-                SafeArrayDestroy, CF_UNICODETEXT,
+                OleUninitialize, CF_UNICODETEXT,
             },
         },
         UI::{
             Accessibility::{
                 CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationTextPattern,
-                IUIAutomationTextRange, UIA_TextPatternId,
+                UIA_CONTROLTYPE_ID, UIA_CustomControlTypeId,
+                UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_GroupControlTypeId,
+                UIA_PaneControlTypeId, UIA_TextControlTypeId, UIA_TextPatternId,
             },
             Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL},
             WindowsAndMessaging::{GetAncestor, GetClassNameW, WindowFromPoint, GA_ROOT},
@@ -39,6 +44,11 @@ use windows::{
 use crate::selection_state::Anchor;
 
 const MAX_SELECTION_CHARACTERS: usize = 12_000;
+const MAX_SELECTION_RANGES: i32 = 32;
+const CAPTURE_HELPER_ARGUMENT: &str = "--selection-capture-helper";
+const CAPTURE_HELPER_TIMEOUT: Duration = Duration::from_secs(2);
+const CAPTURE_HELPER_POLL_DELAY: Duration = Duration::from_millis(10);
+const CAPTURE_HELPER_STREAM_LIMIT: usize = 128 * 1024;
 const CLIPBOARD_RETRIES: usize = 8;
 const CLIPBOARD_RETRY_DELAY: Duration = Duration::from_millis(15);
 const CLIPBOARD_RESTORE_RETRIES: usize = 8;
@@ -83,25 +93,49 @@ enum UiaAttempt {
     Failed(String),
 }
 
-impl CapturedSelection {
-    fn from_parts(text: String, rectangles: Vec<RECT>, point: POINT) -> CaptureOutcome {
-        match classify_text(&text) {
-            TextClassification::Empty => return CaptureOutcome::Empty,
-            TextClassification::TooLong(characters) => {
-                return CaptureOutcome::TooLong { characters };
-            }
-            TextClassification::Usable => {}
-        }
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum CaptureHelperOutcome {
+    Detected { text: String, x: i32, y: i32 },
+    Empty,
+    TooLong { characters: usize },
+    Failed { error: String },
+}
 
-        if !rectangles.iter().any(is_visible_rectangle) {
-            return CaptureOutcome::Empty;
+impl From<CaptureOutcome> for CaptureHelperOutcome {
+    fn from(outcome: CaptureOutcome) -> Self {
+        match outcome {
+            CaptureOutcome::Detected(captured) => Self::Detected {
+                text: captured.text,
+                x: captured.anchor.x,
+                y: captured.anchor.y,
+            },
+            CaptureOutcome::Empty => Self::Empty,
+            CaptureOutcome::TooLong { characters } => Self::TooLong { characters },
+            CaptureOutcome::Failed(error) => Self::Failed { error },
         }
-        CaptureOutcome::Detected(Self {
-            text,
-            anchor: Anchor { x: point.x, y: point.y },
-        })
     }
+}
 
+impl From<CaptureHelperOutcome> for CaptureOutcome {
+    fn from(outcome: CaptureHelperOutcome) -> Self {
+        match outcome {
+            CaptureHelperOutcome::Detected { text, x, y } => {
+                CaptureOutcome::Detected(CapturedSelection {
+                    text,
+                    anchor: Anchor { x, y },
+                })
+            }
+            CaptureHelperOutcome::Empty => CaptureOutcome::Empty,
+            CaptureHelperOutcome::TooLong { characters } => {
+                CaptureOutcome::TooLong { characters }
+            }
+            CaptureHelperOutcome::Failed { error } => CaptureOutcome::Failed(error),
+        }
+    }
+}
+
+impl CapturedSelection {
     fn from_text_at_point(text: String, point: POINT) -> CaptureOutcome {
         match classify_text(&text) {
             TextClassification::Empty => CaptureOutcome::Empty,
@@ -119,22 +153,178 @@ pub fn capture_selection(point: POINT) -> CaptureOutcome {
         return CaptureOutcome::Empty;
     }
 
+    capture_with_helper_process(point).unwrap_or_else(CaptureOutcome::Failed)
+}
+
+fn capture_selection_in_process(point: POINT) -> CaptureOutcome {
+    trace_capture_phase("native-window-check");
+    if native_window_is_terminal(point) {
+        return CaptureOutcome::Empty;
+    }
+
+    trace_capture_phase("uia-start");
     let attempt = match capture_with_uia(point) {
         Ok(attempt) => attempt,
         Err(error) => UiaAttempt::Failed(error.to_string()),
     };
+    trace_capture_phase("uia-resolved");
     resolve_uia_attempt(attempt, || copy_fallback(point))
 }
 
+pub fn run_capture_helper_if_requested() -> bool {
+    let mut arguments = env::args_os().skip(1);
+    if arguments.next().as_deref() != Some(OsStr::new(CAPTURE_HELPER_ARGUMENT)) {
+        return false;
+    }
+
+    let outcome = helper_point_from_arguments(&mut arguments)
+        .map(capture_selection_in_process)
+        .unwrap_or_else(CaptureOutcome::Failed);
+    let response = CaptureHelperOutcome::from(outcome);
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    if let Err(error) = serde_json::to_writer(&mut output, &response) {
+        eprintln!("selection-helper phase=serialize-error error={error}");
+    }
+    let _ = output.flush();
+    true
+}
+
+fn helper_point_from_arguments(
+    arguments: &mut impl Iterator<Item = OsString>,
+) -> Result<POINT, String> {
+    let parse_coordinate = |value: Option<OsString>, name: &str| {
+        value
+            .and_then(|value| value.into_string().ok())
+            .ok_or_else(|| format!("missing {name} coordinate"))?
+            .parse::<i32>()
+            .map_err(|error| format!("invalid {name} coordinate: {error}"))
+    };
+    let x = parse_coordinate(arguments.next(), "x")?;
+    let y = parse_coordinate(arguments.next(), "y")?;
+    Ok(POINT { x, y })
+}
+
+fn capture_with_helper_process(point: POINT) -> Result<CaptureOutcome, String> {
+    let executable = env::current_exe()
+        .map_err(|error| format!("could not locate selection helper executable: {error}"))?;
+    let mut child = Command::new(executable)
+        .arg(CAPTURE_HELPER_ARGUMENT)
+        .arg(point.x.to_string())
+        .arg(point.y.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not start selection helper: {error}"))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "selection helper stdout was unavailable".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "selection helper stderr was unavailable".to_string())?;
+    let stdout_reader = thread::spawn(move || read_limited_stream(stdout));
+    let stderr_reader = thread::spawn(move || read_limited_stream(stderr));
+    let started = Instant::now();
+
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("could not poll selection helper: {error}"))?
+        {
+            break status;
+        }
+        if started.elapsed() >= CAPTURE_HELPER_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let stderr = join_capture_stream(stderr_reader)?;
+            return Err(format_helper_failure(
+                "selection helper timed out after 2 seconds",
+                &stderr,
+            ));
+        }
+        thread::sleep(CAPTURE_HELPER_POLL_DELAY);
+    };
+
+    let stdout = join_capture_stream(stdout_reader)?;
+    let stderr = join_capture_stream(stderr_reader)?;
+    if !status.success() {
+        return Err(format_helper_failure(
+            &format!("selection helper exited unexpectedly ({status})"),
+            &stderr,
+        ));
+    }
+    let response: CaptureHelperOutcome = serde_json::from_slice(&stdout).map_err(|error| {
+        format_helper_failure(
+            &format!("selection helper returned invalid data: {error}"),
+            &stderr,
+        )
+    })?;
+    Ok(response.into())
+}
+
+fn read_limited_stream(mut stream: impl Read) -> Result<Vec<u8>, String> {
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    let mut exceeded_limit = false;
+    loop {
+        let count = stream
+            .read(&mut buffer)
+            .map_err(|error| format!("could not read selection helper output: {error}"))?;
+        if count == 0 {
+            break;
+        }
+        let remaining = CAPTURE_HELPER_STREAM_LIMIT.saturating_sub(output.len());
+        output.extend_from_slice(&buffer[..count.min(remaining)]);
+        exceeded_limit |= count > remaining;
+    }
+    if exceeded_limit {
+        Err("selection helper output exceeded the safety limit".to_string())
+    } else {
+        Ok(output)
+    }
+}
+
+fn join_capture_stream(
+    reader: thread::JoinHandle<Result<Vec<u8>, String>>,
+) -> Result<Vec<u8>, String> {
+    reader
+        .join()
+        .map_err(|_| "selection helper output reader panicked".to_string())?
+}
+
+fn format_helper_failure(message: &str, stderr: &[u8]) -> String {
+    let diagnostic = String::from_utf8_lossy(stderr);
+    let diagnostic = diagnostic.trim();
+    if diagnostic.is_empty() {
+        message.to_string()
+    } else {
+        format!("{message}; diagnostic: {diagnostic}")
+    }
+}
+
+fn trace_capture_phase(phase: &str) {
+    eprintln!("selection-helper phase={phase}");
+}
+
 fn capture_with_uia(point: POINT) -> Result<UiaAttempt, CaptureError> {
+    trace_capture_phase("uia-initialize-mta");
     let _apartment = ComApartment::initialize()?;
+    trace_capture_phase("uia-create-automation");
     let automation: IUIAutomation = unsafe {
         CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)?
     };
+    trace_capture_phase("uia-element-from-point");
     let element = unsafe { automation.ElementFromPoint(point)? };
+    trace_capture_phase("uia-terminal-ancestors");
     if element_is_terminal_surface(&automation, &element) {
         return Ok(UiaAttempt::Ignored);
     }
+    trace_capture_phase("uia-text-pattern");
     let text_pattern: IUIAutomationTextPattern = match unsafe {
         element.GetCurrentPatternAs(UIA_TextPatternId)
     } {
@@ -142,19 +332,30 @@ fn capture_with_uia(point: POINT) -> Result<UiaAttempt, CaptureError> {
         Err(_) => return Ok(UiaAttempt::Unavailable),
     };
 
+    trace_capture_phase("uia-get-selection");
     let ranges = unsafe { text_pattern.GetSelection()? };
+    let range_count = unsafe { ranges.Length()? };
+    if range_count > MAX_SELECTION_RANGES {
+        return Ok(UiaAttempt::Unavailable);
+    }
     let mut text = String::new();
-    let mut rectangles = Vec::new();
 
-    for index in 0..unsafe { ranges.Length()? } {
+    for index in 0..range_count {
+        trace_capture_phase("uia-get-selected-range");
         let range = unsafe { ranges.GetElement(index)? };
-        text.push_str(&unsafe { range.GetText(-1)? }.to_string());
-        rectangles.extend(rectangles_for_range(&automation, &range)?);
+        let remaining = MAX_SELECTION_CHARACTERS
+            .saturating_add(1)
+            .saturating_sub(text.chars().count())
+            .max(1);
+        trace_capture_phase("uia-get-bounded-text");
+        text.push_str(&unsafe { range.GetText(remaining as i32)? }.to_string());
+        if let TextClassification::TooLong(characters) = classify_text(&text) {
+            return Ok(UiaAttempt::Outcome(CaptureOutcome::TooLong { characters }));
+        }
     }
 
-    Ok(UiaAttempt::Outcome(CapturedSelection::from_parts(
-        text, rectangles, point,
-    )))
+    trace_capture_phase("uia-complete");
+    Ok(UiaAttempt::Outcome(CapturedSelection::from_text_at_point(text, point)))
 }
 
 fn native_window_is_terminal(point: POINT) -> bool {
@@ -215,11 +416,9 @@ fn element_is_terminal_surface(
         let class_name = unsafe { current.CurrentClassName() }
             .map(|value| value.to_string())
             .unwrap_or_default();
-        let control_type = unsafe { current.CurrentLocalizedControlType() }
-            .map(|value| value.to_string())
-            .unwrap_or_default();
+        let control_type = unsafe { current.CurrentControlType() }.unwrap_or_default();
 
-        if is_terminal_accessibility_node(&name, &automation_id, &class_name, &control_type) {
+        if is_terminal_accessibility_node(&name, &automation_id, &class_name, control_type) {
             return true;
         }
 
@@ -236,10 +435,9 @@ fn is_terminal_accessibility_node(
     name: &str,
     automation_id: &str,
     class_name: &str,
-    control_type: &str,
+    control_type: UIA_CONTROLTYPE_ID,
 ) -> bool {
     let name = name.trim().to_lowercase();
-    let control_type = control_type.trim().to_lowercase();
     let structural = format!("{automation_id} {class_name}").to_lowercase();
 
     if [
@@ -258,16 +456,20 @@ fn is_terminal_accessibility_node(
 
     let terminal_name = name == "terminal"
         || name == "终端"
+        || name == "终端输入"
         || name.starts_with("terminal ")
         || name.starts_with("terminal:")
         || name.starts_with("终端 ")
         || name.starts_with("终端:");
     let terminal_container = [
-        "pane", "group", "document", "custom", "edit", "text", "窗格", "组", "文档", "编辑",
-        "文本",
+        UIA_PaneControlTypeId,
+        UIA_GroupControlTypeId,
+        UIA_DocumentControlTypeId,
+        UIA_CustomControlTypeId,
+        UIA_EditControlTypeId,
+        UIA_TextControlTypeId,
     ]
-    .iter()
-    .any(|kind| control_type.contains(kind));
+    .contains(&control_type);
 
     terminal_name && terminal_container
 }
@@ -316,45 +518,20 @@ fn resolve_uia_attempt(
     }
 }
 
-fn is_visible_rectangle(rectangle: &RECT) -> bool {
-    rectangle.right > rectangle.left && rectangle.bottom > rectangle.top
-}
-
-fn rectangles_for_range(
-    automation: &IUIAutomation,
-    range: &IUIAutomationTextRange,
-) -> Result<Vec<RECT>, CaptureError> {
-    let safe_array = unsafe { range.GetBoundingRectangles()? };
-    if safe_array.is_null() {
-        return Ok(Vec::new());
-    }
-
-    let mut native_rectangles = null_mut();
-    let count = unsafe { automation.SafeArrayToRectNativeArray(safe_array, &mut native_rectangles) };
-    unsafe { SafeArrayDestroy(safe_array)? };
-    let count = count?;
-    if count <= 0 || native_rectangles.is_null() {
-        return Ok(Vec::new());
-    }
-
-    let rectangles = unsafe {
-        std::slice::from_raw_parts(native_rectangles, count as usize).to_vec()
-    };
-    unsafe { CoTaskMemFree(Some(native_rectangles.cast())) };
-    Ok(rectangles)
-}
-
 fn copy_fallback(point: POINT) -> CaptureOutcome {
+    trace_capture_phase("clipboard-initialize-ole");
     let Ok(_apartment) = OleApartment::initialize() else {
         return CaptureOutcome::Failed(
             "could not initialize OLE for clipboard fallback".to_string(),
         );
     };
+    trace_capture_phase("clipboard-snapshot");
     let original_clipboard = match snapshot_clipboard() {
         Ok(snapshot) => snapshot,
         Err(error) => return CaptureOutcome::Failed(error),
     };
     let before_sequence = unsafe { GetClipboardSequenceNumber() };
+    trace_capture_phase("clipboard-send-copy");
     if !send_copy_shortcut() {
         return CaptureOutcome::Failed(
             "could not send Ctrl+C for clipboard fallback".to_string(),
@@ -368,11 +545,13 @@ fn copy_fallback(point: POINT) -> CaptureOutcome {
             continue;
         }
 
+        trace_capture_phase("clipboard-read-copy");
         let copied_text = read_plain_text();
         // Clipboard listeners and the source application can briefly reopen the
         // clipboard after Ctrl+C. Let that activity settle before restoring the
         // user's original data object, then verify that no newer copy replaced it.
         thread::sleep(CLIPBOARD_RESTORE_SETTLE_DELAY);
+        trace_capture_phase("clipboard-restore");
         match restore_clipboard_if_unchanged(copied_sequence, &original_clipboard) {
             Ok(true) => {}
             Ok(false) => {
@@ -415,7 +594,10 @@ struct ComApartment;
 
 impl ComApartment {
     fn initialize() -> Result<Self, CaptureError> {
-        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()? };
+        // Microsoft requires desktop-wide UI Automation clients to use a
+        // windowless MTA worker. An STA without a message pump can re-enter
+        // accessibility providers unpredictably and exhaust the thread stack.
+        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok()? };
         Ok(Self)
     }
 }
@@ -553,7 +735,7 @@ mod tests {
     #[test]
     fn empty_selection_is_not_a_capture() {
         assert_eq!(
-            CapturedSelection::from_parts("  ".into(), vec![], POINT { x: 1, y: 2 }),
+            CapturedSelection::from_text_at_point("  ".into(), POINT { x: 1, y: 2 }),
             CaptureOutcome::Empty
         );
     }
@@ -606,15 +788,26 @@ mod tests {
             "",
             "terminal-wrapper",
             "xterm-screen",
-            "custom"
+            UIA_CustomControlTypeId
         ));
         assert!(is_terminal_accessibility_node(
             "Terminal 1, PowerShell",
             "",
             "",
-            "pane"
+            UIA_PaneControlTypeId
         ));
-        assert!(is_terminal_accessibility_node("终端", "", "", "窗格"));
+        assert!(is_terminal_accessibility_node(
+            "Terminal input",
+            "",
+            "textarea",
+            UIA_EditControlTypeId
+        ));
+        assert!(is_terminal_accessibility_node(
+            "终端输入",
+            "",
+            "textarea",
+            UIA_EditControlTypeId
+        ));
     }
 
     #[test]
@@ -623,7 +816,7 @@ mod tests {
             "terminal.rs",
             "editor",
             "monaco-editor",
-            "document"
+            UIA_DocumentControlTypeId
         ));
     }
 
@@ -652,28 +845,8 @@ mod tests {
 
     #[test]
     fn mouse_release_point_sets_the_anchor() {
-        let outcome = CapturedSelection::from_parts(
+        let outcome = CapturedSelection::from_text_at_point(
             "selected".into(),
-            vec![
-                RECT {
-                    left: 1,
-                    top: 2,
-                    right: 11,
-                    bottom: 12,
-                },
-                RECT {
-                    left: 20,
-                    top: 30,
-                    right: 20,
-                    bottom: 40,
-                },
-                RECT {
-                    left: 50,
-                    top: 60,
-                    right: 70,
-                    bottom: 80,
-                },
-            ],
             POINT { x: 25, y: 35 },
         );
 
@@ -684,6 +857,27 @@ mod tests {
                 anchor: Anchor { x: 25, y: 35 },
             })
         );
+    }
+
+    #[test]
+    fn capture_helper_protocol_round_trips_detected_text() {
+        let outcome = CaptureOutcome::Detected(CapturedSelection {
+            text: "helper text".into(),
+            anchor: Anchor { x: 15, y: 25 },
+        });
+        let json = serde_json::to_vec(&CaptureHelperOutcome::from(outcome.clone())).unwrap();
+        let decoded: CaptureHelperOutcome = serde_json::from_slice(&json).unwrap();
+
+        assert_eq!(CaptureOutcome::from(decoded), outcome);
+    }
+
+    #[test]
+    fn capture_helper_coordinates_are_validated() {
+        let mut valid = [OsString::from("15"), OsString::from("-25")].into_iter();
+        assert_eq!(helper_point_from_arguments(&mut valid), Ok(POINT { x: 15, y: -25 }));
+
+        let mut invalid = [OsString::from("x"), OsString::from("25")].into_iter();
+        assert!(helper_point_from_arguments(&mut invalid).is_err());
     }
 
     #[test]
