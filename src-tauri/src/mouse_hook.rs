@@ -9,9 +9,10 @@ use windows::{
         Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         Graphics::Gdi::ScreenToClient,
         UI::WindowsAndMessaging::{
-            CallNextHookEx, GetClientRect, GetMessageW, GetWindowRect, IsWindowVisible,
-            SetWindowsHookExW, UnhookWindowsHookEx, WindowFromPoint, MSLLHOOKSTRUCT, MSG,
-            WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP,
+            CallNextHookEx, GetAncestor, GetClientRect, GetMessageW, GetWindowRect,
+            IsWindowVisible, SendMessageTimeoutW, SetWindowsHookExW, UnhookWindowsHookEx,
+            WindowFromPoint, GA_ROOT, HTCLIENT, MSLLHOOKSTRUCT, MSG, SMTO_ABORTIFHUNG,
+            WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_NCHITTEST,
         },
     },
 };
@@ -25,12 +26,15 @@ static BUTTON_DOWN: OnceLock<Mutex<Option<MouseDown>>> = OnceLock::new();
 #[derive(Clone, Copy, Debug)]
 struct RawMouseUp {
     point: POINT,
-    start_point: Option<POINT>,
+    start: Option<MouseDown>,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct MouseDown {
     point: POINT,
+    root_window: isize,
+    initial_window_bounds: Option<RECT>,
+    started_in_client_area: bool,
 }
 
 #[derive(Debug)]
@@ -77,26 +81,23 @@ pub fn start_mouse_hook(
         .spawn(move || {
             while let Ok(event) = event_receiver.recv() {
                 let clicked_float = event
-                    .start_point
-                    .map(|point| clicked_float_at_event(HWND(float_window as *mut _), point))
+                    .start
+                    .map(|start| clicked_float_at_event(HWND(float_window as *mut _), start.point))
                     .unwrap_or(false)
                     || clicked_float_at_event(HWND(float_window as *mut _), event.point);
                 // A release without a matching press can happen when the hook is
                 // installed mid-gesture. Treat it as unknown, never as a selection.
-                let selection_gesture = event.start_point.is_some_and(|start_point| {
-                    let start = MouseDown { point: start_point };
-                    is_selection_gesture(
-                        start,
-                        event.point,
-                        point_is_in_client_area(start_point) && !clicked_float_at_event(
+                let selection_gesture = event.start.is_some_and(|start| {
+                    let window_changed = window_changed_since_mouse_down(start);
+                    is_selection_gesture(start, event.point, window_changed)
+                        && !clicked_float_at_event(
                             HWND(float_window as *mut _),
-                            start_point,
-                        ),
-                    )
+                            start.point,
+                        )
                 });
                 on_mouse_up(MouseUpEvent {
                     point: event.point,
-                    start_point: event.start_point,
+                    start_point: event.start.map(|start| start.point),
                     clicked_float,
                     selection_gesture,
                 });
@@ -148,22 +149,31 @@ fn button_down_slot() -> &'static Mutex<Option<MouseDown>> {
 fn remember_button_down(point: POINT) {
     *button_down_slot()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(MouseDown {
-            point,
-        });
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(capture_mouse_down(point));
 }
 
-fn take_mouse_down() -> Option<POINT> {
-    let start = button_down_slot()
+fn take_mouse_down() -> Option<MouseDown> {
+    button_down_slot()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .take();
-    start.map(|start| start.point)
+        .take()
 }
 
-fn is_selection_gesture(start: MouseDown, point: POINT, started_in_client_area: bool) -> bool {
+fn capture_mouse_down(point: POINT) -> MouseDown {
+    let hit_window = unsafe { WindowFromPoint(point) };
+    let root_window = root_window(hit_window);
+    let initial_window_bounds = window_bounds(root_window);
+    MouseDown {
+        point,
+        root_window: root_window.0 as isize,
+        initial_window_bounds,
+        started_in_client_area: point_is_in_client_area(root_window, point),
+    }
+}
+
+fn is_selection_gesture(start: MouseDown, point: POINT, window_changed: bool) -> bool {
     const DRAG_THRESHOLD: i64 = 3;
-    if !started_in_client_area {
+    if !start.started_in_client_area || window_changed {
         return false;
     }
     let delta_x = i64::from(point.x) - i64::from(start.point.x);
@@ -171,8 +181,45 @@ fn is_selection_gesture(start: MouseDown, point: POINT, started_in_client_area: 
     delta_x * delta_x + delta_y * delta_y >= DRAG_THRESHOLD * DRAG_THRESHOLD
 }
 
-fn point_is_in_client_area(screen_point: POINT) -> bool {
-    let window = unsafe { WindowFromPoint(screen_point) };
+fn root_window(window: HWND) -> HWND {
+    if window.is_invalid() {
+        return window;
+    }
+    let root = unsafe { GetAncestor(window, GA_ROOT) };
+    if root.is_invalid() {
+        window
+    } else {
+        root
+    }
+}
+
+fn window_bounds(window: HWND) -> Option<RECT> {
+    if window.is_invalid() {
+        return None;
+    }
+    let mut rectangle = RECT::default();
+    unsafe { GetWindowRect(window, &mut rectangle) }
+        .is_ok()
+        .then_some(rectangle)
+}
+
+fn window_changed_since_mouse_down(start: MouseDown) -> bool {
+    let Some(initial) = start.initial_window_bounds else {
+        return false;
+    };
+    let window = HWND(start.root_window as *mut _);
+    window_bounds(window)
+        .is_some_and(|current| window_bounds_changed(initial, current))
+}
+
+fn window_bounds_changed(initial: RECT, current: RECT) -> bool {
+    initial.left != current.left
+        || initial.top != current.top
+        || initial.right != current.right
+        || initial.bottom != current.bottom
+}
+
+fn point_is_in_client_area(window: HWND, screen_point: POINT) -> bool {
     if window.is_invalid() {
         return false;
     }
@@ -185,7 +232,35 @@ fn point_is_in_client_area(screen_point: POINT) -> bool {
     if unsafe { GetClientRect(window, &mut client) }.is_err() {
         return false;
     }
-    point_is_inside_rectangle(client_point, client)
+    if !point_is_inside_rectangle(client_point, client) {
+        return false;
+    }
+
+    // Frameless apps such as VS Code draw their title bar inside the client
+    // rectangle. Ask the owning window for its semantic hit-test result so a
+    // custom drag region is not mistaken for selectable content. Fall back to
+    // the geometric client test if the target application is unresponsive.
+    hit_test_is_client_area(window, screen_point).unwrap_or(true)
+}
+
+fn hit_test_is_client_area(window: HWND, point: POINT) -> Option<bool> {
+    const HIT_TEST_TIMEOUT_MS: u32 = 25;
+    let x = u32::from(point.x as i16 as u16);
+    let y = u32::from(point.y as i16 as u16);
+    let coordinates = LPARAM(((y << 16) | x) as isize);
+    let mut result = 0_usize;
+    let delivered = unsafe {
+        SendMessageTimeoutW(
+            window,
+            WM_NCHITTEST,
+            WPARAM(0),
+            coordinates,
+            SMTO_ABORTIFHUNG,
+            HIT_TEST_TIMEOUT_MS,
+            Some(&mut result),
+        )
+    };
+    (delivered.0 != 0).then_some(result as u32 == HTCLIENT)
 }
 
 fn point_is_inside_rectangle(point: POINT, rectangle: RECT) -> bool {
@@ -275,7 +350,7 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                 if let Some(callback) = callback {
                     callback(RawMouseUp {
                         point,
-                        start_point: take_mouse_down(),
+                        start: take_mouse_down(),
                     });
                 }
             }
@@ -305,30 +380,59 @@ mod tests {
 
     #[test]
     fn simple_click_is_not_a_selection_gesture() {
-        remember_button_down(POINT { x: 20, y: 30 });
-        let start = take_mouse_down().unwrap();
+        let start = test_mouse_down(POINT { x: 20, y: 30 }, true);
         assert!(!is_selection_gesture(
-            MouseDown { point: start },
+            start,
             POINT { x: 22, y: 31 },
-            true,
+            false,
         ));
     }
 
     #[test]
     fn drag_is_a_selection_gesture() {
-        let start = MouseDown {
-            point: POINT { x: 20, y: 30 },
-        };
-        assert!(is_selection_gesture(start, POINT { x: 24, y: 31 }, true));
+        let start = test_mouse_down(POINT { x: 20, y: 30 }, true);
+        assert!(is_selection_gesture(start, POINT { x: 24, y: 31 }, false));
     }
 
     #[test]
     fn title_bar_drag_is_not_a_selection_gesture() {
-        let start = MouseDown {
-            point: POINT { x: 20, y: 30 },
-        };
+        let start = test_mouse_down(POINT { x: 20, y: 30 }, false);
 
         assert!(!is_selection_gesture(start, POINT { x: 80, y: 30 }, false));
+    }
+
+    #[test]
+    fn custom_title_bar_drag_that_moves_a_window_is_not_a_selection_gesture() {
+        let start = test_mouse_down(POINT { x: 20, y: 30 }, true);
+
+        assert!(!is_selection_gesture(start, POINT { x: 80, y: 30 }, true));
+    }
+
+    #[test]
+    fn moving_or_resizing_the_source_window_is_detected() {
+        let initial = RECT {
+            left: 10,
+            top: 20,
+            right: 210,
+            bottom: 120,
+        };
+        assert!(!window_bounds_changed(initial, initial));
+        assert!(window_bounds_changed(
+            initial,
+            RECT {
+                left: 30,
+                top: 20,
+                right: 230,
+                bottom: 120,
+            }
+        ));
+        assert!(window_bounds_changed(
+            initial,
+            RECT {
+                right: 260,
+                ..initial
+            }
+        ));
     }
 
     #[test]
@@ -357,5 +461,14 @@ mod tests {
         assert!(point_inside_round_rect(POINT { x: 22, y: 32 }, rectangle));
         assert!(!point_inside_round_rect(POINT { x: 10, y: 20 }, rectangle));
         assert!(!point_inside_round_rect(POINT { x: 33, y: 43 }, rectangle));
+    }
+
+    fn test_mouse_down(point: POINT, started_in_client_area: bool) -> MouseDown {
+        MouseDown {
+            point,
+            root_window: 0,
+            initial_window_bounds: None,
+            started_in_client_area,
+        }
     }
 }

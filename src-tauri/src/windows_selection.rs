@@ -15,8 +15,8 @@ use windows::{
         Foundation::{HGLOBAL, POINT},
         System::{
             Com::{
-                CoCreateInstance, CoInitializeEx, CoUninitialize,
-                CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+                CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+                COINIT_MULTITHREADED,
             },
             DataExchange::{
                 CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
@@ -31,12 +31,18 @@ use windows::{
         UI::{
             Accessibility::{
                 CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationTextPattern,
-                UIA_CONTROLTYPE_ID, UIA_CustomControlTypeId,
+                IUIAutomationTextRange, TextPatternRangeEndpoint_End,
+                TextPatternRangeEndpoint_Start, UIA_CONTROLTYPE_ID, UIA_CustomControlTypeId,
                 UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_GroupControlTypeId,
                 UIA_PaneControlTypeId, UIA_TextControlTypeId, UIA_TextPatternId,
             },
-            Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL},
-            WindowsAndMessaging::{GetAncestor, GetClassNameW, WindowFromPoint, GA_ROOT},
+            Input::KeyboardAndMouse::{
+                SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+                VK_CONTROL,
+            },
+            WindowsAndMessaging::{
+                GetAncestor, GetClassNameW, GetForegroundWindow, WindowFromPoint, GA_ROOT,
+            },
         },
     },
 };
@@ -49,6 +55,7 @@ const CAPTURE_HELPER_ARGUMENT: &str = "--selection-capture-helper";
 const CAPTURE_HELPER_TIMEOUT: Duration = Duration::from_secs(2);
 const CAPTURE_HELPER_POLL_DELAY: Duration = Duration::from_millis(10);
 const CAPTURE_HELPER_STREAM_LIMIT: usize = 128 * 1024;
+const MAX_UIA_ANCESTORS: usize = 16;
 const CLIPBOARD_RETRIES: usize = 8;
 const CLIPBOARD_RETRY_DELAY: Duration = Duration::from_millis(15);
 const CLIPBOARD_RESTORE_RETRIES: usize = 8;
@@ -320,42 +327,158 @@ fn capture_with_uia(point: POINT) -> Result<UiaAttempt, CaptureError> {
     };
     trace_capture_phase("uia-element-from-point");
     let element = unsafe { automation.ElementFromPoint(point)? };
-    trace_capture_phase("uia-terminal-ancestors");
-    if element_is_terminal_surface(&automation, &element) {
+    trace_capture_phase("uia-point-element");
+    let point_attempt = capture_from_uia_element(&automation, &element, point)?;
+    match &point_attempt {
+        UiaAttempt::Ignored
+        | UiaAttempt::Outcome(CaptureOutcome::Detected(_))
+        | UiaAttempt::Outcome(CaptureOutcome::TooLong { .. })
+        | UiaAttempt::Outcome(CaptureOutcome::Failed(_))
+        | UiaAttempt::Failed(_) => return Ok(point_attempt),
+        UiaAttempt::Outcome(CaptureOutcome::Empty) | UiaAttempt::Unavailable => {}
+    }
+
+    // Many Chromium and custom controls expose TextPattern on a focused
+    // ancestor instead of the leaf below the mouse. Pot uses the focused UIA
+    // element for this reason; keep the point-based lookup first so stale focus
+    // cannot win over the surface that was actually dragged.
+    trace_capture_phase("uia-focused-element");
+    let focused = match unsafe { automation.GetFocusedElement() } {
+        Ok(element) => element,
+        Err(_) => return Ok(point_attempt),
+    };
+    capture_from_uia_element(&automation, &focused, point)
+}
+
+fn capture_from_uia_element(
+    automation: &IUIAutomation,
+    element: &IUIAutomationElement,
+    point: POINT,
+) -> Result<UiaAttempt, CaptureError> {
+    trace_capture_phase("uia-ignored-surface-ancestors");
+    if element_is_ignored_selection_surface(automation, element) {
         return Ok(UiaAttempt::Ignored);
     }
-    trace_capture_phase("uia-text-pattern");
-    let text_pattern: IUIAutomationTextPattern = match unsafe {
-        element.GetCurrentPatternAs(UIA_TextPatternId)
-    } {
-        Ok(pattern) => pattern,
-        Err(_) => return Ok(UiaAttempt::Unavailable),
+
+    trace_capture_phase("uia-text-pattern-ancestors");
+    let Some(text_pattern) = text_pattern_from_element_or_ancestors(automation, element) else {
+        return Ok(UiaAttempt::Unavailable);
     };
+    capture_from_text_pattern(&text_pattern, point)
+}
+
+fn text_pattern_from_element_or_ancestors(
+    automation: &IUIAutomation,
+    element: &IUIAutomationElement,
+) -> Option<IUIAutomationTextPattern> {
+    let walker = unsafe { automation.RawViewWalker() }.ok();
+    let mut current = element.clone();
+
+    for depth in 0..MAX_UIA_ANCESTORS {
+        if let Ok(pattern) = unsafe { current.GetCurrentPatternAs(UIA_TextPatternId) } {
+            return Some(pattern);
+        }
+        if depth + 1 == MAX_UIA_ANCESTORS {
+            break;
+        }
+        let Some(walker) = walker.as_ref() else {
+            break;
+        };
+        let Ok(parent) = (unsafe { walker.GetParentElement(&current) }) else {
+            break;
+        };
+        current = parent;
+    }
+
+    None
+}
+
+fn capture_from_text_pattern(
+    text_pattern: &IUIAutomationTextPattern,
+    point: POINT,
+) -> Result<UiaAttempt, CaptureError> {
 
     trace_capture_phase("uia-get-selection");
     let ranges = unsafe { text_pattern.GetSelection()? };
     let range_count = unsafe { ranges.Length()? };
-    if range_count > MAX_SELECTION_RANGES {
+    if !(0..=MAX_SELECTION_RANGES).contains(&range_count) {
         return Ok(UiaAttempt::Unavailable);
     }
     let mut text = String::new();
+    let point_range = unsafe { text_pattern.RangeFromPoint(point) }.ok();
+    // `None` means the provider cannot map a screen point. In that case we
+    // retain compatibility and trust its selection; `Some(false)` is a
+    // positive stale-selection signal and must suppress clipboard fallback.
+    let mut point_matches_selection = point_range.as_ref().map(|_| false);
 
     for index in 0..range_count {
         trace_capture_phase("uia-get-selected-range");
         let range = unsafe { ranges.GetElement(index)? };
-        let remaining = MAX_SELECTION_CHARACTERS
-            .saturating_add(1)
-            .saturating_sub(text.chars().count())
-            .max(1);
-        trace_capture_phase("uia-get-bounded-text");
-        text.push_str(&unsafe { range.GetText(remaining as i32)? }.to_string());
-        if let TextClassification::TooLong(characters) = classify_text(&text) {
-            return Ok(UiaAttempt::Outcome(CaptureOutcome::TooLong { characters }));
+        if let Some(point_range) = point_range.as_ref() {
+            match range_contains_point(&range, point_range) {
+                Some(true) => point_matches_selection = Some(true),
+                None if point_matches_selection != Some(true) => {
+                    point_matches_selection = None;
+                }
+                _ => {}
+            }
+        }
+
+        if !matches!(classify_text(&text), TextClassification::TooLong(_)) {
+            let remaining = MAX_SELECTION_CHARACTERS
+                .saturating_add(1)
+                .saturating_sub(text.chars().count())
+                .max(1);
+            trace_capture_phase("uia-get-bounded-text");
+            text.push_str(&unsafe { range.GetText(remaining as i32)? }.to_string());
         }
     }
 
+    let outcome = CapturedSelection::from_text_at_point(text, point);
+    if point_matches_selection == Some(false)
+        && matches!(
+            outcome,
+            CaptureOutcome::Detected(_) | CaptureOutcome::TooLong { .. }
+        )
+    {
+        trace_capture_phase("uia-selection-point-mismatch");
+        return Ok(UiaAttempt::Ignored);
+    }
+
     trace_capture_phase("uia-complete");
-    Ok(UiaAttempt::Outcome(CapturedSelection::from_text_at_point(text, point)))
+    Ok(UiaAttempt::Outcome(outcome))
+}
+
+fn range_contains_point(
+    selected_range: &IUIAutomationTextRange,
+    point_range: &IUIAutomationTextRange,
+) -> Option<bool> {
+    let starts_before_or_at_point = unsafe {
+        selected_range.CompareEndpoints(
+            TextPatternRangeEndpoint_Start,
+            point_range,
+            TextPatternRangeEndpoint_Start,
+        )
+    }
+    .ok()?
+        <= 0;
+    let ends_after_or_at_point = unsafe {
+        selected_range.CompareEndpoints(
+            TextPatternRangeEndpoint_End,
+            point_range,
+            TextPatternRangeEndpoint_Start,
+        )
+    }
+    .ok()?
+        >= 0;
+    Some(endpoints_contain_point(
+        starts_before_or_at_point,
+        ends_after_or_at_point,
+    ))
+}
+
+fn endpoints_contain_point(starts_before_or_at_point: bool, ends_after_or_at_point: bool) -> bool {
+    starts_before_or_at_point && ends_after_or_at_point
 }
 
 fn native_window_is_terminal(point: POINT) -> bool {
@@ -395,7 +518,7 @@ fn is_native_terminal_class(class_name: &str) -> bool {
     )
 }
 
-fn element_is_terminal_surface(
+fn element_is_ignored_selection_surface(
     automation: &IUIAutomation,
     element: &IUIAutomationElement,
 ) -> bool {
@@ -405,8 +528,8 @@ fn element_is_terminal_surface(
     let mut current = element.clone();
 
     // Chromium apps expose their DOM accessibility nodes through UIA. Walking
-    // ancestors distinguishes VS Code's integrated terminal from its editor.
-    for _ in 0..16 {
+    // ancestors lets us reject non-prose surfaces before reading their selection.
+    for _ in 0..MAX_UIA_ANCESTORS {
         let name = unsafe { current.CurrentName() }
             .map(|value| value.to_string())
             .unwrap_or_default();
@@ -418,7 +541,14 @@ fn element_is_terminal_surface(
             .unwrap_or_default();
         let control_type = unsafe { current.CurrentControlType() }.unwrap_or_default();
 
-        if is_terminal_accessibility_node(&name, &automation_id, &class_name, control_type) {
+        if is_terminal_accessibility_node(&name, &automation_id, &class_name, control_type)
+            || is_code_editor_accessibility_node(
+                &name,
+                &automation_id,
+                &class_name,
+                control_type,
+            )
+        {
             return true;
         }
 
@@ -474,6 +604,38 @@ fn is_terminal_accessibility_node(
     terminal_name && terminal_container
 }
 
+fn is_code_editor_accessibility_node(
+    name: &str,
+    automation_id: &str,
+    class_name: &str,
+    control_type: UIA_CONTROLTYPE_ID,
+) -> bool {
+    let name = name.trim().to_lowercase();
+    let structural = format!("{automation_id} {class_name}").to_lowercase();
+    let code_editor_structure = [
+        "monaco-editor",
+        "monaco-mouse-cursor-text",
+        "editor-instance",
+        "code-editor",
+        "view-lines",
+    ]
+    .iter()
+    .any(|marker| structural.contains(marker));
+    let code_editor_name = name.starts_with("editor content")
+        || name.starts_with("diff editor content")
+        || name.starts_with("编辑器内容")
+        || name.starts_with("差异编辑器内容");
+    let editor_control = [
+        UIA_DocumentControlTypeId,
+        UIA_CustomControlTypeId,
+        UIA_EditControlTypeId,
+        UIA_TextControlTypeId,
+    ]
+    .contains(&control_type);
+
+    code_editor_structure || (code_editor_name && editor_control)
+}
+
 enum TextClassification {
     Empty,
     Usable,
@@ -504,21 +666,25 @@ fn resolve_uia_attempt(
             CaptureOutcome::TooLong { characters }
         }
         UiaAttempt::Outcome(CaptureOutcome::Failed(error)) => CaptureOutcome::Failed(error),
+        // Ignored includes code editors, terminals, and a focused selection
+        // whose range does not contain this drag's release point. Never press
+        // Ctrl+C in those cases.
         UiaAttempt::Ignored => CaptureOutcome::Empty,
         UiaAttempt::Outcome(CaptureOutcome::Empty) | UiaAttempt::Unavailable => fallback(),
-        UiaAttempt::Failed(uia_error) => match fallback() {
-            CaptureOutcome::Empty => CaptureOutcome::Failed(format!(
-                "UI Automation failed ({uia_error}); clipboard fallback found no selection"
-            )),
-            CaptureOutcome::Failed(fallback_error) => CaptureOutcome::Failed(format!(
-                "UI Automation failed ({uia_error}); clipboard fallback failed ({fallback_error})"
-            )),
-            outcome => outcome,
-        },
+        // A hard UIA failure happened before the target surface could be
+        // classified. Failing closed avoids sending Ctrl+C to an unknown or
+        // elevated window.
+        UiaAttempt::Failed(error) => {
+            CaptureOutcome::Failed(format!("UI Automation failed: {error}"))
+        }
     }
 }
 
 fn copy_fallback(point: POINT) -> CaptureOutcome {
+    if !point_belongs_to_foreground_window(point) {
+        return CaptureOutcome::Empty;
+    }
+
     trace_capture_phase("clipboard-initialize-ole");
     let Ok(_apartment) = OleApartment::initialize() else {
         return CaptureOutcome::Failed(
@@ -571,21 +737,45 @@ fn copy_fallback(point: POINT) -> CaptureOutcome {
     CaptureOutcome::Empty
 }
 
+fn point_belongs_to_foreground_window(point: POINT) -> bool {
+    let hit_window = unsafe { WindowFromPoint(point) };
+    let foreground_window = unsafe { GetForegroundWindow() };
+    if hit_window.is_invalid() || foreground_window.is_invalid() {
+        return false;
+    }
+    let hit_root = unsafe { GetAncestor(hit_window, GA_ROOT) };
+    let foreground_root = unsafe { GetAncestor(foreground_window, GA_ROOT) };
+    !hit_root.is_invalid() && hit_root == foreground_root
+}
+
 fn send_copy_shortcut() -> bool {
     let inputs = [
-        keyboard_input(VK_CONTROL.0 as u16, windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(0)),
-        keyboard_input(b'C' as u16, windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(0)),
+        keyboard_input(
+            VK_CONTROL.0 as u16,
+            windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(0),
+        ),
+        keyboard_input(
+            b'C' as u16,
+            windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(0),
+        ),
         keyboard_input(b'C' as u16, KEYEVENTF_KEYUP),
         keyboard_input(VK_CONTROL.0 as u16, KEYEVENTF_KEYUP),
     ];
     unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) == inputs.len() as u32 }
 }
 
-fn keyboard_input(virtual_key: u16, flags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS) -> INPUT {
+fn keyboard_input(
+    virtual_key: u16,
+    flags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS,
+) -> INPUT {
     INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
-            ki: KEYBDINPUT { wVk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(virtual_key), dwFlags: flags, ..Default::default() },
+            ki: KEYBDINPUT {
+                wVk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(virtual_key),
+                dwFlags: flags,
+                ..Default::default()
+            },
         },
     }
 }
@@ -652,7 +842,10 @@ fn read_plain_text() -> Option<String> {
         return None;
     }
     let characters = unsafe { std::slice::from_raw_parts(data, bytes / size_of::<u16>()) };
-    let length = characters.iter().position(|character| *character == 0).unwrap_or(characters.len());
+    let length = characters
+        .iter()
+        .position(|character| *character == 0)
+        .unwrap_or(characters.len());
     let text = String::from_utf16(&characters[..length]).ok();
     let _ = unsafe { GlobalUnlock(global) };
     text
@@ -758,7 +951,19 @@ mod tests {
     }
 
     #[test]
-    fn ignored_terminal_does_not_use_clipboard_fallback() {
+    fn unavailable_uia_selection_uses_clipboard_fallback() {
+        let fallback_called = Cell::new(false);
+        let outcome = resolve_uia_attempt(UiaAttempt::Unavailable, || {
+            fallback_called.set(true);
+            CaptureOutcome::Empty
+        });
+
+        assert!(fallback_called.get());
+        assert_eq!(outcome, CaptureOutcome::Empty);
+    }
+
+    #[test]
+    fn ignored_surface_does_not_use_clipboard_fallback() {
         let fallback_called = Cell::new(false);
         let outcome = resolve_uia_attempt(UiaAttempt::Ignored, || {
             fallback_called.set(true);
@@ -811,36 +1016,66 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_editor_named_after_terminal_is_not_excluded() {
+    fn recognizes_vscode_monaco_editor_accessibility_markers() {
+        assert!(is_code_editor_accessibility_node(
+            "",
+            "editor",
+            "monaco-editor",
+            UIA_DocumentControlTypeId
+        ));
+        assert!(is_code_editor_accessibility_node(
+            "Editor content; Press Alt+F1 for Accessibility Options.",
+            "",
+            "textarea",
+            UIA_EditControlTypeId
+        ));
+        assert!(is_code_editor_accessibility_node(
+            "编辑器内容；按 Alt+F1 打开辅助功能选项。",
+            "",
+            "textarea",
+            UIA_EditControlTypeId
+        ));
+    }
+
+    #[test]
+    fn prose_edit_control_is_not_mistaken_for_a_code_editor() {
         assert!(!is_terminal_accessibility_node(
             "terminal.rs",
             "editor",
             "monaco-editor",
             UIA_DocumentControlTypeId
         ));
+        assert!(!is_code_editor_accessibility_node(
+            "Article body",
+            "editor",
+            "textarea",
+            UIA_EditControlTypeId
+        ));
     }
 
     #[test]
-    fn uia_error_uses_clipboard_fallback() {
-        let fallback_capture = CapturedSelection {
-            text: "clipboard".into(),
-            anchor: Anchor { x: 5, y: 6 },
-        };
+    fn uia_error_is_reported_without_a_fallback() {
+        let fallback_called = Cell::new(false);
+        let outcome = resolve_uia_attempt(
+            UiaAttempt::Failed("provider unavailable".into()),
+            || {
+                fallback_called.set(true);
+                CaptureOutcome::Detected(CapturedSelection {
+                    text: "must not be captured".into(),
+                    anchor: Anchor { x: 0, y: 0 },
+                })
+            },
+        );
 
-        let outcome = resolve_uia_attempt(UiaAttempt::Failed("UIA failed".into()), || {
-            CaptureOutcome::Detected(fallback_capture.clone())
-        });
-
-        assert_eq!(outcome, CaptureOutcome::Detected(fallback_capture));
+        assert!(!fallback_called.get());
+        assert!(matches!(outcome, CaptureOutcome::Failed(message) if message.contains("provider unavailable")));
     }
 
     #[test]
-    fn uia_error_remains_visible_when_clipboard_fallback_is_empty() {
-        let outcome = resolve_uia_attempt(UiaAttempt::Failed("UIA failed".into()), || {
-            CaptureOutcome::Empty
-        });
-
-        assert!(matches!(outcome, CaptureOutcome::Failed(message) if message.contains("UIA failed")));
+    fn selected_range_must_cover_the_release_point() {
+        assert!(endpoints_contain_point(true, true));
+        assert!(!endpoints_contain_point(false, true));
+        assert!(!endpoints_contain_point(true, false));
     }
 
     #[test]

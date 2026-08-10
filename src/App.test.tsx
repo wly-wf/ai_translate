@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 let windowLabel = "main";
@@ -7,6 +7,7 @@ const invokeMock = vi.hoisted(() => vi.fn());
 const startDraggingMock = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const onFocusChangedMock = vi.hoisted(() => vi.fn().mockResolvedValue(() => {}));
 const cursorPositionMock = vi.hoisted(() => vi.fn().mockResolvedValue({ x: 0, y: 0 }));
+const listenMock = vi.hoisted(() => vi.fn().mockResolvedValue(() => {}));
 
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
   getCurrentWebviewWindow: () => ({ label: windowLabel }),
@@ -18,7 +19,7 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
 
 Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
 
@@ -46,6 +47,7 @@ describe("App", () => {
     invokeMock.mockReset().mockResolvedValue(undefined);
     startDraggingMock.mockClear();
     onFocusChangedMock.mockClear();
+    listenMock.mockClear();
   });
 
   it("routes the selection-float window to the translate-selection control", () => {
@@ -60,6 +62,24 @@ describe("App", () => {
     expect(button).not.toHaveAttribute("title");
     expect(button.parentElement).not.toHaveClass("selection-float");
     expect(screen.queryByText("快速翻译")).not.toBeInTheDocument();
+  });
+
+  it("restarts the selection-float entrance animation for every native show event", () => {
+    mockWindowLabel("selection-float");
+    render(<App />);
+
+    const initialButton = screen.getByRole("button", { name: "翻译选中文本" });
+    expect(initialButton).not.toHaveClass("is-visible");
+    const showHandler = listenMock.mock.calls.find(([eventName]) => eventName === "selection-float:show")?.[1];
+    expect(showHandler).toBeTypeOf("function");
+
+    act(() => showHandler({ payload: { generation: 1 } }));
+    const firstAnimatedButton = screen.getByRole("button", { name: "翻译选中文本" });
+    expect(firstAnimatedButton).toHaveClass("is-visible");
+    expect(firstAnimatedButton).not.toBe(initialButton);
+
+    act(() => showHandler({ payload: { generation: 2 } }));
+    expect(screen.getByRole("button", { name: "翻译选中文本" })).not.toBe(firstAnimatedButton);
   });
 
   it("starts dragging only after the title bar is moved", () => {
