@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { siAnthropic, siDeepseek, siGithub, siGooglegemini, siMoonshotai, type SimpleIcon } from "simple-icons";
+import { siDeepseek, siGithub, siMoonshotai, type SimpleIcon } from "simple-icons";
 import bailianIcon from "@lobehub/icons-static-svg/icons/bailian-color.svg";
 import xiaomiMimoIcon from "@lobehub/icons-static-svg/icons/xiaomimimo.svg";
 import zhipuIcon from "@lobehub/icons-static-svg/icons/zhipu-color.svg";
@@ -11,11 +11,10 @@ import { SelectionFloat } from "./SelectionFloat";
 import appIcon from "../src-tauri/icons/tray-icon.svg";
 import "./App.css";
 
-type SettingsProviderId = "deepseek" | "xiaomi" | "qwen" | "zhipu" | "moonshot" | "openai" | "google" | "anthropic";
+type SettingsProviderId = "deepseek" | "xiaomi" | "qwen" | "zhipu" | "moonshot" | "openai";
 type ProviderId = SettingsProviderId;
-type GenericProviderId = "openai" | "google" | "anthropic";
+type GenericProviderId = "openai";
 type SettingsPage = "providers" | "generic" | "connection" | "general" | "interface" | "about";
-type ApiProtocol = "openai" | "google" | "anthropic";
 type ProviderTranslationResult = { providerId: ProviderId; model: string; translation?: string | null; error?: string | null };
 type Translation = { source: string; results: ProviderTranslationResult[]; requestId?: number };
 type TranslationError = { requestId: number; message: string };
@@ -43,13 +42,13 @@ type SettingsProvider = {
   vendor: string;
   model: string;
   baseUrl: string;
-  protocol: ApiProtocol;
   mark: string;
   accent: string;
   summary: string;
 };
 
 type ProviderDraft = {
+  vendorName: string;
   apiKey: string;
   baseUrl: string;
   model: string;
@@ -58,6 +57,7 @@ type ProviderDraft = {
 };
 
 type ProviderConfigResponse = {
+  vendorName?: string;
   apiKey: string;
   baseUrl: string;
   model: string;
@@ -95,15 +95,11 @@ const PROJECT_LINKS = [
 
 const PROVIDER_ICONS: Partial<Record<ProviderId, SimpleIcon>> = {
   deepseek: siDeepseek,
-  anthropic: siAnthropic,
-  google: siGooglegemini,
 };
 
 const SETTINGS_PROVIDER_ICONS: Partial<Record<SettingsProviderId, SimpleIcon>> = {
   deepseek: siDeepseek,
   moonshot: siMoonshotai,
-  anthropic: siAnthropic,
-  google: siGooglegemini,
 };
 
 const PROVIDER_IMAGE_ICONS: Partial<Record<SettingsProviderId, { src: string; className: string }>> = {
@@ -118,7 +114,6 @@ const SETTINGS_PROVIDERS: SettingsProvider[] = [
     vendor: "DeepSeek",
     model: "deepseek-v4-flash",
     baseUrl: "https://api.deepseek.com",
-    protocol: "openai",
     mark: "D",
     accent: "#16a394",
     summary: "适合日常取词、技术文档和快速翻译。",
@@ -127,8 +122,7 @@ const SETTINGS_PROVIDERS: SettingsProvider[] = [
     id: "xiaomi",
     vendor: "Xiaomi MiMo",
     model: "mimo-v2.5-pro",
-    baseUrl: "https://api.xiaomimimo.com/v1",
-    protocol: "openai",
+    baseUrl: "https://api.xiaomimimo.com",
     mark: "M",
     accent: "#ff6900",
     summary: "Xiaomi MiMo 开放平台，兼容 OpenAI 接口。",
@@ -138,7 +132,6 @@ const SETTINGS_PROVIDERS: SettingsProvider[] = [
     vendor: "阿里云百炼",
     model: "qwen-plus",
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    protocol: "openai",
     mark: "Q",
     accent: "#5b55d6",
     summary: "阿里云百炼兼容模式，支持通义千问。",
@@ -148,7 +141,6 @@ const SETTINGS_PROVIDERS: SettingsProvider[] = [
     vendor: "智谱开放平台",
     model: "glm-5.2",
     baseUrl: "https://open.bigmodel.cn/api/paas/v4",
-    protocol: "openai",
     mark: "Z",
     accent: "#3478f6",
     summary: "智谱开放平台，兼容 OpenAI SDK。",
@@ -157,8 +149,7 @@ const SETTINGS_PROVIDERS: SettingsProvider[] = [
     id: "moonshot",
     vendor: "Moonshot",
     model: "kimi-k2.5",
-    baseUrl: "https://api.moonshot.cn/v1",
-    protocol: "openai",
+    baseUrl: "https://api.moonshot.cn",
     mark: "K",
     accent: "#242936",
     summary: "Moonshot API，适合长文本和中文场景。",
@@ -168,33 +159,12 @@ const SETTINGS_PROVIDERS: SettingsProvider[] = [
 const GENERIC_PROVIDERS: SettingsProvider[] = [
   {
     id: "openai",
-    vendor: "OpenAI",
+    vendor: "OpenAI 兼容接口",
     model: "gpt-4o-mini",
-    baseUrl: "https://api.openai.com/v1",
-    protocol: "openai",
+    baseUrl: "https://api.openai.com",
     mark: "O",
     accent: "#111827",
     summary: "标准 OpenAI Chat Completions 兼容接口。",
-  },
-  {
-    id: "google",
-    vendor: "Google Gemini",
-    model: "gemini-3.5-flash",
-    baseUrl: "https://generativelanguage.googleapis.com/v1beta",
-    protocol: "google",
-    mark: "G",
-    accent: "#5578df",
-    summary: "Google Gemini 原生 generateContent 接口。",
-  },
-  {
-    id: "anthropic",
-    vendor: "Anthropic Claude",
-    model: "claude-sonnet-4-5",
-    baseUrl: "https://api.anthropic.com/v1",
-    protocol: "anthropic",
-    mark: "A",
-    accent: "#d27b52",
-    summary: "Anthropic Messages API。",
   },
 ];
 
@@ -202,6 +172,7 @@ const ALL_SETTINGS_PROVIDERS = [...SETTINGS_PROVIDERS, ...GENERIC_PROVIDERS];
 
 function createProviderDrafts(): Record<SettingsProviderId, ProviderDraft> {
   return Object.fromEntries(ALL_SETTINGS_PROVIDERS.map((provider) => [provider.id, {
+    vendorName: provider.vendor,
     apiKey: "",
     baseUrl: provider.baseUrl,
     model: "",
@@ -222,9 +193,9 @@ function modelsFromConfig(config: Pick<ProviderConfigResponse, "model" | "models
   return uniqueModels(config.models?.length ? config.models : [config.model]);
 }
 
-function draftFromConfig(config: ProviderConfigResponse): ProviderDraft {
+function draftFromConfig(config: ProviderConfigResponse, fallbackVendor = ""): ProviderDraft {
   const models = modelsFromConfig(config);
-  return { apiKey: config.apiKey, baseUrl: config.baseUrl, model: models[0] ?? "", models, saved: true };
+  return { vendorName: config.vendorName?.trim() || fallbackVendor, apiKey: config.apiKey, baseUrl: config.baseUrl, model: models[0] ?? "", models, saved: true };
 }
 
 function translationResultKey(result: Pick<ProviderTranslationResult, "providerId" | "model">) {
@@ -241,17 +212,34 @@ const DEFAULT_PROVIDER_ID: ProviderId = "deepseek";
 const DEFAULT_USER_PREFERENCES: UserPreferences = { autoSelection: true, keepOnTop: false, quickTranslateProvider: null };
 const isTauriDesktop = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
-function isMostlyEnglish(value: string) {
-  const latinCount = value.match(/[A-Za-z]/g)?.length ?? 0;
-  const cjkCount = value.match(/[\u3400-\u9fff]/g)?.length ?? 0;
-  return latinCount > cjkCount;
+function containsCjk(value: string) {
+  return /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/.test(value);
+}
+
+function translationLanguageClass(source: string) {
+  // The native translation target uses the same direction rule: any CJK in
+  // the source translates to English; otherwise the target is Chinese. Base
+  // typography on that direction instead of acronyms inside the translation.
+  return containsCjk(source)
+    ? "translation-english"
+    : "translation-chinese";
 }
 
 function normalizeSourceText(value: string) {
-  // UI Automation and clipboard providers can return CRLF, CR, or LF. React
-  // inserts the captured value as a DOM text node, so normalize line endings
-  // without merging the provider's structural line and paragraph boundaries.
-  return value.replace(/\r\n?/g, "\n");
+  const normalized = value.replace(/\r\n?/g, "\n");
+  if (containsCjk(normalized)) return normalized;
+
+  // PDF and document UIA providers often expose visual line wrapping as hard
+  // newlines. Reflow those English soft wraps for this narrower window while
+  // retaining blank-line paragraph boundaries from the source document.
+  return normalized
+    .split(/\n[\t ]*\n+/)
+    .map((paragraph) => paragraph
+      .replace(/[\t ]*\n[\t ]*/g, " ")
+      .replace(/[\t ]+/g, " ")
+      .trim())
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function ProviderIcon({ provider }: { provider: { id: string; mark: string; accent: string } }) {
@@ -294,6 +282,34 @@ function ModelPicker({ value, choices, onChange, ariaLabel, disabled = false }: 
       <svg className="model-picker-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
     </button>
     {open && <div className="model-picker-menu" role="listbox" aria-label={ariaLabel}>{choices.map((choice) => { const provider = AVAILABLE_TRANSLATION_PROVIDERS.find((item) => item.id === choice.providerId); if (!provider) return null; const selected = choice.providerId === value; return <button className={`model-picker-option${selected ? " is-selected" : ""}`} type="button" role="option" aria-selected={selected} key={choice.providerId} onClick={() => { onChange(choice.providerId); setOpen(false); }}><ProviderIcon provider={provider} /><span><strong>{choice.model}</strong><small>{provider.vendor}</small></span>{selected && <span className="model-picker-selected-dot" aria-hidden="true" />}</button>; })}</div>}
+  </div>;
+}
+
+function InlineSelect({ value, options, onChange, ariaLabel }: { value: string; options: string[]; onChange: (value: string) => void; ariaLabel: string }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnOutsideClick = (event: globalThis.MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  return <div className={`inline-select${open ? " is-open" : ""}`} ref={rootRef}>
+    <button className="inline-select-trigger" type="button" role="combobox" aria-label={ariaLabel} aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((current) => !current)}>
+      <span>{value}</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
+    </button>
+    {open && <div className="inline-select-menu" role="listbox" aria-label={ariaLabel}>{options.map((option) => <button className={`inline-select-option${option === value ? " is-selected" : ""}`} type="button" role="option" aria-selected={option === value} key={option} onClick={() => { onChange(option); setOpen(false); }}><span>{option}</span>{option === value && <span className="inline-select-check" aria-hidden="true">✓</span>}</button>)}</div>}
   </div>;
 }
 
@@ -461,6 +477,53 @@ function ModelAddIcon() {
 
 function ModelRefreshIcon() {
   return <svg className="model-toolbar-icon model-refresh-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0 1.1 4.6" /><path d="M20 5v6h-6" /></svg>;
+}
+
+function DeleteIcon() {
+  return <svg className="provider-context-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 7h15M9 7V4.5h6V7M7 7l.7 12h8.6L17 7M10 10.5v5M14 10.5v5" /></svg>;
+}
+
+function AvailableModelsDialog({ provider, models, selectedModels, isLoading, fetchError, closeButtonRef, onToggle, onClose, onRetry }: {
+  provider: SettingsProvider;
+  models: string[];
+  selectedModels: string[];
+  isLoading: boolean;
+  fetchError: string;
+  closeButtonRef: React.RefObject<HTMLButtonElement | null>;
+  onToggle: (model: string) => void;
+  onClose: () => void;
+  onRetry: () => void;
+}) {
+  return <>
+    <button type="button" className="model-dialog-backdrop" aria-label="关闭可用模型窗口" onClick={onClose} />
+    <div className="model-dialog-card" role="dialog" aria-modal="true" aria-label={`${provider.vendor} 可用模型`}>
+      <header className="model-dialog-header">
+        <div className="model-dialog-heading">
+          <span className="model-dialog-provider-mark" aria-hidden="true"><ProviderIcon provider={provider} /></span>
+          <h2>{provider.vendor}</h2>
+        </div>
+        <button ref={closeButtonRef} type="button" className="model-dialog-close" onClick={onClose} aria-label="关闭可用模型" title="关闭"><Icon name="close" /></button>
+      </header>
+
+      {isLoading
+        ? <div className="model-dialog-loading" role="status" aria-live="polite" aria-label={`正在获取 ${provider.vendor} 模型`}><span className="model-dialog-spinner" aria-hidden="true" /><strong>正在获取模型</strong><p>正在连接 {provider.vendor}，请稍候…</p></div>
+        : fetchError
+          ? <div className="model-dialog-empty model-dialog-error" role="alert"><span aria-hidden="true">!</span><strong>获取模型失败</strong><p>{fetchError}</p><button type="button" onClick={onRetry}>重新获取</button></div>
+          : models.length > 0
+            ? <div className="model-dialog-list" role="list" aria-label={`${provider.vendor} 可用模型列表`}>
+              {models.map((model) => {
+                const added = selectedModels.includes(model);
+                return <div className="model-dialog-option" role="listitem" key={model}>
+                  <strong>{model}</strong>
+                  <button type="button" className={`model-dialog-action${added ? " is-remove" : ""}`} onClick={() => onToggle(model)} aria-label={added ? `移除模型 ${model}` : `添加模型 ${model}`} title={added ? "移除模型" : "添加模型"}>{added ? "−" : "+"}</button>
+                </div>;
+              })}
+            </div>
+            : <div className="model-dialog-empty"><span aria-hidden="true"><ModelRefreshIcon /></span><strong>没有获取到可用模型</strong><p>请检查接口地址或稍后重新获取。</p></div>}
+
+      <footer className="model-dialog-footer"><p>{isLoading ? "模型列表将在获取完成后自动显示。" : "可添加多个模型；使用＋添加、使用−移除，保存配置后生效。"}</p><button type="button" onClick={onClose}>{isLoading ? "隐藏" : "完成"}</button></footer>
+    </div>
+  </>;
 }
 
 function SettingsNavIcon({ name }: { name: "general" | "interface" | "providers" | "about" }) {
@@ -828,7 +891,7 @@ function MainWindow() {
                 <div className="text-line"><ExpandableText kind="source" text={normalizeSourceText(result.source)} /></div>
                 <div className="text-line translation-line">
                   {providerResult.translation
-                    ? <ExpandableText kind="translation" text={providerResult.translation} textClassName={isMostlyEnglish(providerResult.translation) ? "translation-english" : undefined} />
+                    ? <ExpandableText kind="translation" text={providerResult.translation} textClassName={translationLanguageClass(result.source)} />
                     : <div className="provider-placeholder" role="status" aria-live="polite"><span className="placeholder-dot" />{providerResult.error ?? (loading ? "翻译中…" : "翻译失败")}</div>}
                 </div>
               </div>}
@@ -855,6 +918,8 @@ function SettingsWindow() {
   const [notice, setNotice] = useState("");
   const [showApiKey, setShowApiKey] = useState(false);
   const [providerSearch, setProviderSearch] = useState("");
+  const [providerContextMenu, setProviderContextMenu] = useState<{ providerId: GenericProviderId; x: number; y: number } | null>(null);
+  const [deletingProviderId, setDeletingProviderId] = useState<GenericProviderId | null>(null);
   const [enabledProviderIds, setEnabledProviderIds] = useState<SettingsProviderId[]>([]);
   const [settingsEnabledProviderModels, setSettingsEnabledProviderModels] = useState<Partial<Record<ProviderId, string>>>({});
   const [addedGenericProviders, setAddedGenericProviders] = useState<GenericProviderId[]>([]);
@@ -863,10 +928,16 @@ function SettingsWindow() {
   const [modelDialogProviderId, setModelDialogProviderId] = useState<SettingsProviderId | null>(null);
   const [modelFetchMessage, setModelFetchMessage] = useState<{ providerId: SettingsProviderId | null; message: string }>({ providerId: null, message: "" });
   const [manualModelProviderIds, setManualModelProviderIds] = useState<SettingsProviderId[]>([]);
+  const [testModels, setTestModels] = useState<Partial<Record<SettingsProviderId, string>>>({});
+  const [testModelDialogProviderId, setTestModelDialogProviderId] = useState<SettingsProviderId | null>(null);
+  const [testModelDialogSelection, setTestModelDialogSelection] = useState("");
   const connectionRequestId = useRef(0);
   const modelFetchRequestId = useRef(0);
   const modelFetchButtonRef = useRef<HTMLButtonElement>(null);
   const modelDialogCloseRef = useRef<HTMLButtonElement>(null);
+  const testModelDialogCloseRef = useRef<HTMLButtonElement>(null);
+  const providerContextMenuRef = useRef<HTMLDivElement>(null);
+  const providerContextMenuActionRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (preferencesError) setNotice(preferencesError);
@@ -884,6 +955,44 @@ function SettingsWindow() {
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [modelDialogProviderId]);
+
+  useEffect(() => {
+    if (!testModelDialogProviderId) return;
+    const frame = window.requestAnimationFrame(() => testModelDialogCloseRef.current?.focus());
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeTestModelDialog();
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [testModelDialogProviderId]);
+
+  useEffect(() => {
+    if (!providerContextMenu) return;
+    const frame = window.requestAnimationFrame(() => providerContextMenuActionRef.current?.focus());
+    const closeOnPointerDown = (event: PointerEvent) => {
+      if (!providerContextMenuRef.current?.contains(event.target as Node)) setProviderContextMenu(null);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setProviderContextMenu(null);
+    };
+    const closeMenu = () => setProviderContextMenu(null);
+    document.addEventListener("pointerdown", closeOnPointerDown);
+    document.addEventListener("keydown", closeOnEscape);
+    document.addEventListener("scroll", closeMenu, true);
+    window.addEventListener("resize", closeMenu);
+    window.addEventListener("blur", closeMenu);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("pointerdown", closeOnPointerDown);
+      document.removeEventListener("keydown", closeOnEscape);
+      document.removeEventListener("scroll", closeMenu, true);
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("blur", closeMenu);
+    };
+  }, [providerContextMenu]);
 
   useEffect(() => {
     if (!isTauriDesktop()) return;
@@ -924,11 +1033,20 @@ function SettingsWindow() {
     return () => { cancelled = true; };
   }, [enabledProviderIds]);
 
-  const selectedSettingsProvider = ALL_SETTINGS_PROVIDERS.find((provider) => provider.id === selectedSettingsProviderId) ?? SETTINGS_PROVIDERS[0];
-  const selectedDraft = providerDrafts[selectedSettingsProvider.id];
+  const providerWithCustomName = (provider: SettingsProvider) => {
+    const customName = provider.id === "openai" ? providerDrafts.openai.vendorName.trim() : "";
+    return customName ? { ...provider, vendor: customName } : provider;
+  };
   const providerCollection = settingsPage === "connection"
-    ? [...SETTINGS_PROVIDERS, ...GENERIC_PROVIDERS.filter((provider) => addedGenericProviders.includes(provider.id as GenericProviderId))]
-    : [...SETTINGS_PROVIDERS, ...GENERIC_PROVIDERS.filter((provider) => addedGenericProviders.includes(provider.id as GenericProviderId))];
+    ? [...SETTINGS_PROVIDERS, ...GENERIC_PROVIDERS.filter((provider) => addedGenericProviders.includes(provider.id as GenericProviderId))].map(providerWithCustomName)
+    : [...SETTINGS_PROVIDERS, ...GENERIC_PROVIDERS.filter((provider) => addedGenericProviders.includes(provider.id as GenericProviderId))].map(providerWithCustomName);
+  const selectedSettingsProvider = providerCollection.find((provider) => provider.id === selectedSettingsProviderId)
+    ?? providerWithCustomName(SETTINGS_PROVIDERS[0]);
+  const selectedDraft = providerDrafts[selectedSettingsProvider.id];
+  const configuredTestModels = uniqueModels(selectedDraft.models);
+  const selectedTestModel = testModels[selectedSettingsProvider.id] && configuredTestModels.includes(testModels[selectedSettingsProvider.id]!)
+    ? testModels[selectedSettingsProvider.id]!
+    : (configuredTestModels.includes(selectedDraft.model) ? selectedDraft.model : configuredTestModels[0] ?? "");
   const filteredProviders = providerCollection.filter((provider) => {
     const query = providerSearch.trim().toLowerCase();
     return !query || `${provider.vendor} ${provider.model}`.toLowerCase().includes(query);
@@ -953,7 +1071,7 @@ function SettingsWindow() {
       setAddedGenericProviders(configured.map(({ provider }) => provider.id as GenericProviderId));
       setProviderDrafts((drafts) => configured.reduce((nextDrafts, { provider, config }) => ({
         ...nextDrafts,
-        [provider.id]: draftFromConfig(config),
+        [provider.id]: draftFromConfig(config, provider.vendor),
       }), drafts));
     });
     return () => { cancelled = true; };
@@ -972,7 +1090,7 @@ function SettingsWindow() {
       ]).then(([config, enabledIds]) => {
         if (disposed || !config) return;
         setAddedGenericProviders((providers) => providers.includes(provider.id as GenericProviderId) ? providers : [...providers, provider.id as GenericProviderId]);
-        setProviderDrafts((drafts) => ({ ...drafts, [provider.id]: draftFromConfig(config) }));
+        setProviderDrafts((drafts) => ({ ...drafts, [provider.id]: draftFromConfig(config, provider.vendor) }));
         setEnabledProviderIds(enabledIds);
         setSelectedSettingsProviderId(provider.id);
         setSettingsPage("generic");
@@ -996,9 +1114,10 @@ function SettingsWindow() {
     void nativeInvoke<ProviderConfigResponse | null>("get_provider_config", { provider: selectedSettingsProviderId })
       .then((config) => {
         if (cancelled || !config) return;
+        setTestModels((models) => ({ ...models, [selectedSettingsProviderId]: config.model }));
         setProviderDrafts((drafts) => ({
           ...drafts,
-          [selectedSettingsProviderId]: draftFromConfig(config),
+          [selectedSettingsProviderId]: draftFromConfig(config, ALL_SETTINGS_PROVIDERS.find((item) => item.id === selectedSettingsProviderId)?.vendor ?? ""),
         }));
       })
       .catch(() => undefined);
@@ -1013,6 +1132,7 @@ function SettingsWindow() {
   function switchSettingsPage(page: SettingsPage) {
     modelFetchRequestId.current += 1;
     setFetchingProviderId(null);
+    setProviderContextMenu(null);
     setSettingsPage(page);
     setModelDialogProviderId(null);
     setNotice("");
@@ -1027,6 +1147,7 @@ function SettingsWindow() {
   function selectSettingsProvider(providerId: SettingsProviderId) {
     connectionRequestId.current += 1;
     modelFetchRequestId.current += 1;
+    setProviderContextMenu(null);
     setFetchingProviderId(null);
     setModelDialogProviderId(null);
     setSelectedSettingsProviderId(providerId);
@@ -1041,13 +1162,61 @@ function SettingsWindow() {
 
   function openAddProvider() {
     setModelDialogProviderId(null);
+    setProviderContextMenu(null);
     setNotice("");
     void nativeInvoke("open_add_provider_window").catch((error) => setNotice(String(error)));
+  }
+
+  function showProviderContextMenu(providerId: SettingsProviderId, x: number, y: number) {
+    if (!addedGenericProviders.includes(providerId as GenericProviderId)) {
+      setProviderContextMenu(null);
+      return;
+    }
+    const menuWidth = 168;
+    const menuHeight = 48;
+    const edge = 8;
+    setProviderContextMenu({
+      providerId: providerId as GenericProviderId,
+      x: Math.max(edge, Math.min(x, window.innerWidth - menuWidth - edge)),
+      y: Math.max(edge, Math.min(y, window.innerHeight - menuHeight - edge)),
+    });
+  }
+
+  async function deleteCustomProvider(providerId: GenericProviderId) {
+    const providerName = providerCollection.find((provider) => provider.id === providerId)?.vendor ?? "自定义供应商";
+    setDeletingProviderId(providerId);
+    setNotice("");
+    try {
+      const providers = await nativeInvoke<SettingsProviderId[]>("delete_custom_provider", { provider: providerId });
+      setEnabledProviderIds(providers ?? []);
+      setAddedGenericProviders((current) => current.filter((id) => id !== providerId));
+      setProviderDrafts((drafts) => ({ ...drafts, [providerId]: createProviderDrafts()[providerId] }));
+      setFetchedModels((current) => { const next = { ...current }; delete next[providerId]; return next; });
+      setSettingsEnabledProviderModels((current) => { const next = { ...current }; delete next[providerId]; return next; });
+      setTestModels((current) => { const next = { ...current }; delete next[providerId]; return next; });
+      setManualModelProviderIds((current) => current.filter((id) => id !== providerId));
+      if (selectedSettingsProviderId === providerId) {
+        setSelectedSettingsProviderId(SETTINGS_PROVIDERS[0].id);
+        setSettingsPage("providers");
+        setConnectionState({ providerId: null, status: "idle", message: "" });
+      }
+      setNotice(`${providerName} 已删除。`);
+    } catch (error) {
+      setNotice(String(error));
+    } finally {
+      setDeletingProviderId(null);
+      setProviderContextMenu(null);
+    }
   }
 
   function closeModelDialog(restoreFocus = true) {
     setModelDialogProviderId(null);
     if (restoreFocus) window.requestAnimationFrame(() => modelFetchButtonRef.current?.focus());
+  }
+
+  function closeTestModelDialog() {
+    setTestModelDialogProviderId(null);
+    setTestModelDialogSelection("");
   }
 
   function toggleFetchedModel(providerId: SettingsProviderId, model: string) {
@@ -1093,6 +1262,12 @@ function SettingsWindow() {
     });
   }
 
+  function providerConfigPayload(provider: SettingsProvider, draft: ProviderDraft, models: string[]) {
+    const payload: Record<string, unknown> = { provider: provider.id, apiKey: draft.apiKey, baseUrl: draft.baseUrl, model: models[0], models };
+    if (provider.id === "openai") payload.vendorName = draft.vendorName;
+    return payload;
+  }
+
   async function saveProviderConfig() {
     const provider = selectedSettingsProvider;
     const draft = providerDrafts[provider.id];
@@ -1102,13 +1277,13 @@ function SettingsWindow() {
       return;
     }
     try {
-      await nativeInvoke("save_provider_config", { provider: provider.id, apiKey: draft.apiKey, baseUrl: draft.baseUrl, model: models[0], models });
+      await nativeInvoke("save_provider_config", providerConfigPayload(provider, draft, models));
       const savedConfig = await nativeInvoke<ProviderConfigResponse | null>("get_provider_config", { provider: provider.id });
       setProviderDrafts((drafts) => ({
         ...drafts,
-        [provider.id]: savedConfig ? draftFromConfig(savedConfig) : { ...draft, model: models[0], models, saved: true },
+        [provider.id]: savedConfig ? draftFromConfig(savedConfig, provider.vendor) : { ...draft, model: models[0], models, saved: true },
       }));
-      setNotice(`${provider.vendor} 配置已安全保存。`);
+      setNotice("保存成功");
     } catch (error) {
       setNotice(String(error));
     }
@@ -1124,13 +1299,7 @@ function SettingsWindow() {
           setNotice("请先填写 API Key、URL，并至少添加一个模型。");
           return;
         }
-        await nativeInvoke("save_provider_config", {
-          provider: provider.id,
-          apiKey: draft.apiKey,
-          baseUrl: draft.baseUrl,
-          model: models[0],
-          models,
-        });
+        await nativeInvoke("save_provider_config", providerConfigPayload(provider, draft, models));
         setProviderDrafts((drafts) => ({ ...drafts, [provider.id]: { ...drafts[provider.id], model: models[0], models, saved: true } }));
       }
       const providers = await nativeInvoke<SettingsProviderId[]>("set_provider_enabled", { provider: provider.id, enabled });
@@ -1141,21 +1310,61 @@ function SettingsWindow() {
     }
   }
 
-  async function testConnection() {
+  async function openTestModelDialog() {
     const provider = selectedSettingsProvider;
-    const draft = providerDrafts[provider.id];
+    let models = uniqueModels(providerDrafts[provider.id].models);
+    if (!models.length) {
+      const config = await nativeInvoke<ProviderConfigResponse | null>("get_provider_config", { provider: provider.id }).catch(() => null);
+      if (config) {
+        const nextDraft = draftFromConfig(config, provider.vendor);
+        models = uniqueModels(nextDraft.models);
+        setProviderDrafts((drafts) => ({ ...drafts, [provider.id]: nextDraft }));
+      }
+    }
+    if (!models.length) {
+      setConnectionState({ providerId: provider.id, status: "error", message: "请先配置模型" });
+      return;
+    }
+    const currentModel = testModels[provider.id];
+    setTestModelDialogSelection(currentModel && models.includes(currentModel) ? currentModel : models[0]);
+    setModelDialogProviderId(null);
+    setTestModelDialogProviderId(provider.id);
+  }
+
+  async function testConnection(modelOverride?: string) {
+    if (!modelOverride) {
+      await openTestModelDialog();
+      return;
+    }
+    const provider = selectedSettingsProvider;
+    let draft = providerDrafts[provider.id];
+    let models = uniqueModels(draft.models);
+    let model = modelOverride || selectedTestModel;
+    if (!model || !models.includes(model)) {
+      const config = await nativeInvoke<ProviderConfigResponse | null>("get_provider_config", { provider: provider.id }).catch(() => null);
+      if (config) {
+        draft = draftFromConfig(config, provider.vendor);
+        models = uniqueModels(draft.models);
+        model = draft.model;
+      }
+    }
+    if (!model || !models.includes(model)) {
+      setConnectionState({ providerId: provider.id, status: "error", message: "请先配置并选择一个模型" });
+      return;
+    }
     const requestId = connectionRequestId.current + 1;
     connectionRequestId.current = requestId;
     setConnectionState({ providerId: provider.id, status: "testing", message: "正在发送测试请求…" });
     try {
       const result = await nativeInvoke<{ latencyMs: number; message: string }>("test_provider_connection", {
-        provider: provider.id, apiKey: draft.apiKey, baseUrl: draft.baseUrl, model: draft.model,
+        provider: provider.id, apiKey: draft.apiKey, baseUrl: draft.baseUrl, model,
       });
       if (requestId !== connectionRequestId.current) return;
       setConnectionState({ providerId: provider.id, status: "success", message: `${result.message} · ${result.latencyMs} ms` });
     } catch (error) {
       if (requestId !== connectionRequestId.current) return;
-      setConnectionState({ providerId: provider.id, status: "error", message: String(error) });
+      const message = String(error).replace(/\s+/g, " ").trim();
+      setConnectionState({ providerId: provider.id, status: "error", message: message.length > 160 ? `${message.slice(0, 157)}…` : message });
     }
   }
 
@@ -1190,48 +1399,47 @@ function SettingsWindow() {
   }
 
   function renderModelDialog() {
-    if (!modelDialogProviderId) return null;
-    const provider = ALL_SETTINGS_PROVIDERS.find((item) => item.id === modelDialogProviderId);
+    if (!modelDialogProviderId) return renderTestModelDialog();
+    const provider = providerCollection.find((item) => item.id === modelDialogProviderId);
     if (!provider) return null;
     const models = fetchedModels[provider.id] ?? [];
     const selectedModels = providerDrafts[provider.id]?.models ?? [];
     const isLoading = fetchingProviderId === provider.id;
     const fetchError = modelFetchMessage.providerId === provider.id ? modelFetchMessage.message : "";
 
+    return <AvailableModelsDialog
+      provider={provider}
+      models={models}
+      selectedModels={selectedModels}
+      isLoading={isLoading}
+      fetchError={fetchError}
+      closeButtonRef={modelDialogCloseRef}
+      onToggle={(model) => toggleFetchedModel(provider.id, model)}
+      onClose={() => closeModelDialog()}
+      onRetry={() => void fetchProviderModels()}
+    />;
+  }
+
+  function renderTestModelDialog() {
+    if (!testModelDialogProviderId) return null;
+    const provider = providerCollection.find((item) => item.id === testModelDialogProviderId);
+    if (!provider) return null;
+    const models = uniqueModels(providerDrafts[provider.id]?.models ?? []);
+
     return <>
-      <button type="button" className="model-dialog-backdrop" aria-label="关闭可用模型窗口" onClick={() => closeModelDialog()} />
-      <div className="model-dialog-card" role="dialog" aria-modal="true" aria-label={`${provider.vendor} 可用模型`}>
+      <button type="button" className="model-dialog-backdrop" aria-label="关闭测试模型窗口" onClick={closeTestModelDialog} />
+      <div className="model-dialog-card test-model-dialog-card" role="dialog" aria-modal="true" aria-labelledby="test-model-dialog-title">
         <header className="model-dialog-header">
-          <div className="model-dialog-heading">
-            <span className="model-dialog-provider-mark" aria-hidden="true"><ProviderIcon provider={provider} /></span>
-            <h2>{provider.vendor}</h2>
-          </div>
-          <button ref={modelDialogCloseRef} type="button" className="model-dialog-close" onClick={() => closeModelDialog()} aria-label="关闭可用模型" title="关闭"><Icon name="close" /></button>
+          <div className="model-dialog-heading"><h2 id="test-model-dialog-title">请选择要检测的模型</h2></div>
+          <button ref={testModelDialogCloseRef} type="button" className="model-dialog-close" onClick={closeTestModelDialog} aria-label="关闭测试模型窗口" title="关闭"><Icon name="close" /></button>
         </header>
-
-        {isLoading
-          ? <div className="model-dialog-loading" role="status" aria-live="polite" aria-label={`正在获取 ${provider.vendor} 模型`}><span className="model-dialog-spinner" aria-hidden="true" /><strong>正在获取模型</strong><p>正在连接 {provider.vendor}，请稍候…</p></div>
-          : fetchError
-            ? <div className="model-dialog-empty model-dialog-error" role="alert"><span aria-hidden="true">!</span><strong>获取模型失败</strong><p>{fetchError}</p><button type="button" onClick={() => void fetchProviderModels()}>重新获取</button></div>
-            : models.length > 0
-          ? <div className="model-dialog-list" role="list" aria-label={`${provider.vendor} 可用模型列表`}>
-            {models.map((model) => {
-              const added = selectedModels.includes(model);
-              return <div className="model-dialog-option" role="listitem" key={model}>
-                <strong>{model}</strong>
-                <button type="button" className={`model-dialog-action${added ? " is-remove" : ""}`} onClick={() => toggleFetchedModel(provider.id, model)} aria-label={added ? `移除模型 ${model}` : `添加模型 ${model}`} title={added ? "移除模型" : "添加模型"}>{added ? "−" : "+"}</button>
-              </div>;
-            })}
-          </div>
-          : <div className="model-dialog-empty"><span aria-hidden="true"><ModelRefreshIcon /></span><strong>没有获取到可用模型</strong><p>请检查接口地址或稍后重新获取。</p></div>}
-
-        <footer className="model-dialog-footer"><p>{isLoading ? "模型列表将在获取完成后自动显示。" : "可添加多个模型；使用＋添加、使用−移除，保存配置后生效。"}</p><button type="button" onClick={() => closeModelDialog()}>{isLoading ? "隐藏" : "完成"}</button></footer>
+        <div className="test-model-dialog-content"><div className="test-model-select-field"><span>选择模型</span><InlineSelect value={testModelDialogSelection} options={models} onChange={setTestModelDialogSelection} ariaLabel="选择测试模型" /></div></div>
+        <footer className="model-dialog-footer"><button type="button" className="test-model-dialog-cancel" onClick={closeTestModelDialog}>取消</button><button type="button" onClick={() => { const model = testModelDialogSelection; setTestModels((current) => ({ ...current, [provider.id]: model })); closeTestModelDialog(); void testConnection(model); }}>测试连接</button></footer>
       </div>
     </>;
   }
 
   function renderProviderDetails() {
-    const apiPath = selectedSettingsProvider.protocol === "google" ? "/models/{model}:generateContent" : selectedSettingsProvider.protocol === "anthropic" ? "/messages" : "/chat/completions";
     const isEnabledForTranslation = enabledProviderIds.includes(selectedSettingsProvider.id);
     const isFetchingModels = fetchingProviderId === selectedSettingsProvider.id;
     const showModelEditor = selectedDraft.models.length > 0 || manualModelProviderIds.includes(selectedSettingsProvider.id);
@@ -1242,9 +1450,12 @@ function SettingsWindow() {
         <label className="settings-switch" title={isEnabledForTranslation ? "从翻译中移除" : "加入翻译"}><input type="checkbox" checked={isEnabledForTranslation} onChange={(event) => void setSelectedProviderEnabled(event.target.checked)} aria-label="启用此翻译模型" /><span aria-hidden="true" /></label>
       </div>
       <section className="settings-form-card provider-config-card">
-        <div className="settings-field-group"><div className="settings-label-row"><label className="field-label" htmlFor="provider-api-key">API Key</label><div className="connection-test-cluster">{connectionState.providerId === selectedSettingsProvider.id && connectionState.status !== "idle" && <span className={`connection-inline-result ${connectionState.status}`} role="status" title={connectionState.message}>{connectionState.message}</span>}<button className="inline-test" type="button" onClick={() => void testConnection()} disabled={connectionState.status === "testing"}><span aria-hidden="true">♡</span>{connectionState.status === "testing" ? "测试中" : "测试连接"}</button></div></div><div className="api-key-input-wrap"><input id="provider-api-key" value={selectedDraft.apiKey} onChange={(event) => updateSelectedDraft("apiKey", event.target.value)} type={showApiKey ? "text" : "password"} placeholder={selectedDraft.saved ? "已保存，留空以保留当前 Key" : "粘贴 API Key"} /><button type="button" className="api-key-toggle" onClick={() => setShowApiKey((visible) => !visible)} aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"} title={showApiKey ? "隐藏 API Key" : "显示 API Key"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-5.5 9.5-5.5 9.5 5.5 9.5 5.5-3.4 5.5-9.5 5.5S2.5 12 2.5 12Z" /><circle cx="12" cy="12" r="2.5" /></svg></button></div></div>
-        <div className="settings-field-group"><label className="field-label" htmlFor="provider-base-url">URL</label><input id="provider-base-url" value={selectedDraft.baseUrl} onChange={(event) => updateSelectedDraft("baseUrl", event.target.value)} spellCheck={false} /></div>
-        <div className="settings-field-group"><label className="field-label" htmlFor="provider-api-path">API 路径</label><input id="provider-api-path" value={apiPath} readOnly spellCheck={false} /></div>
+        <div className="settings-field-group">
+          <div className="settings-label-row"><label className="field-label" htmlFor="provider-api-key">API Key</label><button className="inline-test" type="button" onClick={() => void testConnection()} disabled={connectionState.status === "testing"}><span aria-hidden="true">♡</span>{connectionState.status === "testing" ? "测试中" : "测试连接"}</button></div>
+          <div className="api-key-input-wrap"><input id="provider-api-key" value={selectedDraft.apiKey} onChange={(event) => updateSelectedDraft("apiKey", event.target.value)} type={showApiKey ? "text" : "password"} placeholder={selectedDraft.saved ? "已保存，留空以保留当前 Key" : "粘贴 API Key"} /><button type="button" className="api-key-toggle" onClick={() => setShowApiKey((visible) => !visible)} aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"} title={showApiKey ? "隐藏 API Key" : "显示 API Key"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-5.5 9.5-5.5 9.5 5.5 9.5 5.5-3.4 5.5-9.5 5.5S2.5 12 2.5 12Z" /><circle cx="12" cy="12" r="2.5" /></svg></button></div>
+          {connectionState.providerId === selectedSettingsProvider.id && connectionState.status !== "idle" && <span className={`connection-inline-result connection-field-result ${connectionState.status}`} role="status" title={connectionState.message}>{connectionState.message}</span>}
+        </div>
+        <div className="settings-field-group"><label className="field-label" htmlFor="provider-base-url">API 地址</label><input id="provider-base-url" value={selectedDraft.baseUrl} onChange={(event) => updateSelectedDraft("baseUrl", event.target.value)} spellCheck={false} placeholder="填写服务地址或完整的 /chat/completions 地址" /></div>
         <div className="model-section provider-model-section">
           <div className="model-section-header">
             <div className="model-section-title"><h3>模型</h3><span>{selectedDraft.models.filter((model) => model.trim()).length}</span></div>
@@ -1260,7 +1471,7 @@ function SettingsWindow() {
           </div>}
         </div>
       </section>
-      <div className="provider-detail-footer"><div className="action-row settings-actions"><button className="primary" onClick={() => void saveProviderConfig()}>保存配置</button></div></div>
+      <div className="provider-detail-footer">{notice && <p className="notice provider-save-notice" role="status">{notice}</p>}<div className="action-row settings-actions"><button className="primary" onClick={() => void saveProviderConfig()}>保存配置</button></div></div>
     </div>;
   }
 
@@ -1325,29 +1536,80 @@ function SettingsWindow() {
     </div>;
   }
 
+  function renderProviderContextMenu() {
+    if (!providerContextMenu) return null;
+    const provider = providerCollection.find((item) => item.id === providerContextMenu.providerId);
+    if (!provider) return null;
+    const deleting = deletingProviderId === provider.id;
+    return <div ref={providerContextMenuRef} className="provider-context-menu" role="menu" aria-label={`${provider.vendor} 操作`} style={{ left: providerContextMenu.x, top: providerContextMenu.y }}>
+      <button ref={providerContextMenuActionRef} type="button" role="menuitem" className="provider-context-menu-delete" onClick={() => void deleteCustomProvider(provider.id as GenericProviderId)} disabled={deleting} aria-label={`删除供应商 ${provider.vendor}`}><DeleteIcon /><span>{deleting ? "删除中…" : "删除供应商"}</span></button>
+    </div>;
+  }
+
   function renderProviderColumn() {
     return <aside className="settings-provider-column">
       <div className="provider-search"><SearchIcon /><input aria-label="搜索供应商或分组" value={providerSearch} onChange={(event) => setProviderSearch(event.target.value)} placeholder="搜索供应商或分组" /></div>
       <div className="provider-list-heading"><span>可用接口</span><strong>{filteredProviders.length}</strong></div>
-      <nav className="provider-list-nav" aria-label="供应商列表">{filteredProviders.map((provider) => { const enabled = enabledProviderIds.includes(provider.id); return <button type="button" className={`provider-list-item ${provider.id === selectedSettingsProvider.id ? "is-selected" : ""}`} key={provider.id} onClick={() => selectSettingsProvider(provider.id)}><ProviderIcon provider={provider} /><span className="provider-list-copy"><strong>{provider.vendor}</strong></span><span className={`provider-list-status-dot ${enabled ? "is-enabled" : ""}`} aria-hidden="true" /><span className="sr-only">{enabled ? "已启用" : "未启用"}</span></button>; })}</nav>
+      <nav className="provider-list-nav" aria-label="供应商列表">{filteredProviders.map((provider) => {
+        const enabled = enabledProviderIds.includes(provider.id);
+        const isCustom = addedGenericProviders.includes(provider.id as GenericProviderId);
+        return <button
+          type="button"
+          className={`provider-list-item ${provider.id === selectedSettingsProvider.id ? "is-selected" : ""}`}
+          key={provider.id}
+          onClick={() => selectSettingsProvider(provider.id)}
+          onContextMenu={(event) => {
+            if (!isCustom) {
+              setProviderContextMenu(null);
+              return;
+            }
+            event.preventDefault();
+            showProviderContextMenu(provider.id, event.clientX, event.clientY);
+          }}
+          onKeyDown={(event) => {
+            if (!isCustom || !(event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) return;
+            event.preventDefault();
+            const rect = event.currentTarget.getBoundingClientRect();
+            showProviderContextMenu(provider.id, rect.left + 28, rect.bottom - 4);
+          }}
+          aria-haspopup={isCustom ? "menu" : undefined}
+          aria-expanded={isCustom ? providerContextMenu?.providerId === provider.id : undefined}
+        ><ProviderIcon provider={provider} /><span className="provider-list-copy"><strong>{provider.vendor}</strong></span><span className={`provider-list-status-dot ${enabled ? "is-enabled" : ""}`} aria-hidden="true" /><span className="sr-only">{enabled ? "已启用" : "未启用"}</span></button>;
+      })}</nav>
       <div className="provider-column-footer"><button type="button" className="provider-add-button" onClick={() => openAddProvider()}>＋ 添加自定义供应商</button></div>
     </aside>;
   }
 
-  return <main className="app-shell settings-window-shell"><section className={`settings-shell settings-shell-${isProviderPage ? "providers" : "single"}`}><div className="settings-topbar" onMouseDown={dragWindow}><div className="settings-brand settings-brand-top"><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong></div></div><div className="settings-window-actions"><button type="button" className="settings-window-button settings-minimize-button" onClick={() => void nativeInvoke<void>("minimize_window").catch(() => undefined)} aria-label="最小化" title="最小化"><Icon name="minimize" /></button><button type="button" className="settings-close-button" onClick={() => void nativeInvoke("hide_settings_window")} aria-label="关闭设置" title="关闭设置"><Icon name="close" /></button></div></div><aside className="settings-nav-panel"><div className="settings-brand" onMouseDown={dragWindow}><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong><small>设置中心</small></div></div><nav className="settings-primary-nav" aria-label="设置分类"><button type="button" className={activeNavPage === "general" ? "is-active" : ""} onClick={() => switchSettingsPage("general")}><SettingsNavIcon name="general" />通用设置</button><button type="button" className={activeNavPage === "interface" ? "is-active" : ""} onClick={() => switchSettingsPage("interface")}><SettingsNavIcon name="interface" />界面设置</button><button type="button" className={activeNavPage === "providers" ? "is-active" : ""} onClick={() => switchSettingsPage("providers")}><SettingsNavIcon name="providers" />供应商</button><button type="button" className={activeNavPage === "about" ? "is-active" : ""} onClick={() => switchSettingsPage("about")}><SettingsNavIcon name="about" />关于</button></nav></aside>{isProviderPage && renderProviderColumn()}<section className="settings-main">{settingsPage === "connection" ? renderConnectionPage() : settingsPage === "general" ? renderCommonPage() : settingsPage === "interface" ? renderInterfacePage() : settingsPage === "about" ? renderAboutPage() : renderProviderDetails()}{notice && <p className="notice" role="status">{notice}</p>}</section>{renderModelDialog()}</section></main>;
+  return <main className="app-shell settings-window-shell"><section className={`settings-shell settings-shell-${isProviderPage ? "providers" : "single"}`}><div className="settings-topbar" onMouseDown={dragWindow}><div className="settings-brand settings-brand-top"><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong></div></div><div className="settings-window-actions"><button type="button" className="settings-window-button settings-minimize-button" onClick={() => void nativeInvoke<void>("minimize_window").catch(() => undefined)} aria-label="最小化" title="最小化"><Icon name="minimize" /></button><button type="button" className="settings-close-button" onClick={() => void nativeInvoke("hide_settings_window")} aria-label="关闭设置" title="关闭设置"><Icon name="close" /></button></div></div><aside className="settings-nav-panel"><div className="settings-brand" onMouseDown={dragWindow}><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong><small>设置中心</small></div></div><nav className="settings-primary-nav" aria-label="设置分类"><button type="button" className={activeNavPage === "general" ? "is-active" : ""} onClick={() => switchSettingsPage("general")}><SettingsNavIcon name="general" />通用设置</button><button type="button" className={activeNavPage === "interface" ? "is-active" : ""} onClick={() => switchSettingsPage("interface")}><SettingsNavIcon name="interface" />界面设置</button><button type="button" className={activeNavPage === "providers" ? "is-active" : ""} onClick={() => switchSettingsPage("providers")}><SettingsNavIcon name="providers" />供应商</button><button type="button" className={activeNavPage === "about" ? "is-active" : ""} onClick={() => switchSettingsPage("about")}><SettingsNavIcon name="about" />关于</button></nav></aside>{isProviderPage && renderProviderColumn()}<section className="settings-main">{settingsPage === "connection" ? renderConnectionPage() : settingsPage === "general" ? renderCommonPage() : settingsPage === "interface" ? renderInterfacePage() : settingsPage === "about" ? renderAboutPage() : renderProviderDetails()}{notice && !isProviderPage && <p className="notice" role="status">{notice}</p>}</section>{renderModelDialog()}{renderProviderContextMenu()}</section></main>;
 }
 
 function AddProviderWindow() {
-  const [providerId, setProviderId] = useState<GenericProviderId>("openai");
   const [providerDrafts, setProviderDrafts] = useState<Record<SettingsProviderId, ProviderDraft>>(createProviderDrafts);
-  const [enabled, setEnabled] = useState(true);
   const [showApiKey, setShowApiKey] = useState(false);
   const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState(false);
-  const provider = GENERIC_PROVIDERS.find((item) => item.id === providerId) ?? GENERIC_PROVIDERS[0];
-  const draft = providerDrafts[providerId];
-  const apiPath = provider.protocol === "google" ? "/models/{model}:generateContent" : provider.protocol === "anthropic" ? "/messages" : "/chat/completions";
-  const tabLabels: Record<GenericProviderId, string> = { openai: "OpenAI", google: "Google", anthropic: "Claude" };
+  const [fetchedModels, setFetchedModels] = useState<string[]>([]);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [modelDialogOpen, setModelDialogOpen] = useState(false);
+  const [modelFetchError, setModelFetchError] = useState("");
+  const modelDialogCloseRef = useRef<HTMLButtonElement>(null);
+  const modelFetchButtonRef = useRef<HTMLButtonElement>(null);
+  const provider = GENERIC_PROVIDERS[0];
+  const draft = providerDrafts.openai;
+  const dialogProvider = { ...provider, vendor: draft.vendorName.trim() || provider.vendor };
+
+  useEffect(() => {
+    if (!modelDialogOpen) return;
+    const frame = window.requestAnimationFrame(() => modelDialogCloseRef.current?.focus());
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeModelDialog();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [modelDialogOpen]);
 
   function dragWindow(event: MouseEvent<HTMLElement>) {
     if ((event.target as HTMLElement).closest("button, input")) return;
@@ -1355,29 +1617,76 @@ function AddProviderWindow() {
   }
 
   function updateDraft(field: keyof ProviderDraft, value: string) {
-    setProviderDrafts((drafts) => ({ ...drafts, [providerId]: { ...drafts[providerId], [field]: value } }));
-  }
-
-  function selectProvider(nextProviderId: GenericProviderId) {
-    setProviderId(nextProviderId);
-    setShowApiKey(false);
-    setNotice("");
+    setProviderDrafts((drafts) => ({ ...drafts, openai: { ...drafts.openai, [field]: value } }));
   }
 
   function returnToSettings() {
     void nativeInvoke("return_to_settings_window").catch((error) => setNotice(String(error)));
   }
 
+  function closeModelDialog() {
+    setModelDialogOpen(false);
+    window.requestAnimationFrame(() => modelFetchButtonRef.current?.focus());
+  }
+
+  function toggleFetchedModel(model: string) {
+    setProviderDrafts((drafts) => {
+      const currentDraft = drafts.openai;
+      const currentModels = uniqueModels(currentDraft.models);
+      const models = currentModels.includes(model)
+        ? currentModels.filter((item) => item !== model)
+        : [...currentModels, model];
+      return { ...drafts, openai: { ...currentDraft, model: models[0] ?? "", models } };
+    });
+  }
+
+  function updateModel(index: number, value: string) {
+    setProviderDrafts((drafts) => {
+      const currentDraft = drafts.openai;
+      const models = currentDraft.models.length ? [...currentDraft.models] : [currentDraft.model];
+      models[index] = value;
+      return { ...drafts, openai: { ...currentDraft, model: models[0] ?? "", models } };
+    });
+  }
+
+  function removeModel(index: number) {
+    setProviderDrafts((drafts) => {
+      const currentDraft = drafts.openai;
+      const models = currentDraft.models.filter((_, modelIndex) => modelIndex !== index);
+      return { ...drafts, openai: { ...currentDraft, model: models[0] ?? "", models } };
+    });
+  }
+
+  async function fetchModels() {
+    if (!draft.baseUrl.trim()) {
+      setNotice("请先填写 API 地址");
+      return;
+    }
+    setModelDialogOpen(true);
+    setFetchingModels(true);
+    setModelFetchError("");
+    setNotice("");
+    try {
+      const models = await nativeInvoke<string[]>("fetch_provider_models", { provider: provider.id, apiKey: draft.apiKey, baseUrl: draft.baseUrl });
+      setFetchedModels(uniqueModels(models));
+    } catch (error) {
+      setModelFetchError(String(error).replace(provider.id, dialogProvider.vendor));
+    } finally {
+      setFetchingModels(false);
+    }
+  }
+
   async function addProvider() {
-    if (!draft.apiKey.trim() || !draft.baseUrl.trim() || !draft.model.trim()) {
-      setNotice("请填写 API Key、Base URL 和模型名称。");
+    const configuredModels = uniqueModels(draft.models.length ? draft.models : [draft.model]);
+    if (!draft.baseUrl.trim() || !configuredModels.length) {
+      setNotice("请填写 Base URL 和模型名称。");
       return;
     }
     setSaving(true);
     setNotice("");
     try {
-      await nativeInvoke("save_provider_config", { provider: provider.id, apiKey: draft.apiKey, baseUrl: draft.baseUrl, model: draft.model });
-      await nativeInvoke("set_provider_enabled", { provider: provider.id, enabled });
+      await nativeInvoke("save_provider_config", { provider: provider.id, vendorName: draft.vendorName, apiKey: draft.apiKey, baseUrl: draft.baseUrl, model: configuredModels[0], models: configuredModels });
+      await nativeInvoke("set_provider_enabled", { provider: provider.id, enabled: true });
       await nativeInvoke("return_to_settings_window");
     } catch (error) {
       setNotice(String(error));
@@ -1392,20 +1701,29 @@ function AddProviderWindow() {
       <button type="button" className="titlebar-icon-button titlebar-close add-provider-window-close" onClick={returnToSettings} aria-label="关闭添加自定义供应商" title="关闭"><Icon name="close" /></button>
     </div>
     <div className="add-provider-content">
-      <div className="add-provider-tabs" role="tablist" aria-label="供应商类型">{GENERIC_PROVIDERS.map((item) => <button type="button" role="tab" aria-selected={item.id === providerId} className={item.id === providerId ? "is-active" : ""} key={item.id} onClick={() => selectProvider(item.id as GenericProviderId)}>{tabLabels[item.id as GenericProviderId]}</button>)}</div>
-      <div className="add-provider-form">
-        <label className="add-provider-option"><span><strong>添加后启用</strong><small>立即加入翻译模型列表</small></span><span className="settings-switch"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} aria-label="添加后启用" /><span aria-hidden="true" /></span></label>
-        <div className="add-provider-field"><label htmlFor="add-provider-api-key">API Key</label><div className="api-key-input-wrap"><input id="add-provider-api-key" value={draft.apiKey} onChange={(event) => updateDraft("apiKey", event.target.value)} type={showApiKey ? "text" : "password"} autoComplete="off" /><button type="button" className="api-key-toggle" onClick={() => setShowApiKey((visible) => !visible)} aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"} title={showApiKey ? "隐藏 API Key" : "显示 API Key"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-5.5 9.5-5.5 9.5 5.5 9.5 5.5-3.4 5.5-9.5 5.5S2.5 12 2.5 12Z" /><circle cx="12" cy="12" r="2.5" /></svg></button></div></div>
-        <div className="add-provider-field"><label htmlFor="add-provider-base-url">Base URL</label><input id="add-provider-base-url" value={draft.baseUrl} onChange={(event) => updateDraft("baseUrl", event.target.value)} spellCheck={false} /></div>
-        <div className="add-provider-field"><label htmlFor="add-provider-api-path">API 路径</label><input id="add-provider-api-path" value={apiPath} readOnly spellCheck={false} /></div>
+      <div className="add-provider-scroll">
+        <div className="add-provider-protocol"><strong>OpenAI 兼容接口</strong><small>适用于支持 Chat Completions 协议的模型服务</small></div>
+        <div className="add-provider-form">
+          <div className="add-provider-field"><label htmlFor="add-provider-name">供应商名称</label><input id="add-provider-name" value={draft.vendorName} onChange={(event) => updateDraft("vendorName", event.target.value)} placeholder="例如 Ollama、硅基流动" /></div>
+          <div className="add-provider-field"><label htmlFor="add-provider-api-key">API Key（本机服务可留空）</label><div className="api-key-input-wrap"><input id="add-provider-api-key" value={draft.apiKey} onChange={(event) => updateDraft("apiKey", event.target.value)} type={showApiKey ? "text" : "password"} autoComplete="off" /><button type="button" className="api-key-toggle" onClick={() => setShowApiKey((visible) => !visible)} aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"} title={showApiKey ? "隐藏 API Key" : "显示 API Key"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-5.5 9.5-5.5 9.5 5.5 9.5 5.5-3.4 5.5-9.5 5.5S2.5 12 2.5 12Z" /><circle cx="12" cy="12" r="2.5" /></svg></button></div></div>
+          <div className="add-provider-field"><label htmlFor="add-provider-base-url">API 地址</label><input id="add-provider-base-url" value={draft.baseUrl} onChange={(event) => updateDraft("baseUrl", event.target.value)} spellCheck={false} placeholder="填写服务地址或完整的 /chat/completions 地址" /></div>
+          <div className="add-provider-field"><div className="add-provider-model-label"><label htmlFor="add-provider-model">模型名称</label><button ref={modelFetchButtonRef} type="button" className="add-provider-fetch" onClick={() => void fetchModels()} disabled={fetchingModels || !draft.baseUrl.trim()} aria-busy={fetchingModels}>{fetchingModels ? "获取中…" : "获取模型"}</button></div><div className="add-provider-model-list">{(draft.models.length ? draft.models : [draft.model]).map((model, index) => <div className="add-provider-model-row" key={index}><ProviderIcon provider={dialogProvider} /><input id={index === 0 ? "add-provider-model" : undefined} aria-label={index === 0 ? undefined : `模型名称 ${index + 1}`} value={model} onChange={(event) => updateModel(index, event.target.value)} spellCheck={false} placeholder={index === 0 ? "可手动输入，也可点击获取模型" : undefined} />{draft.models.length > 0 && <button type="button" onClick={() => removeModel(index)} aria-label={model ? `移除模型 ${model}` : "移除模型"} title="移除模型">−</button>}</div>)}</div></div>
+        </div>
+        {notice && <p className="notice add-provider-notice" role="status">{notice}</p>}
       </div>
-      {notice && <p className="notice add-provider-notice" role="status">{notice}</p>}
       <div className="add-provider-actions"><button type="button" className="secondary" onClick={returnToSettings}>取消</button><button className="primary" type="button" onClick={() => void addProvider()} disabled={saving}>{saving ? "添加中…" : "添加接口"}</button></div>
     </div>
+    {modelDialogOpen && <AvailableModelsDialog provider={dialogProvider} models={fetchedModels} selectedModels={uniqueModels(draft.models)} isLoading={fetchingModels} fetchError={modelFetchError} closeButtonRef={modelDialogCloseRef} onToggle={toggleFetchedModel} onClose={closeModelDialog} onRetry={() => void fetchModels()} />}
   </section></main>;
 }
 
 function App() {
+  useEffect(() => {
+    const disableDefaultContextMenu = (event: globalThis.MouseEvent) => event.preventDefault();
+    document.addEventListener("contextmenu", disableDefaultContextMenu);
+    return () => document.removeEventListener("contextmenu", disableDefaultContextMenu);
+  }, []);
+
   let label = "main";
   try {
     label = getCurrentWebviewWindow().label;

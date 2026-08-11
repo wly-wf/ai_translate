@@ -4,7 +4,7 @@ pub mod windows_selection;
 
 use selection_state::{Anchor, SelectionController, StateChange};
 use windows_selection::{capture_selection, CaptureOutcome};
-use keyring::Entry;
+use keyring::{Entry, Error as KeyringError};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -293,11 +293,11 @@ mod selection_float_tests {
     }
 
     #[test]
-    fn vendor_specific_thinking_is_disabled_for_translation() {
+    fn only_vendor_supported_thinking_options_are_sent() {
         for provider in ["xiaomi", "zhipu", "moonshot"] {
             let mut payload = serde_json::json!({});
             disable_thinking_for_openai_compatible(provider, &mut payload);
-            assert_eq!(payload["thinking"], serde_json::json!({ "type": "disabled" }));
+            assert_eq!(payload, serde_json::json!({}));
         }
 
         let mut qwen = serde_json::json!({});
@@ -333,24 +333,103 @@ mod selection_float_tests {
     }
 
     #[test]
-    fn google_model_ids_are_normalized_and_non_generation_models_are_filtered() {
-        let payload = serde_json::json!({
-            "models": [
-                { "name": "models/gemini-flash", "supportedGenerationMethods": ["generateContent"] },
-                { "name": "models/gemini-image-generation", "supportedGenerationMethods": ["generateContent"] },
-                { "name": "models/embedding-001", "supportedGenerationMethods": ["embedContent"] }
-            ]
-        });
-
-        assert_eq!(parse_model_ids("google", &payload).unwrap(), vec!["gemini-flash"]);
-    }
-
-    #[test]
     fn remote_http_provider_urls_are_rejected_but_loopback_is_allowed() {
         assert!(validate_base_url("https://api.example.com/v1").is_ok());
         assert!(validate_base_url("http://localhost:8080/v1").is_ok());
         assert!(validate_base_url("http://127.0.0.1:8080/v1").is_ok());
         assert!(validate_base_url("http://api.example.com/v1").is_err());
+    }
+
+    #[test]
+    fn complete_api_urls_are_rebased_without_duplicate_resources() {
+        assert_eq!(
+            api_endpoint("https://api.example.com", "chat/completions").unwrap(),
+            "https://api.example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            api_endpoint("https://api.example.com/v1/chat/completions", "models").unwrap(),
+            "https://api.example.com/v1/models"
+        );
+        assert_eq!(
+            api_endpoint("https://api.example.com/v1/models", "chat/completions").unwrap(),
+            "https://api.example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            api_endpoint("https://api.example.com/v1?tenant=one", "chat/completions").unwrap(),
+            "https://api.example.com/v1/chat/completions?tenant=one"
+        );
+    }
+
+    #[test]
+    fn local_providers_can_run_without_an_api_key() {
+        assert!(!api_key_required("http://localhost:11434/v1"));
+        assert!(!api_key_required("http://127.0.0.1:1234/v1"));
+        assert!(api_key_required("https://api.example.com/v1"));
+    }
+
+    #[test]
+    fn simple_v1_vendor_urls_are_normalized_but_custom_paths_are_preserved() {
+        assert_eq!(
+            normalize_provider_base_url("xiaomi", "https://api.xiaomimimo.com/v1"),
+            "https://api.xiaomimimo.com"
+        );
+        assert_eq!(
+            normalize_provider_base_url("moonshot", "https://api.moonshot.cn/v1/"),
+            "https://api.moonshot.cn"
+        );
+        assert_eq!(
+            normalize_provider_base_url("qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+            "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        );
+        assert_eq!(
+            normalize_provider_base_url("zhipu", "https://open.bigmodel.cn/api/paas/v4"),
+            "https://open.bigmodel.cn/api/paas/v4"
+        );
+    }
+
+    #[test]
+    fn azure_endpoints_use_api_key_auth_and_preserve_api_version() {
+        let endpoint = api_endpoint(
+            "https://demo.openai.azure.com/openai/deployments/translator/chat/completions?api-version=2024-10-21",
+            "chat/completions",
+        )
+        .unwrap();
+        assert!(uses_azure_api_key("openai", &endpoint));
+        assert!(endpoint.contains("api-version=2024-10-21"));
+    }
+
+    #[test]
+    fn model_lists_accept_common_compatible_shapes() {
+        let named = serde_json::json!({ "models": [{ "name": "llama3.2" }] });
+        assert_eq!(
+            parse_model_ids("openai", &named).unwrap(),
+            vec!["llama3.2"]
+        );
+
+        let strings = serde_json::json!(["model-b", "model-a"]);
+        assert_eq!(
+            parse_model_ids("openai", &strings).unwrap(),
+            vec!["model-a", "model-b"]
+        );
+    }
+
+    #[test]
+    fn response_text_accepts_chat_responses_and_multi_part_content() {
+        let chat = serde_json::json!({
+            "choices": [{ "message": { "content": [{ "type": "text", "text": "你好" }] } }]
+        });
+        assert_eq!(
+            extract_response_text(&chat, "openai").as_deref(),
+            Some("你好")
+        );
+
+        let responses = serde_json::json!({
+            "output": [{ "content": [{ "type": "output_text", "text": "第一段" }, { "type": "output_text", "text": "第二段" }] }]
+        });
+        assert_eq!(
+            extract_response_text(&responses, "openai").as_deref(),
+            Some("第一段第二段")
+        );
     }
 
     #[test]
@@ -432,6 +511,8 @@ struct TranslationError {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct StoredProviderConfig {
+    #[serde(default)]
+    vendor_name: String,
     api_key: String,
     base_url: String,
     #[serde(default)]
@@ -443,6 +524,7 @@ struct StoredProviderConfig {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProviderConfigResponse {
+    vendor_name: String,
     api_key: String,
     base_url: String,
     model: String,
@@ -878,7 +960,7 @@ fn next_translation_request_id() -> u64 {
 fn supported_provider(provider: &str) -> bool {
     matches!(
         provider,
-        "deepseek" | "xiaomi" | "qwen" | "zhipu" | "moonshot" | "openai" | "google" | "anthropic"
+        "deepseek" | "xiaomi" | "qwen" | "zhipu" | "moonshot" | "openai"
     )
 }
 
@@ -974,6 +1056,7 @@ fn configured_provider(provider: &str) -> Result<StoredProviderConfig, String> {
         Ok(config) => config,
         Err(_) if provider == "deepseek" => {
             return Ok(StoredProviderConfig {
+                vendor_name: String::new(),
                 api_key: legacy_api_key()?,
                 base_url: DEEPSEEK_BASE_URL.to_string(),
                 model: DEEPSEEK_MODEL.to_string(),
@@ -982,7 +1065,7 @@ fn configured_provider(provider: &str) -> Result<StoredProviderConfig, String> {
         }
         Err(error) => return Err(error),
     };
-    if config.api_key.trim().is_empty() {
+    if config.api_key.trim().is_empty() && api_key_required(&config.base_url) {
         return Err(format!("{provider} API Key 不能为空。"));
     }
     if config.base_url.trim().is_empty() {
@@ -1001,11 +1084,11 @@ fn configured_provider(provider: &str) -> Result<StoredProviderConfig, String> {
 fn disable_thinking_for_openai_compatible(provider: &str, body: &mut serde_json::Value) {
     match provider {
         "qwen" => body["enable_thinking"] = serde_json::json!(false),
-        "deepseek" | "xiaomi" | "zhipu" | "moonshot" => {
+        "deepseek" => {
             body["thinking"] = serde_json::json!({ "type": DEEPSEEK_THINKING_DISABLED });
         }
-        // OpenAI chat models and Anthropic Messages do not enable extended
-        // reasoning unless a reasoning/thinking option is explicitly sent.
+        // Other OpenAI-compatible models do not enable extended reasoning
+        // unless a reasoning/thinking option is explicitly sent.
         _ => {}
     }
 }
@@ -1028,52 +1111,23 @@ async fn request_translation(
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|error| format!("无法初始化网络连接：{error}"))?;
-    let response = match provider.as_str() {
-        "google" => {
-            let endpoint = format!(
-                "{}/models/{}:generateContent",
-                config.base_url.trim().trim_end_matches('/'),
-                model
-            );
-            client.post(endpoint)
-                .header("x-goog-api-key", &config.api_key)
-                .json(&serde_json::json!({
-                    "systemInstruction": { "parts": [{ "text": "You are a precise translation engine." }] },
-                    "contents": [{ "parts": [{ "text": prompt }] }],
-                    "generationConfig": {
-                        "temperature": 0.2,
-                        "thinkingConfig": { "thinkingBudget": 0 }
-                    }
-                }))
-                .send().await
-        }
-        "anthropic" => client
-            .post(append_endpoint(&config.base_url, "messages"))
-            .header("x-api-key", &config.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .json(&serde_json::json!({
-                "model": model,
-                "max_tokens": 4096,
-                "system": "You are a precise translation engine.",
-                "messages": [{ "role": "user", "content": prompt }],
-                "temperature": 0.2
-            }))
-            .send().await,
-        _ => {
-            let mut body = serde_json::json!({
-                "model": model,
-                "messages": [
-                    { "role": "system", "content": "You are a precise translation engine." },
-                    { "role": "user", "content": prompt }
-                ],
-                "stream": false,
-                "temperature": 0.2
-            });
-            disable_thinking_for_openai_compatible(&provider, &mut body);
-            client.post(append_endpoint(&config.base_url, "chat/completions"))
-                .bearer_auth(&config.api_key).json(&body).send().await
-        }
+    let mut body = serde_json::json!({
+        "model": model,
+        "messages": [
+            { "role": "system", "content": "You are a precise translation engine." },
+            { "role": "user", "content": prompt }
+        ],
+        "stream": false
+    });
+    disable_thinking_for_openai_compatible(&provider, &mut body);
+    let endpoint = api_endpoint(&config.base_url, "chat/completions")?;
+    if uses_azure_api_key(&provider, &endpoint) {
+        body.as_object_mut().map(|body| body.remove("model"));
     }
+    let response = authenticated_request(client.post(&endpoint), &provider, &config.api_key, &endpoint)
+        .json(&body)
+        .send()
+        .await
     .map_err(|error| format!("无法连接 {provider}：{error}"))?;
     let status = response.status();
     if !status.is_success() {
@@ -1094,15 +1148,7 @@ async fn request_translation(
             error: Some(format!("无法解析响应：{error}")),
         }),
     };
-    let translation = match provider.as_str() {
-        "google" => payload.pointer("/candidates/0/content/parts/0/text"),
-        "anthropic" => payload.pointer("/content/0/text"),
-        _ => payload.pointer("/choices/0/message/content"),
-    }
-    .and_then(serde_json::Value::as_str)
-    .map(str::trim)
-    .filter(|value| !value.is_empty())
-    .map(str::to_string);
+    let translation = extract_response_text(&payload, &provider);
     Ok(ProviderTranslation {
         provider_id: provider,
         model,
@@ -1111,13 +1157,121 @@ async fn request_translation(
     })
 }
 
-fn append_endpoint(base_url: &str, endpoint: &str) -> String {
-    let base = base_url.trim().trim_end_matches('/');
-    if base.ends_with(endpoint) {
-        base.to_string()
-    } else {
-        format!("{base}/{endpoint}")
+fn api_endpoint(base_url: &str, endpoint: &str) -> Result<String, String> {
+    validate_base_url(base_url)?;
+    let mut url = reqwest::Url::parse(base_url.trim())
+        .map_err(|_| "Base URL 必须是有效的 HTTPS URL。".to_string())?;
+    let endpoint = endpoint.trim_matches('/');
+    let path = url.path().trim_end_matches('/');
+    if path.ends_with(&format!("/{endpoint}")) {
+        return Ok(url.to_string());
     }
+
+    // Users frequently paste a complete endpoint. Replace a known API
+    // resource instead of producing paths such as /chat/completions/models.
+    let known_suffixes = ["/chat/completions", "/responses", "/models"];
+    let mut root = known_suffixes
+        .iter()
+        .find_map(|suffix| path.strip_suffix(suffix))
+        .unwrap_or(path)
+        .trim_end_matches('/')
+        .to_string();
+    if root.is_empty() {
+        root.push_str("/v1");
+    }
+    url.set_path(&format!("{root}/{endpoint}"));
+    Ok(url.to_string())
+}
+
+fn is_loopback_url(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url.trim()).ok().is_some_and(|url| {
+        matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"))
+    })
+}
+
+fn api_key_required(base_url: &str) -> bool {
+    !is_loopback_url(base_url)
+}
+
+fn normalize_provider_base_url(provider: &str, base_url: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    if !matches!(provider, "xiaomi" | "moonshot") {
+        return trimmed.to_string();
+    }
+    let Ok(mut url) = reqwest::Url::parse(trimmed) else {
+        return trimmed.to_string();
+    };
+    if url.path().trim_end_matches('/') != "/v1" || url.query().is_some() || url.fragment().is_some() {
+        return trimmed.to_string();
+    }
+    url.set_path("");
+    url.to_string().trim_end_matches('/').to_string()
+}
+
+fn uses_azure_api_key(provider: &str, endpoint: &str) -> bool {
+    provider == "openai" && reqwest::Url::parse(endpoint).ok().is_some_and(|url| {
+        url.host_str().is_some_and(|host| host.ends_with(".openai.azure.com"))
+            || url.path().contains("/openai/deployments/")
+    })
+}
+
+fn authenticated_request(
+    request: reqwest::RequestBuilder,
+    provider: &str,
+    api_key: &str,
+    endpoint: &str,
+) -> reqwest::RequestBuilder {
+    if api_key.trim().is_empty() {
+        request
+    } else if uses_azure_api_key(provider, endpoint) {
+        request.header("api-key", api_key)
+    } else {
+        request.bearer_auth(api_key)
+    }
+}
+
+fn text_from_content(value: &serde_json::Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return (!text.trim().is_empty()).then(|| text.trim().to_string());
+    }
+    let parts = value
+        .as_array()?
+        .iter()
+        .filter(|part| {
+            part.get("thought").and_then(serde_json::Value::as_bool) != Some(true)
+                && !matches!(
+                    part.get("type").and_then(serde_json::Value::as_str),
+                    Some("reasoning" | "thinking")
+                )
+        })
+        .filter_map(|part| {
+            part.get("text")
+                .and_then(|text| text.as_str().or_else(|| text.get("value")?.as_str()))
+                .or_else(|| part.get("content")?.as_str())
+        })
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>();
+    (!parts.is_empty()).then(|| parts.join(""))
+}
+
+fn extract_response_text(payload: &serde_json::Value, _provider: &str) -> Option<String> {
+    let direct = payload
+        .pointer("/choices/0/message/content")
+        .or_else(|| payload.pointer("/choices/0/text"))
+        .or_else(|| payload.get("output_text"));
+    if let Some(text) = direct.and_then(text_from_content) {
+        return Some(text);
+    }
+
+    // OpenAI Responses-compatible gateways return output[].content[].text.
+    payload
+        .get("output")?
+        .as_array()?
+        .iter()
+        .filter_map(|item| item.get("content"))
+        .filter_map(text_from_content)
+        .next()
 }
 
 fn validate_base_url(base_url: &str) -> Result<(), String> {
@@ -1151,52 +1305,20 @@ async fn send_connection_test(
         .build()
         .map_err(|error| format!("无法初始化网络连接：{error}"))?;
 
-    let response = match provider {
-        "google" => {
-            let endpoint = format!(
-                "{}/models/{}:generateContent",
-                base_url.trim().trim_end_matches('/'),
-                model.trim()
-            );
-            client
-                .post(endpoint)
-                .header("x-goog-api-key", api_key)
-                .json(&serde_json::json!({
-                    "contents": [{ "parts": [{ "text": "Reply with OK only." }] }],
-                    "generationConfig": { "maxOutputTokens": 8 }
-                }))
-                .send()
-                .await
-        }
-        "anthropic" => {
-            let endpoint = append_endpoint(base_url, "messages");
-            client
-                .post(endpoint)
-                .header("x-api-key", api_key)
-                .header("anthropic-version", "2023-06-01")
-                .json(&serde_json::json!({
-                    "model": model.trim(),
-                    "max_tokens": 8,
-                    "messages": [{ "role": "user", "content": "Reply with OK only." }]
-                }))
-                .send()
-                .await
-        }
-        _ => {
-            let endpoint = append_endpoint(base_url, "chat/completions");
-            let mut body = serde_json::json!({
-                "model": model.trim(),
-                "messages": [{ "role": "user", "content": "Reply with OK only." }],
-                "max_tokens": 8,
-                "temperature": 0,
-                "stream": false
-            });
-            if provider == "deepseek" {
-                body["thinking"] = serde_json::json!({ "type": DEEPSEEK_THINKING_DISABLED });
-            }
-            client.post(endpoint).bearer_auth(api_key).json(&body).send().await
-        }
+    let endpoint = api_endpoint(base_url, "chat/completions")?;
+    let mut body = serde_json::json!({
+        "model": model.trim(),
+        "messages": [{ "role": "user", "content": "Reply with OK only." }],
+        "stream": false
+    });
+    disable_thinking_for_openai_compatible(provider, &mut body);
+    if uses_azure_api_key(provider, &endpoint) {
+        body.as_object_mut().map(|body| body.remove("model"));
     }
+    let response = authenticated_request(client.post(&endpoint), provider, api_key, &endpoint)
+        .json(&body)
+        .send()
+        .await
     .map_err(|error| format!("网络请求失败：{error}"))?;
 
     let status = response.status();
@@ -1231,17 +1353,7 @@ fn model_id_is_suitable_for_translation(model: &str) -> bool {
     !NON_TEXT_MODEL_MARKERS.iter().any(|marker| model.contains(marker))
 }
 
-fn model_entry_supports_translation(provider: &str, entry: &serde_json::Value, model: &str) -> bool {
-    if provider == "google" {
-        let supports_generate = entry.get("supportedGenerationMethods")
-            .and_then(serde_json::Value::as_array)
-            .map(|methods| methods.iter().any(|method| method.as_str() == Some("generateContent")))
-            .unwrap_or(false);
-        if !supports_generate {
-            return false;
-        }
-    }
-
+fn model_entry_supports_translation(entry: &serde_json::Value, model: &str) -> bool {
     if modality_list_supports(entry, &["input_modalities", "supported_input_modalities"], "text") == Some(false)
         || modality_list_supports(entry, &["output_modalities", "supported_output_modalities"], "text") == Some(false)
     {
@@ -1251,20 +1363,24 @@ fn model_entry_supports_translation(provider: &str, entry: &serde_json::Value, m
     model_id_is_suitable_for_translation(model)
 }
 
-fn parse_model_ids(provider: &str, payload: &serde_json::Value) -> Result<Vec<String>, String> {
-    let entries = if provider == "google" {
-        payload.get("models").and_then(serde_json::Value::as_array)
-    } else {
-        payload.get("data").and_then(serde_json::Value::as_array)
-    }
+fn parse_model_ids(_provider: &str, payload: &serde_json::Value) -> Result<Vec<String>, String> {
+    let entries = payload
+        .get("data")
+        .or_else(|| payload.get("models"))
+        .and_then(serde_json::Value::as_array)
+        .or_else(|| payload.as_array())
     .ok_or_else(|| "接口没有返回可识别的模型列表。".to_string())?;
     let mut models = entries.iter().filter_map(|entry| {
-        let model = if provider == "google" {
-            entry.get("name")?.as_str()?.trim_start_matches("models/")
+        let model = if let Some(model) = entry.as_str() {
+            model
         } else {
-            entry.get("id")?.as_str()?
+            entry
+                .get("id")
+                .or_else(|| entry.get("name"))
+                .or_else(|| entry.get("model"))?
+                .as_str()?
         };
-        (!model.trim().is_empty() && model_entry_supports_translation(provider, entry, model))
+        (!model.trim().is_empty() && model_entry_supports_translation(entry, model))
             .then(|| model.to_string())
     }).collect::<Vec<_>>();
     models.sort_unstable();
@@ -1285,21 +1401,10 @@ async fn fetch_models(
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|error| format!("无法初始化网络连接：{error}"))?;
-    let endpoint = append_endpoint(base_url, "models");
-    let response = match provider {
-        "google" => client
-            .get(format!("{endpoint}?pageSize=1000"))
-            .header("x-goog-api-key", api_key)
-            .send()
-            .await,
-        "anthropic" => client
-            .get(format!("{endpoint}?limit=1000"))
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
-            .send()
-            .await,
-        _ => client.get(endpoint).bearer_auth(api_key).send().await,
-    }
+    let endpoint = api_endpoint(base_url, "models")?;
+    let response = authenticated_request(client.get(&endpoint), provider, api_key, &endpoint)
+        .send()
+        .await
     .map_err(|error| format!("获取模型列表失败：{error}"))?;
 
     let status = response.status();
@@ -1528,6 +1633,7 @@ fn save_api_key(api_key: String) -> Result<(), String> {
 
 fn save_provider_config_sync(
     provider: String,
+    vendor_name: Option<String>,
     api_key: String,
     base_url: String,
     model: String,
@@ -1541,7 +1647,9 @@ fn save_provider_config_sync(
         return Err("Base URL 不能为空，并且至少需要配置一个模型。".to_string());
     }
     validate_base_url(&base_url)?;
-    let key = if api_key.trim().is_empty() {
+    let key = if api_key.trim().is_empty() && !api_key_required(&base_url) {
+        String::new()
+    } else if api_key.trim().is_empty() {
         stored_provider_config(&provider).map(|config| config.api_key).or_else(|error| {
             if provider == "deepseek" {
                 legacy_api_key()
@@ -1552,12 +1660,13 @@ fn save_provider_config_sync(
     } else {
         api_key.trim().to_string()
     };
-    if key.is_empty() {
+    if key.is_empty() && api_key_required(&base_url) {
         return Err("API Key 不能为空。".to_string());
     }
     let config = StoredProviderConfig {
+        vendor_name: vendor_name.unwrap_or_default().trim().to_string(),
         api_key: key.clone(),
-        base_url: base_url.trim().trim_end_matches('/').to_string(),
+        base_url: normalize_provider_base_url(&provider, &base_url),
         model: models[0].clone(),
         models,
     };
@@ -1575,6 +1684,7 @@ fn save_provider_config_sync(
 async fn save_provider_config(
     app: AppHandle,
     provider: String,
+    vendor_name: Option<String>,
     api_key: String,
     base_url: String,
     model: String,
@@ -1582,7 +1692,7 @@ async fn save_provider_config(
 ) -> Result<(), String> {
     let saved_provider = provider.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        save_provider_config_sync(provider, api_key, base_url, model, models)
+        save_provider_config_sync(provider, vendor_name, api_key, base_url, model, models)
     })
     .await
     .map_err(|error| format!("保存配置任务失败：{error}"))??;
@@ -1603,6 +1713,7 @@ async fn get_provider_config(provider: String) -> Result<Option<ProviderConfigRe
             if provider == "deepseek" {
                 if let Ok(api_key) = legacy_api_key() {
                     return Ok(Some(ProviderConfigResponse {
+                        vendor_name: String::new(),
                         api_key,
                         base_url: DEEPSEEK_BASE_URL.to_string(),
                         model: DEEPSEEK_MODEL.to_string(),
@@ -1617,14 +1728,56 @@ async fn get_provider_config(provider: String) -> Result<Option<ProviderConfigRe
         let models = normalize_models(&config.model, &config.models);
         let model = models.first().cloned().unwrap_or_default();
         Ok(Some(ProviderConfigResponse {
+            vendor_name: config.vendor_name,
             api_key: config.api_key,
-            base_url: config.base_url,
+            base_url: normalize_provider_base_url(&provider, &config.base_url),
             model,
             models,
         }))
     })
     .await
     .map_err(|error| format!("读取配置任务失败：{error}"))?
+}
+
+#[tauri::command]
+async fn delete_custom_provider(app: AppHandle, provider: String) -> Result<Vec<String>, String> {
+    if provider != "openai" {
+        return Err("只能删除用户添加的自定义供应商。".to_string());
+    }
+    let removed_provider = provider.clone();
+    let update_app = app.clone();
+    let (providers, reset_active_provider) = tauri::async_runtime::spawn_blocking(move || {
+        let update_lock = update_app.state::<EnabledProvidersUpdateLock>();
+        let _guard = update_lock.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        match provider_keyring_entry(&provider)?.delete_credential() {
+            Ok(()) | Err(KeyringError::NoEntry) => {}
+            Err(error) => return Err(format!("无法删除自定义供应商配置：{error}")),
+        }
+        let mut providers = enabled_providers_sync();
+        providers.retain(|item| item != &provider);
+        save_enabled_providers_sync(&providers)?;
+        let reset_active_provider = active_provider_sync() == provider;
+        if reset_active_provider {
+            active_provider_entry()?
+                .set_password("deepseek")
+                .map_err(|error| format!("无法重置当前翻译模型：{error}"))?;
+        }
+        Ok((providers, reset_active_provider))
+    })
+    .await
+    .map_err(|error| format!("删除自定义供应商任务失败：{error}"))??;
+    app.emit("enabled-providers-changed", &providers)
+        .map_err(|error| error.to_string())?;
+    app.emit("provider-config-deleted", &removed_provider)
+        .map_err(|error| error.to_string())?;
+    if reset_active_provider {
+        app.emit("active-provider-changed", serde_json::json!({
+            "providerId": "deepseek",
+            "model": DEEPSEEK_MODEL,
+        }))
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(providers)
 }
 
 #[tauri::command]
@@ -1893,8 +2046,8 @@ fn show_add_provider_window(app: &AppHandle) -> Result<(), String> {
     let settings_parent = app.get_webview_window("settings");
     let center_parent = settings_parent.clone();
     let builder = WebviewWindowBuilder::new(app, "add-provider", WebviewUrl::App("index.html".into()))
-        .inner_size(640.0, 540.0)
-        .min_inner_size(560.0, 520.0)
+        .inner_size(640.0, 600.0)
+        .min_inner_size(560.0, 580.0)
         .title("添加自定义供应商")
         .decorations(false)
         .shadow(true)
@@ -2147,6 +2300,7 @@ pub fn run() {
             save_api_key,
             save_provider_config,
             get_provider_config,
+            delete_custom_provider,
             test_provider_connection,
             fetch_provider_models,
             get_active_provider,

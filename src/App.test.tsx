@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 let windowLabel = "main";
@@ -211,14 +211,46 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "添加自定义供应商" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "返回设置" })).not.toBeInTheDocument();
     expect(screen.queryByText("AI Translate")).not.toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "OpenAI" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("OpenAI 兼容接口")).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Google" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Claude" })).not.toBeInTheDocument();
     expect(screen.queryByText("Use Responses API")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("API 路径")).toHaveValue("/chat/completions");
+    expect(screen.queryByLabelText("API 路径")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("添加后启用")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("模型名称")).toBeInTheDocument();
     expect(screen.queryByLabelText("名称")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("tab", { name: "Google" }));
-    expect(screen.getByLabelText("Base URL")).toHaveValue("https://generativelanguage.googleapis.com/v1beta");
+    expect(screen.getByLabelText("API 地址")).toHaveValue("https://api.openai.com");
     fireEvent.click(screen.getByRole("button", { name: "关闭添加自定义供应商" }));
     expect(invokeMock).toHaveBeenCalledWith("return_to_settings_window", undefined);
+  });
+
+  it("uses the shared model manager when adding a custom provider", async () => {
+    mockWindowLabel("add-provider");
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "fetch_provider_models") return Promise.resolve(["agnes-2.0-flash", "agnes-2.5-pro"]);
+      return Promise.resolve(undefined);
+    });
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "获取模型" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "OpenAI 兼容接口 可用模型" });
+    expect(within(dialog).queryByRole("combobox")).not.toBeInTheDocument();
+    fireEvent.click(await within(dialog).findByRole("button", { name: "添加模型 agnes-2.0-flash" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "添加模型 agnes-2.5-pro" }));
+    expect(screen.getByLabelText("模型名称")).toHaveValue("agnes-2.0-flash");
+    expect(screen.getByLabelText("模型名称 2")).toHaveValue("agnes-2.5-pro");
+    fireEvent.click(within(dialog).getByRole("button", { name: "完成" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "添加接口" }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("save_provider_config", {
+      provider: "openai",
+      vendorName: "OpenAI 兼容接口",
+      apiKey: "",
+      baseUrl: "https://api.openai.com",
+      model: "agnes-2.0-flash",
+      models: ["agnes-2.0-flash", "agnes-2.5-pro"],
+    }));
   });
 
   it("uses green and gray dots for enabled provider status", async () => {
@@ -257,12 +289,42 @@ describe("App", () => {
     expect(invokeMock).toHaveBeenCalledWith("save_provider_config", {
       provider: "xiaomi",
       apiKey: "mimo-key",
-      baseUrl: "https://api.xiaomimimo.com/v1",
+      baseUrl: "https://api.xiaomimimo.com",
       model: "mimo-v2.5-pro",
       models: ["mimo-v2.5-pro"],
     });
     expect(screen.queryByText(/与其他启用模型同时返回结果/)).not.toBeInTheDocument();
     expect(screen.queryByText(/已加入翻译/)).not.toBeInTheDocument();
+  });
+
+  it("shows a red delete menu only for user-added providers and removes their configuration", async () => {
+    mockWindowLabel("settings");
+    invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_enabled_providers") return Promise.resolve(["deepseek", "openai"]);
+      if (command === "get_provider_config" && args?.provider === "openai") {
+        return Promise.resolve({ vendorName: "魔搭社区", apiKey: "saved", baseUrl: "https://example.com", model: "demo-model", models: ["demo-model"] });
+      }
+      if (command === "get_provider_config") return Promise.resolve(null);
+      if (command === "delete_custom_provider") return Promise.resolve(["deepseek"]);
+      return Promise.resolve(undefined);
+    });
+    render(<App />);
+
+    const customProvider = await screen.findByRole("button", { name: /魔搭社区/ });
+    const builtInContextMenuEvent = new window.MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 100, clientY: 100 });
+    screen.getByRole("button", { name: /DeepSeek/ }).dispatchEvent(builtInContextMenuEvent);
+    expect(builtInContextMenuEvent.defaultPrevented).toBe(true);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+
+    fireEvent.contextMenu(customProvider, { clientX: 220, clientY: 260 });
+    const menu = screen.getByRole("menu", { name: "魔搭社区 操作" });
+    const deleteAction = within(menu).getByRole("menuitem", { name: "删除供应商 魔搭社区" });
+    expect(deleteAction).toHaveClass("provider-context-menu-delete");
+    fireEvent.click(deleteAction);
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("delete_custom_provider", { provider: "openai" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: /魔搭社区/ })).not.toBeInTheDocument());
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 
   it("fetches provider models and selects one from the returned list", async () => {
@@ -367,10 +429,15 @@ describe("App", () => {
 
     await waitFor(() => expect(screen.getByLabelText("API Key")).toHaveValue("saved-key"));
     fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
+    const testModelDialog = await screen.findByRole("dialog", { name: "请选择要检测的模型" });
+    fireEvent.click(within(testModelDialog).getByRole("combobox", { name: "选择测试模型" }));
+    fireEvent.click(within(testModelDialog).getByRole("option", { name: "deepseek-chat" }));
+    fireEvent.click(within(testModelDialog).getByRole("button", { name: "测试连接" }));
 
     const status = await screen.findByText("连接成功 · 42 ms");
     expect(status).toHaveClass("connection-inline-result", "success");
-    expect(status.closest(".settings-label-row")).not.toBeNull();
+    expect(status.closest(".settings-field-group")).not.toBeNull();
+    expect(status.closest(".settings-label-row")).toBeNull();
     expect(document.querySelector(".provider-detail-panel > .connection-result")).toBeNull();
   });
 
@@ -393,8 +460,12 @@ describe("App", () => {
     render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
+    const deepseekTestDialog = await screen.findByRole("dialog", { name: "请选择要检测的模型" });
+    fireEvent.click(within(deepseekTestDialog).getByRole("button", { name: "测试连接" }));
     fireEvent.click(screen.getByRole("button", { name: /Xiaomi MiMo/ }));
     fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
+    const xiaomiTestDialog = await screen.findByRole("dialog", { name: "请选择要检测的模型" });
+    fireEvent.click(within(xiaomiTestDialog).getByRole("button", { name: "测试连接" }));
 
     xiaomiRequest.resolve({ latencyMs: 20, message: "Xiaomi ok" });
     expect(await screen.findByText("Xiaomi ok · 20 ms")).toBeInTheDocument();
@@ -446,7 +517,7 @@ describe("App", () => {
       });
       return Promise.resolve(undefined);
     });
-    render(<App />);
+    const { container } = render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: "快速翻译" }));
     const modelPicker = screen.getByRole("button", { name: "选择翻译模型" });
@@ -461,6 +532,7 @@ describe("App", () => {
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("translate_text", { text: "hello", provider: "xiaomi" }));
     expect(screen.getByText("mimo-v2.5-pro/Xiaomi MiMo")).toBeInTheDocument();
     expect(screen.getAllByText("您好")[0]).toBeInTheDocument();
+    expect(container.querySelector(".translation:not(.text-measure)")).toHaveClass("translation-chinese");
   });
 
   it("sets the default quick translation model from general settings", async () => {
@@ -559,6 +631,29 @@ describe("App", () => {
       const sourceParagraphs = Array.from(container.querySelectorAll(".source:not(.text-measure) .text-paragraph"));
       expect(sourceParagraphs.map((paragraph) => paragraph.textContent)).toEqual(["第一项", "第二项", "第三项"]);
       expect(container.querySelectorAll(".translation:not(.text-measure) .text-paragraph")).toHaveLength(3);
+      expect(container.querySelector(".translation:not(.text-measure)")).toHaveClass("translation-english");
+    });
+  });
+
+  it("reflows English UIA soft wraps while preserving real paragraph breaks", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_enabled_providers") return Promise.resolve(["deepseek"]);
+      if (command === "get_latest_translation") return Promise.resolve({
+        source: "Hardware, IP, and Platform Development: Creating the PL IP blocks\r\nfor the hardware platform\r\n\r\nTopics in this document\rthat apply to this design process include:",
+        requestId: 14,
+        results: [{ providerId: "deepseek", model: "deepseek-v4-flash", translation: "硬件、IP 与平台开发。" }],
+      });
+      return Promise.resolve(undefined);
+    });
+
+    const { container } = render(<App />);
+
+    await waitFor(() => {
+      const sourceParagraphs = Array.from(container.querySelectorAll(".source:not(.text-measure) .text-paragraph"));
+      expect(sourceParagraphs.map((paragraph) => paragraph.textContent)).toEqual([
+        "Hardware, IP, and Platform Development: Creating the PL IP blocks for the hardware platform",
+        "Topics in this document that apply to this design process include:",
+      ]);
     });
   });
 
