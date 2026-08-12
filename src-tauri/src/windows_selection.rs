@@ -54,10 +54,11 @@ const MAX_SELECTION_RANGES: i32 = 32;
 const CAPTURE_HELPER_ARGUMENT: &str = "--selection-capture-helper";
 const CAPTURE_HELPER_TIMEOUT: Duration = Duration::from_secs(2);
 const CAPTURE_HELPER_POLL_DELAY: Duration = Duration::from_millis(10);
+const CAPTURE_FAILURE_RETRY_DELAY: Duration = Duration::from_millis(40);
 const CAPTURE_HELPER_STREAM_LIMIT: usize = 128 * 1024;
 const MAX_UIA_ANCESTORS: usize = 16;
-const CLIPBOARD_RETRIES: usize = 8;
-const CLIPBOARD_RETRY_DELAY: Duration = Duration::from_millis(15);
+const CLIPBOARD_RETRIES: usize = 20;
+const CLIPBOARD_RETRY_DELAY: Duration = Duration::from_millis(20);
 const CLIPBOARD_RESTORE_RETRIES: usize = 8;
 const CLIPBOARD_RESTORE_RETRY_DELAY: Duration = Duration::from_millis(20);
 const CLIPBOARD_RESTORE_SETTLE_DELAY: Duration = Duration::from_millis(20);
@@ -96,6 +97,7 @@ pub enum CaptureOutcome {
 enum UiaAttempt {
     Outcome(CaptureOutcome),
     Ignored,
+    PointMismatch,
     Unavailable,
     Failed(String),
 }
@@ -160,7 +162,24 @@ pub fn capture_selection(point: POINT) -> CaptureOutcome {
         return CaptureOutcome::Empty;
     }
 
-    capture_with_helper_process(point).unwrap_or_else(CaptureOutcome::Failed)
+    match capture_with_helper_process(point) {
+        Ok(first) => retry_failed_capture(first, || {
+            thread::sleep(CAPTURE_FAILURE_RETRY_DELAY);
+            capture_with_helper_process(point).unwrap_or_else(CaptureOutcome::Failed)
+        }),
+        Err(error) => CaptureOutcome::Failed(error),
+    }
+}
+
+fn retry_failed_capture(
+    first: CaptureOutcome,
+    retry: impl FnOnce() -> CaptureOutcome,
+) -> CaptureOutcome {
+    if matches!(first, CaptureOutcome::Failed(_)) {
+        retry()
+    } else {
+        first
+    }
 }
 
 fn capture_selection_in_process(point: POINT) -> CaptureOutcome {
@@ -331,6 +350,7 @@ fn capture_with_uia(point: POINT) -> Result<UiaAttempt, CaptureError> {
     let point_attempt = capture_from_uia_element(&automation, &element, point)?;
     match &point_attempt {
         UiaAttempt::Ignored
+        | UiaAttempt::PointMismatch
         | UiaAttempt::Outcome(CaptureOutcome::Detected(_))
         | UiaAttempt::Outcome(CaptureOutcome::TooLong { .. })
         | UiaAttempt::Outcome(CaptureOutcome::Failed(_))
@@ -406,9 +426,9 @@ fn capture_from_text_pattern(
     }
     let mut text = String::new();
     let point_range = unsafe { text_pattern.RangeFromPoint(point) }.ok();
-    // `None` means the provider cannot map a screen point. In that case we
-    // retain compatibility and trust its selection; `Some(false)` is a
-    // positive stale-selection signal and must suppress clipboard fallback.
+    // `None` means the provider cannot map a screen point. `Some(false)` can
+    // be either a stale UIA range or a valid release in line-end whitespace;
+    // the caller distinguishes that case and uses the guarded copy fallback.
     let mut point_matches_selection = point_range.as_ref().map(|_| false);
 
     for index in 0..range_count {
@@ -442,7 +462,7 @@ fn capture_from_text_pattern(
         )
     {
         trace_capture_phase("uia-selection-point-mismatch");
-        return Ok(UiaAttempt::Ignored);
+        return Ok(UiaAttempt::PointMismatch);
     }
 
     trace_capture_phase("uia-complete");
@@ -666,11 +686,15 @@ fn resolve_uia_attempt(
             CaptureOutcome::TooLong { characters }
         }
         UiaAttempt::Outcome(CaptureOutcome::Failed(error)) => CaptureOutcome::Failed(error),
-        // Ignored includes code editors, terminals, and a focused selection
-        // whose range does not contain this drag's release point. Never press
-        // Ctrl+C in those cases.
+        // Never press Ctrl+C in explicitly ignored code editors and terminals.
         UiaAttempt::Ignored => CaptureOutcome::Empty,
-        UiaAttempt::Outcome(CaptureOutcome::Empty) | UiaAttempt::Unavailable => fallback(),
+        // RangeFromPoint returns the nearest text position, not necessarily a
+        // position inside the selection. A release in line-end whitespace can
+        // therefore miss a valid drag selection; use the guarded clipboard
+        // fallback to ask the foreground application for the actual selection.
+        UiaAttempt::PointMismatch
+        | UiaAttempt::Outcome(CaptureOutcome::Empty)
+        | UiaAttempt::Unavailable => fallback(),
         // A hard UIA failure happened before the target surface could be
         // classified. Failing closed avoids sending Ctrl+C to an unknown or
         // elevated window.
@@ -704,37 +728,86 @@ fn copy_fallback(point: POINT) -> CaptureOutcome {
         );
     }
 
+    let copied = wait_for_clipboard_copy(
+        before_sequence,
+        CLIPBOARD_RETRY_DELAY,
+        || unsafe { GetClipboardSequenceNumber() },
+        || {
+            trace_capture_phase("clipboard-read-copy");
+            read_plain_text()
+        },
+    );
+    let ClipboardCopyWait::Changed {
+        sequence: copied_sequence,
+        text: copied_text,
+    } = copied
+    else {
+        return CaptureOutcome::Empty;
+    };
+
+    // Clipboard listeners and the source application can briefly reopen the
+    // clipboard after Ctrl+C. Let that activity settle before restoring the
+    // user's original data object, then verify that no newer copy replaced it.
+    thread::sleep(CLIPBOARD_RESTORE_SETTLE_DELAY);
+    trace_capture_phase("clipboard-restore");
+    match restore_clipboard_if_unchanged(copied_sequence, &original_clipboard) {
+        Ok(true) => {}
+        Ok(false) => {
+            eprintln!("Selection clipboard restore skipped because the clipboard changed.");
+        }
+        Err(error) => {
+            eprintln!("Selection clipboard restore failed: {error}");
+        }
+    }
+    copied_text
+        .map(|text| CapturedSelection::from_text_at_point(text, point))
+        .unwrap_or(CaptureOutcome::Empty)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ClipboardCopyWait {
+    Unchanged,
+    Changed { sequence: u32, text: Option<String> },
+    Superseded,
+}
+
+fn wait_for_clipboard_copy(
+    before_sequence: u32,
+    delay: Duration,
+    mut sequence_number: impl FnMut() -> u32,
+    mut read_text: impl FnMut() -> Option<String>,
+) -> ClipboardCopyWait {
+    let mut copied_sequence = None;
     for _ in 0..CLIPBOARD_RETRIES {
-        thread::sleep(CLIPBOARD_RETRY_DELAY);
-        let copied_sequence = unsafe { GetClipboardSequenceNumber() };
-        if copied_sequence == before_sequence {
-            continue;
+        if !delay.is_zero() {
+            thread::sleep(delay);
+        }
+        let observed_sequence = sequence_number();
+        match copied_sequence {
+            None if observed_sequence == before_sequence => continue,
+            None => copied_sequence = Some(observed_sequence),
+            Some(expected) if observed_sequence != expected => {
+                // A second clipboard write is not ours to restore over. This is
+                // usually a clipboard manager or another user action.
+                return ClipboardCopyWait::Superseded;
+            }
+            Some(_) => {}
         }
 
-        trace_capture_phase("clipboard-read-copy");
-        let copied_text = read_plain_text();
-        // Clipboard listeners and the source application can briefly reopen the
-        // clipboard after Ctrl+C. Let that activity settle before restoring the
-        // user's original data object, then verify that no newer copy replaced it.
-        thread::sleep(CLIPBOARD_RESTORE_SETTLE_DELAY);
-        trace_capture_phase("clipboard-restore");
-        match restore_clipboard_if_unchanged(copied_sequence, &original_clipboard) {
-            Ok(true) => {}
-            Ok(false) => {
-                eprintln!(
-                    "Selection clipboard restore skipped because the clipboard changed."
-                );
-            }
-            Err(error) => {
-                eprintln!("Selection clipboard restore failed: {error}");
-            }
+        if let Some(text) = read_text() {
+            return ClipboardCopyWait::Changed {
+                sequence: copied_sequence.expect("a changed sequence is recorded before reading"),
+                text: Some(text),
+            };
         }
-        return copied_text
-            .map(|text| CapturedSelection::from_text_at_point(text, point))
-            .unwrap_or(CaptureOutcome::Empty);
     }
 
-    CaptureOutcome::Empty
+    copied_sequence.map_or(ClipboardCopyWait::Unchanged, |sequence| {
+        ClipboardCopyWait::Changed {
+            sequence,
+            text: None,
+        }
+    })
 }
 
 fn point_belongs_to_foreground_window(point: POINT) -> bool {
@@ -934,6 +1007,34 @@ mod tests {
     }
 
     #[test]
+    fn transient_capture_failure_is_retried_once() {
+        let retry_called = Cell::new(false);
+        let recovered = CapturedSelection {
+            text: "recovered".into(),
+            anchor: Anchor { x: 1, y: 2 },
+        };
+        let outcome = retry_failed_capture(CaptureOutcome::Failed("UIA busy".into()), || {
+            retry_called.set(true);
+            CaptureOutcome::Detected(recovered.clone())
+        });
+
+        assert!(retry_called.get());
+        assert_eq!(outcome, CaptureOutcome::Detected(recovered));
+    }
+
+    #[test]
+    fn successful_capture_is_not_repeated() {
+        let retry_called = Cell::new(false);
+        let outcome = retry_failed_capture(CaptureOutcome::Empty, || {
+            retry_called.set(true);
+            CaptureOutcome::Failed("must not run".into())
+        });
+
+        assert!(!retry_called.get());
+        assert_eq!(outcome, CaptureOutcome::Empty);
+    }
+
+    #[test]
     fn uia_empty_selection_uses_clipboard_fallback() {
         let fallback_called = Cell::new(false);
         let fallback_capture = CapturedSelection {
@@ -972,6 +1073,22 @@ mod tests {
 
         assert!(!fallback_called.get());
         assert_eq!(outcome, CaptureOutcome::Empty);
+    }
+
+    #[test]
+    fn release_point_mismatch_uses_guarded_clipboard_fallback() {
+        let fallback_called = Cell::new(false);
+        let fallback_capture = CapturedSelection {
+            text: "line ending selection".into(),
+            anchor: Anchor { x: 20, y: 30 },
+        };
+        let outcome = resolve_uia_attempt(UiaAttempt::PointMismatch, || {
+            fallback_called.set(true);
+            CaptureOutcome::Detected(fallback_capture.clone())
+        });
+
+        assert!(fallback_called.get());
+        assert_eq!(outcome, CaptureOutcome::Detected(fallback_capture));
     }
 
     #[test]
@@ -1137,6 +1254,59 @@ mod tests {
     fn clipboard_restore_is_skipped_after_an_external_change() {
         assert!(should_restore_clipboard(41, 41));
         assert!(!should_restore_clipboard(41, 42));
+    }
+
+    #[test]
+    fn clipboard_text_read_retries_after_the_copy_sequence_changes() {
+        let sequence_attempt = Cell::new(0);
+        let read_attempt = Cell::new(0);
+        let outcome = wait_for_clipboard_copy(
+            10,
+            Duration::ZERO,
+            || {
+                let attempt = sequence_attempt.get() + 1;
+                sequence_attempt.set(attempt);
+                if attempt == 1 {
+                    10
+                } else {
+                    11
+                }
+            },
+            || {
+                let attempt = read_attempt.get() + 1;
+                read_attempt.set(attempt);
+                (attempt == 3).then(|| "selected text".to_string())
+            },
+        );
+
+        assert_eq!(
+            outcome,
+            ClipboardCopyWait::Changed {
+                sequence: 11,
+                text: Some("selected text".into()),
+            }
+        );
+        assert_eq!(read_attempt.get(), 3);
+    }
+
+    #[test]
+    fn newer_clipboard_write_aborts_capture_and_restore() {
+        let attempt = Cell::new(0);
+        let outcome = wait_for_clipboard_copy(
+            10,
+            Duration::ZERO,
+            || {
+                let current = attempt.get() + 1;
+                attempt.set(current);
+                match current {
+                    1 => 11,
+                    _ => 12,
+                }
+            },
+            || None,
+        );
+
+        assert_eq!(outcome, ClipboardCopyWait::Superseded);
     }
 
     #[test]

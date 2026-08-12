@@ -44,6 +44,11 @@ describe("App", () => {
 
   beforeEach(() => {
     mockWindowLabel("main");
+    window.localStorage.removeItem("ai-translate-appearance");
+    delete document.documentElement.dataset.theme;
+    delete document.documentElement.dataset.themeMode;
+    document.documentElement.style.removeProperty("--source-font-size");
+    document.documentElement.style.removeProperty("--translation-font-size");
     invokeMock.mockReset().mockResolvedValue(undefined);
     startDraggingMock.mockClear();
     onFocusChangedMock.mockClear();
@@ -69,7 +74,7 @@ describe("App", () => {
     render(<App />);
 
     const initialButton = screen.getByRole("button", { name: "翻译选中文本" });
-    expect(initialButton).not.toHaveClass("is-visible");
+    expect(initialButton).toHaveClass("is-visible");
     const showHandler = listenMock.mock.calls.find(([eventName]) => eventName === "selection-float:show")?.[1];
     expect(showHandler).toBeTypeOf("function");
 
@@ -158,6 +163,10 @@ describe("App", () => {
 
     expect(screen.getByRole("heading", { name: "厂商接口配置" })).toBeInTheDocument();
     expect(screen.getAllByText("DeepSeek").length).toBeGreaterThan(0);
+    const settingsNav = screen.getByRole("navigation", { name: "设置分类" });
+    expect(within(settingsNav).getAllByRole("button").map((button) => button.textContent)).toEqual([
+      "偏好设置", "供应商", "网络代理", "关于",
+    ]);
     const xiaomiButton = screen.getByRole("button", { name: /Xiaomi MiMo/ });
     const bailianButton = screen.getByRole("button", { name: /阿里云百炼/ });
     const zhipuButton = screen.getByRole("button", { name: /智谱开放平台/ });
@@ -264,6 +273,15 @@ describe("App", () => {
     }));
   });
 
+  it("preserves the case of a custom provider's first-character icon", () => {
+    mockWindowLabel("add-provider");
+    render(<App />);
+
+    fireEvent.change(screen.getByLabelText("供应商名称"), { target: { value: "Agnes" } });
+
+    expect(document.querySelector(".add-provider-model-row .provider-mark")).toHaveTextContent("A");
+  });
+
   it("requires a provider name and API Key before adding a custom provider", async () => {
     mockWindowLabel("add-provider");
     render(<App />);
@@ -289,6 +307,28 @@ describe("App", () => {
     expect(container.querySelectorAll(".provider-list-status-dot:not(.is-enabled)")).toHaveLength(3);
     expect(screen.queryByText("翻译中")).not.toBeInTheDocument();
     expect(screen.queryByText("未配置")).not.toBeInTheDocument();
+  });
+
+  it("persists provider reordering from the accessible long-press handle", async () => {
+    mockWindowLabel("settings");
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_enabled_providers") return Promise.resolve(["deepseek", "xiaomi"]);
+      if (command === "get_preferences") return Promise.resolve({
+        providerOrder: ["deepseek", "xiaomi", "qwen", "zhipu", "moonshot"],
+      });
+      return Promise.resolve(undefined);
+    });
+    render(<App />);
+
+    const handle = await screen.findByRole("button", { name: "调整第 1 个供应商的顺序" });
+    fireEvent.keyDown(handle, { key: " " });
+    fireEvent.keyDown(handle, { key: "ArrowDown" });
+    fireEvent.keyDown(handle, { key: "Enter" });
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_user_preference", {
+      preference: "providerOrder",
+      value: ["xiaomi", "deepseek", "qwen", "zhipu", "moonshot"],
+    }));
   });
 
   it("adds another provider to the enabled translation models", async () => {
@@ -603,7 +643,7 @@ describe("App", () => {
     });
     render(<App />);
 
-    fireEvent.click(screen.getByRole("button", { name: "通用设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "偏好设置" }));
     const defaultPicker = screen.getByRole("button", { name: "设置默认快速翻译模型" });
     await waitFor(() => expect(defaultPicker).toHaveTextContent("deepseek-v4-flash"));
     fireEvent.click(defaultPicker);
@@ -613,6 +653,54 @@ describe("App", () => {
       preference: "quickTranslateProvider",
       value: "xiaomi",
     }));
+  });
+
+  it("updates color mode and translation font sizes from interface settings", async () => {
+    mockWindowLabel("settings");
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_enabled_providers") return Promise.resolve([]);
+      if (command === "get_preferences") return Promise.resolve({
+        autoSelection: true,
+        keepOnTop: false,
+        quickTranslateProvider: null,
+        themeMode: "system",
+        sourceFontSize: 14,
+        translationFontSize: 16,
+        proxyMode: "system",
+        proxyUrl: "",
+      });
+      return Promise.resolve(undefined);
+    });
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "偏好设置" }));
+    fireEvent.click(screen.getByRole("radio", { name: "深色" }));
+    fireEvent.change(screen.getByLabelText("原文字号"), { target: { value: "18" } });
+    fireEvent.change(screen.getByLabelText("译文字号"), { target: { value: "20" } });
+
+    await waitFor(() => expect(document.documentElement).toHaveAttribute("data-theme", "dark"));
+    expect(document.documentElement.style.getPropertyValue("--source-font-size")).toBe("18px");
+    expect(document.documentElement.style.getPropertyValue("--translation-font-size")).toBe("20px");
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_user_preference", { preference: "translationFontSize", value: 20 }));
+  });
+
+  it("configures a custom network proxy from its own settings page", async () => {
+    mockWindowLabel("settings");
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_enabled_providers") return Promise.resolve([]);
+      if (command === "get_preferences") return Promise.resolve({ proxyMode: "system", proxyUrl: "" });
+      return Promise.resolve(undefined);
+    });
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "网络代理" }));
+    fireEvent.click(screen.getByRole("radio", { name: "自定义" }));
+    const proxyInput = screen.getByLabelText("代理地址");
+    expect(proxyInput).toBeEnabled();
+    fireEvent.change(proxyInput, { target: { value: "http://127.0.0.1:7890" } });
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_user_preference", { preference: "proxyMode", value: "custom" }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_user_preference", { preference: "proxyUrl", value: "http://127.0.0.1:7890" }));
   });
 
   it("disables quick translation when no provider is enabled", async () => {
@@ -646,6 +734,25 @@ describe("App", () => {
     expect(invokeMock).toHaveBeenCalledWith("translate_selection_float");
   });
 
+  it("accepts another selected-text translation after a successful request", async () => {
+    mockWindowLabel("selection-float");
+    invokeMock.mockResolvedValue(undefined);
+    render(<App />);
+    const showHandler = listenMock.mock.calls.find(([eventName]) => eventName === "selection-float:show")?.[1];
+
+    fireEvent.click(screen.getByRole("button", { name: "翻译选中文本" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "翻译选中文本" })).toBeDisabled());
+
+    act(() => showHandler({ payload: { generation: 2 } }));
+    const secondButton = screen.getByRole("button", { name: "翻译选中文本" });
+    expect(secondButton).toBeEnabled();
+    fireEvent.click(secondButton);
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(2));
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "translate_selection_float");
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "translate_selection_float");
+  });
+
   it("shows the known source text while the provider translation is pending", async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === "get_enabled_providers") return Promise.resolve(["deepseek"]);
@@ -666,6 +773,31 @@ describe("App", () => {
     expect(status).toHaveTextContent("翻译中…");
     expect(container.querySelector(".provider-body")).toHaveAttribute("aria-busy", "true");
     expect(container.querySelector(".translation-line")).toContainElement(status);
+  });
+
+  it("renders translation cards in the persisted provider order", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_preferences") return Promise.resolve({
+        providerOrder: ["xiaomi", "deepseek"],
+      });
+      if (command === "get_enabled_providers") return Promise.resolve(["xiaomi", "deepseek"]);
+      if (command === "get_provider_config") return Promise.resolve(null);
+      if (command === "get_latest_translation") return Promise.resolve({
+        source: "hello",
+        requestId: 18,
+        results: [
+          { providerId: "deepseek", model: "deepseek-v4-flash", translation: "深度求索" },
+          { providerId: "xiaomi", model: "mimo-v2.5-pro", translation: "小米" },
+        ],
+      });
+      return Promise.resolve(undefined);
+    });
+    const { container } = render(<App />);
+
+    await waitFor(() => expect(container.querySelectorAll(".provider-card")).toHaveLength(2));
+    expect(Array.from(container.querySelectorAll(".provider-heading strong")).map((node) => node.textContent)).toEqual([
+      "mimo-v2.5-pro/Xiaomi MiMo", "deepseek-v4-flash/DeepSeek",
+    ]);
   });
 
   it("preserves captured source line breaks instead of merging them into a paragraph", async () => {

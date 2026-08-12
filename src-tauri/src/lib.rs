@@ -35,6 +35,7 @@ const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 const DEEPSEEK_MODEL: &str = "deepseek-v4-flash";
 const DEEPSEEK_THINKING_DISABLED: &str = "disabled";
 const USER_PREFERENCES_VERSION: u8 = 1;
+const LOOPBACK_PROXY_BYPASS: &str = "localhost,127.0.0.1,::1";
 const FLOAT_BUTTON_SIZE: i32 = 28;
 const FLOAT_SIZE: i32 = FLOAT_BUTTON_SIZE + 4;
 pub(crate) const FLOAT_PADDING: i32 = (FLOAT_SIZE - FLOAT_BUTTON_SIZE) / 2;
@@ -44,6 +45,64 @@ const TRANSLATION_WINDOW_HEIGHT: f64 = 660.0;
 pub(crate) const FLOAT_CORNER_RADIUS: i32 = 10;
 
 static NEXT_TRANSLATION_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(target_os = "windows")]
+fn suppress_windows_frame_border(window: &WebviewWindow) -> Result<(), String> {
+    use windows::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE,
+    };
+
+    let hwnd = window.hwnd().map_err(|error| error.to_string())?;
+    let border_color = DWMWA_COLOR_NONE;
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            std::ptr::from_ref(&border_color).cast(),
+            std::mem::size_of_val(&border_color) as u32,
+        )
+    }
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn set_windows_frame_theme(window: &WebviewWindow, dark: bool) {
+    use windows::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE,
+    };
+
+    let Ok(hwnd) = window.hwnd() else { return };
+    let use_dark_mode = i32::from(dark);
+    if let Err(error) = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            std::ptr::from_ref(&use_dark_mode).cast(),
+            std::mem::size_of_val(&use_dark_mode) as u32,
+        )
+    } {
+        eprintln!("Could not update the native window theme: {error}");
+    }
+}
+
+fn configure_native_window_frame(window: &WebviewWindow, dark: Option<bool>) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        // Tauri's undecorated + shadowed Windows window intentionally keeps a
+        // one-pixel DWM frame. Windows 11 exposes a supported way to suppress
+        // only that frame while retaining the native shadow and rounded corners.
+        // Older Windows versions reject the attribute, so prefer a borderless
+        // fallback without a shadow over leaking a light frame in dark mode.
+        if let Err(error) = suppress_windows_frame_border(window) {
+            eprintln!("Native border suppression is unavailable; disabling the window shadow: {error}");
+            window.set_shadow(false).map_err(|error| error.to_string())?;
+        }
+        if let Some(dark) = dark {
+            set_windows_frame_theme(window, dark);
+        }
+    }
+    Ok(())
+}
 
 fn physical_float_metric(logical_pixels: i32, scale_factor: f64) -> i32 {
     (f64::from(logical_pixels) * scale_factor).round().max(1.0) as i32
@@ -469,6 +528,112 @@ mod selection_float_tests {
             vec!["legacy-model"]
         );
     }
+
+    #[test]
+    fn legacy_preferences_default_to_the_system_proxy() {
+        let preferences: UserPreferences = serde_json::from_value(serde_json::json!({
+            "autoSelection": true,
+            "keepOnTop": false
+        }))
+        .unwrap();
+
+        assert_eq!(preferences.proxy_mode, ProxyMode::System);
+        assert!(preferences.proxy_url.is_empty());
+        assert_eq!(preferences.theme_mode, ThemeMode::System);
+        assert_eq!(preferences.source_font_size, 14);
+        assert_eq!(preferences.translation_font_size, 16);
+        assert!(preferences.provider_order.is_empty());
+    }
+
+    #[test]
+    fn proxy_preferences_use_frontend_field_names() {
+        let preferences = UserPreferences {
+            proxy_mode: ProxyMode::Custom,
+            proxy_url: "http://127.0.0.1:7890".into(),
+            ..UserPreferences::default()
+        };
+        let value = serde_json::to_value(preferences).unwrap();
+
+        assert_eq!(value["proxyMode"], "custom");
+        assert_eq!(value["proxyUrl"], "http://127.0.0.1:7890");
+    }
+
+    #[test]
+    fn proxy_urls_accept_common_http_and_socks_forms() {
+        assert_eq!(
+            normalized_proxy_url("127.0.0.1:7890").unwrap(),
+            "http://127.0.0.1:7890"
+        );
+        assert_eq!(
+            normalized_proxy_url("socks5h://127.0.0.1:1080").unwrap(),
+            "socks5h://127.0.0.1:1080"
+        );
+        assert!(normalized_proxy_url("ftp://127.0.0.1:21").is_err());
+        assert!(normalized_proxy_url("http://").is_err());
+    }
+
+    #[test]
+    fn http_client_builder_supports_all_proxy_modes() {
+        let mut preferences = UserPreferences::default();
+        assert!(build_http_client(&preferences, Duration::from_secs(1)).is_ok());
+
+        preferences.proxy_mode = ProxyMode::Disabled;
+        assert!(build_http_client(&preferences, Duration::from_secs(1)).is_ok());
+
+        preferences.proxy_mode = ProxyMode::Custom;
+        preferences.proxy_url = "http://127.0.0.1:7890".into();
+        assert!(build_http_client(&preferences, Duration::from_secs(1)).is_ok());
+
+        preferences.proxy_url.clear();
+        assert!(build_http_client(&preferences, Duration::from_secs(1)).is_err());
+    }
+
+    #[test]
+    fn provider_order_accepts_unknown_ids_and_removes_duplicates() {
+        let order = normalize_provider_order(&serde_json::json!([
+            "openai",
+            "future-custom-provider",
+            "openai",
+            "deepseek"
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            order,
+            vec!["openai", "future-custom-provider", "deepseek"]
+        );
+        assert!(normalize_provider_order(&serde_json::json!(["deepseek", 42])).is_err());
+
+        let preferences = UserPreferences {
+            provider_order: order,
+            ..UserPreferences::default()
+        };
+        let value = serde_json::to_value(preferences).unwrap();
+        assert_eq!(
+            value["providerOrder"],
+            serde_json::json!(["openai", "future-custom-provider", "deepseek"])
+        );
+    }
+
+    #[test]
+    fn provider_order_sorts_matches_and_stably_appends_unlisted_providers() {
+        let providers = vec![
+            "deepseek".into(),
+            "xiaomi".into(),
+            "openai".into(),
+            "qwen".into(),
+        ];
+        let order = vec![
+            "future-custom-provider".into(),
+            "openai".into(),
+            "deepseek".into(),
+        ];
+
+        assert_eq!(
+            apply_provider_order(providers, &order),
+            vec!["openai", "deepseek", "xiaomi", "qwen"]
+        );
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -492,6 +657,27 @@ type LatestTranslation = Mutex<Option<TranslationBatch>>;
 
 struct EnabledProvidersUpdateLock(Mutex<()>);
 
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum ProxyMode {
+    #[default]
+    System,
+    Disabled,
+    Custom,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum ThemeMode {
+    Light,
+    Dark,
+    #[default]
+    System,
+}
+
+fn default_source_font_size() -> u8 { 14 }
+fn default_translation_font_size() -> u8 { 16 }
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UserPreferences {
@@ -499,6 +685,18 @@ struct UserPreferences {
     keep_on_top: bool,
     #[serde(default)]
     quick_translate_provider: Option<String>,
+    #[serde(default)]
+    theme_mode: ThemeMode,
+    #[serde(default = "default_source_font_size")]
+    source_font_size: u8,
+    #[serde(default = "default_translation_font_size")]
+    translation_font_size: u8,
+    #[serde(default)]
+    proxy_mode: ProxyMode,
+    #[serde(default)]
+    proxy_url: String,
+    #[serde(default)]
+    provider_order: Vec<String>,
     #[serde(default)]
     preference_version: u8,
 }
@@ -509,6 +707,12 @@ impl Default for UserPreferences {
             auto_selection: true,
             keep_on_top: false,
             quick_translate_provider: None,
+            theme_mode: ThemeMode::System,
+            source_font_size: default_source_font_size(),
+            translation_font_size: default_translation_font_size(),
+            proxy_mode: ProxyMode::System,
+            proxy_url: String::new(),
+            provider_order: Vec::new(),
             preference_version: USER_PREFERENCES_VERSION,
         }
     }
@@ -962,6 +1166,51 @@ fn current_preferences(app: &AppHandle) -> UserPreferences {
         .clone()
 }
 
+fn normalized_proxy_url(proxy_url: &str) -> Result<String, String> {
+    let proxy_url = proxy_url.trim();
+    if proxy_url.is_empty() {
+        return Err("自定义代理地址不能为空。".to_string());
+    }
+    let proxy_url = if proxy_url.contains("://") {
+        proxy_url.to_string()
+    } else {
+        format!("http://{proxy_url}")
+    };
+    let parsed = reqwest::Url::parse(&proxy_url)
+        .map_err(|_| "代理地址格式无效，请填写主机和端口。".to_string())?;
+    if !matches!(
+        parsed.scheme(),
+        "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h"
+    ) {
+        return Err("代理地址仅支持 HTTP、HTTPS、SOCKS4 或 SOCKS5。".to_string());
+    }
+    if parsed.host_str().is_none() {
+        return Err("代理地址缺少主机名。".to_string());
+    }
+    Ok(proxy_url)
+}
+
+fn build_http_client(
+    preferences: &UserPreferences,
+    timeout: Duration,
+) -> Result<Client, String> {
+    let mut builder = Client::builder().timeout(timeout);
+    builder = match preferences.proxy_mode {
+        ProxyMode::System => builder,
+        ProxyMode::Disabled => builder.no_proxy(),
+        ProxyMode::Custom => {
+            let proxy_url = normalized_proxy_url(&preferences.proxy_url)?;
+            let proxy = reqwest::Proxy::all(&proxy_url)
+                .map_err(|_| "无法使用该代理地址，请检查协议、主机和端口。".to_string())?
+                .no_proxy(reqwest::NoProxy::from_string(LOOPBACK_PROXY_BYPASS));
+            builder.proxy(proxy)
+        }
+    };
+    builder
+        .build()
+        .map_err(|error| format!("无法初始化网络连接：{error}"))
+}
+
 fn is_auto_selection_enabled(app: &AppHandle) -> bool {
     current_preferences(app).auto_selection
 }
@@ -1051,6 +1300,39 @@ fn save_enabled_providers_sync(providers: &[String]) -> Result<(), String> {
         .map_err(|error| format!("无法保存启用模型列表：{error}"))
 }
 
+fn normalize_provider_order(value: &serde_json::Value) -> Result<Vec<String>, String> {
+    value
+        .as_array()
+        .ok_or_else(|| "providerOrder must be an array of provider ids".to_string())?
+        .iter()
+        .try_fold(Vec::new(), |mut unique, provider| {
+            let provider = provider
+                .as_str()
+                .ok_or_else(|| "providerOrder must contain only strings".to_string())?;
+            if !unique.iter().any(|item| item == provider) {
+                unique.push(provider.to_string());
+            }
+            Ok(unique)
+        })
+}
+
+fn apply_provider_order(providers: Vec<String>, provider_order: &[String]) -> Vec<String> {
+    let mut ordered = Vec::with_capacity(providers.len());
+    for preferred in provider_order {
+        if providers.iter().any(|provider| provider == preferred)
+            && !ordered.iter().any(|provider| provider == preferred)
+        {
+            ordered.push(preferred.clone());
+        }
+    }
+    for provider in providers {
+        if !ordered.contains(&provider) {
+            ordered.push(provider);
+        }
+    }
+    ordered
+}
+
 fn normalize_models(primary_model: &str, models: &[String]) -> Vec<String> {
     std::iter::once(primary_model)
         .chain(models.iter().map(String::as_str))
@@ -1107,6 +1389,7 @@ async fn request_translation(
     provider: String,
     model: String,
     text: String,
+    preferences: UserPreferences,
 ) -> Result<ProviderTranslation, String> {
     let config = configured_provider(&provider)?;
     let model = model.trim().to_string();
@@ -1117,10 +1400,7 @@ async fn request_translation(
     let prompt = format!(
         "Translate the following text into natural {target}. The target language is fixed by the application; do not answer in the source language, even when the input mixes Chinese and English terms. Preserve product names, model names, acronyms, and technical notation. Return only the translation, without notes or quotation marks.\n\n{text}"
     );
-    let client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|error| format!("无法初始化网络连接：{error}"))?;
+    let client = build_http_client(&preferences, Duration::from_secs(30))?;
     let mut body = serde_json::json!({
         "model": model,
         "messages": [
@@ -1294,16 +1574,14 @@ async fn send_connection_test(
     api_key: &str,
     base_url: &str,
     model: &str,
+    preferences: &UserPreferences,
 ) -> Result<(), String> {
     validate_base_url(base_url)?;
     if model.trim().is_empty() {
         return Err("模型名称不能为空。".to_string());
     }
 
-    let client = Client::builder()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|error| format!("无法初始化网络连接：{error}"))?;
+    let client = build_http_client(preferences, Duration::from_secs(20))?;
 
     let endpoint = api_endpoint(base_url, "chat/completions")?;
     let mut body = serde_json::json!({
@@ -1395,12 +1673,10 @@ async fn fetch_models(
     provider: &str,
     api_key: &str,
     base_url: &str,
+    preferences: &UserPreferences,
 ) -> Result<Vec<String>, String> {
     validate_base_url(base_url)?;
-    let client = Client::builder()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|error| format!("无法初始化网络连接：{error}"))?;
+    let client = build_http_client(preferences, Duration::from_secs(20))?;
     let endpoint = api_endpoint(base_url, "models")?;
     let response = authenticated_request(client.get(&endpoint), provider, api_key, &endpoint)
         .send()
@@ -1512,7 +1788,11 @@ async fn translate_and_display(
     if source.chars().count() > 12_000 {
         return Err("单次翻译最多支持 12,000 个字符。".to_string());
     }
-    let enabled_providers = enabled_providers_sync();
+    let request_preferences = current_preferences(&app);
+    let enabled_providers = apply_provider_order(
+        enabled_providers_sync(),
+        &request_preferences.provider_order,
+    );
     if enabled_providers.is_empty() {
         return Err("请先在设置中启用至少一个翻译模型。".to_string());
     }
@@ -1557,7 +1837,7 @@ async fn translate_and_display(
     window.show().map_err(|error| error.to_string())?;
     window.set_focus().map_err(|error| error.to_string())?;
     window
-        .set_always_on_top(current_preferences(&app).keep_on_top)
+        .set_always_on_top(request_preferences.keep_on_top)
         .map_err(|error| error.to_string())?;
     app.emit("translation-started", &pending_result).map_err(|error| error.to_string())?;
 
@@ -1567,10 +1847,18 @@ async fn translate_and_display(
         let task_provider = provider.clone();
         let task_model = model.clone();
         let task_app = app.clone();
+        let task_preferences = request_preferences.clone();
         pending.push((
             (provider.clone(), model.clone()),
             tauri::async_runtime::spawn(async move {
-                let result = match request_translation(task_provider, task_model, request_text).await {
+                let result = match request_translation(
+                    task_provider,
+                    task_model,
+                    request_text,
+                    task_preferences,
+                )
+                .await
+                {
                     Ok(result) => result,
                     Err(error) => ProviderTranslation {
                         provider_id: provider,
@@ -1684,8 +1972,10 @@ async fn save_provider_config(
     })
     .await
     .map_err(|error| format!("保存配置任务失败：{error}"))??;
-    if enabled_providers_sync().contains(&saved_provider) {
-        app.emit("enabled-providers-changed", enabled_providers_sync())
+    let provider_order = current_preferences(&app).provider_order;
+    let enabled_providers = apply_provider_order(enabled_providers_sync(), &provider_order);
+    if enabled_providers.contains(&saved_provider) {
+        app.emit("enabled-providers-changed", enabled_providers)
         .map_err(|error| error.to_string())?;
     }
     app.emit("provider-config-saved", &saved_provider)
@@ -1734,6 +2024,7 @@ async fn delete_custom_provider(app: AppHandle, provider: String) -> Result<Vec<
     }
     let removed_provider = provider.clone();
     let update_app = app.clone();
+    let provider_order = current_preferences(&app).provider_order;
     let (providers, reset_active_provider) = tauri::async_runtime::spawn_blocking(move || {
         let update_lock = update_app.state::<EnabledProvidersUpdateLock>();
         let _guard = update_lock.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1743,6 +2034,7 @@ async fn delete_custom_provider(app: AppHandle, provider: String) -> Result<Vec<
         }
         let mut providers = enabled_providers_sync();
         providers.retain(|item| item != &provider);
+        let providers = apply_provider_order(providers, &provider_order);
         save_enabled_providers_sync(&providers)?;
         let reset_active_provider = active_provider_sync() == provider;
         if reset_active_provider {
@@ -1770,6 +2062,7 @@ async fn delete_custom_provider(app: AppHandle, provider: String) -> Result<Vec<
 
 #[tauri::command]
 async fn test_provider_connection(
+    app: AppHandle,
     provider: String,
     api_key: String,
     base_url: String,
@@ -1780,7 +2073,8 @@ async fn test_provider_connection(
     }
     let key = provider_api_key(&provider, &api_key);
     let started = Instant::now();
-    send_connection_test(&provider, &key, &base_url, &model).await?;
+    let preferences = current_preferences(&app);
+    send_connection_test(&provider, &key, &base_url, &model, &preferences).await?;
     Ok(ConnectionTestResult {
         latency_ms: started.elapsed().as_millis(),
         message: "连接成功".to_string(),
@@ -1789,6 +2083,7 @@ async fn test_provider_connection(
 
 #[tauri::command]
 async fn fetch_provider_models(
+    app: AppHandle,
     provider: String,
     api_key: String,
     base_url: String,
@@ -1797,7 +2092,8 @@ async fn fetch_provider_models(
         return Err(format!("不支持的 AI 提供商：{provider}"));
     }
     let key = provider_api_key(&provider, &api_key);
-    fetch_models(&provider, &key, &base_url).await
+    let preferences = current_preferences(&app);
+    fetch_models(&provider, &key, &base_url, &preferences).await
 }
 
 #[tauri::command]
@@ -1831,8 +2127,11 @@ async fn set_active_provider(app: AppHandle, provider: String) -> Result<String,
 }
 
 #[tauri::command]
-async fn get_enabled_providers() -> Vec<String> {
-    tauri::async_runtime::spawn_blocking(enabled_providers_sync)
+async fn get_enabled_providers(app: AppHandle) -> Vec<String> {
+    let provider_order = current_preferences(&app).provider_order;
+    tauri::async_runtime::spawn_blocking(move || {
+        apply_provider_order(enabled_providers_sync(), &provider_order)
+    })
         .await
         .unwrap_or_default()
 }
@@ -1844,6 +2143,7 @@ async fn set_provider_enabled(
     enabled: bool,
 ) -> Result<Vec<String>, String> {
     let update_app = app.clone();
+    let provider_order = current_preferences(&app).provider_order;
     let providers = tauri::async_runtime::spawn_blocking(move || {
         let update_lock = update_app.state::<EnabledProvidersUpdateLock>();
         let _guard = update_lock.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1862,6 +2162,7 @@ async fn set_provider_enabled(
                 return Err("至少需要保留一个启用的翻译模型。".to_string());
             }
         }
+        let providers = apply_provider_order(providers, &provider_order);
         save_enabled_providers_sync(&providers)?;
         Ok(providers)
     })
@@ -1894,6 +2195,7 @@ async fn set_user_preference(
     preference: String,
     value: serde_json::Value,
 ) -> Result<UserPreferences, String> {
+    let updates_provider_order = preference == "providerOrder";
     let update_app = app.clone();
     let preferences = tauri::async_runtime::spawn_blocking(move || {
         let state = update_app.state::<Mutex<UserPreferences>>();
@@ -1920,6 +2222,51 @@ async fn set_user_preference(
                     Some(provider.to_string())
                 };
             }
+            "themeMode" => {
+                updated.theme_mode = match value.as_str() {
+                    Some("light") => ThemeMode::Light,
+                    Some("dark") => ThemeMode::Dark,
+                    Some("system") => ThemeMode::System,
+                    _ => return Err("themeMode must be light, dark, or system".to_string()),
+                };
+            }
+            "sourceFontSize" => {
+                let size = value.as_u64()
+                    .ok_or_else(|| "sourceFontSize must be an integer".to_string())?;
+                if !(12..=24).contains(&size) {
+                    return Err("sourceFontSize must be between 12 and 24".to_string());
+                }
+                updated.source_font_size = size as u8;
+            }
+            "translationFontSize" => {
+                let size = value.as_u64()
+                    .ok_or_else(|| "translationFontSize must be an integer".to_string())?;
+                if !(12..=28).contains(&size) {
+                    return Err("translationFontSize must be between 12 and 28".to_string());
+                }
+                updated.translation_font_size = size as u8;
+            }
+            "proxyMode" => {
+                updated.proxy_mode = match value.as_str() {
+                    Some("system") => ProxyMode::System,
+                    Some("disabled") => ProxyMode::Disabled,
+                    Some("custom") => ProxyMode::Custom,
+                    _ => {
+                        return Err(
+                            "proxyMode must be system, disabled, or custom".to_string(),
+                        )
+                    }
+                };
+            }
+            "proxyUrl" => {
+                updated.proxy_url = value
+                    .as_str()
+                    .ok_or_else(|| "proxyUrl must be a string".to_string())?
+                    .to_string();
+            }
+            "providerOrder" => {
+                updated.provider_order = normalize_provider_order(&value)?;
+            }
             _ => return Err(format!("Unsupported user preference: {preference}")),
         }
         updated.preference_version = USER_PREFERENCES_VERSION;
@@ -1944,6 +2291,17 @@ async fn set_user_preference(
     }
     app.emit("preferences-changed", &preferences)
         .map_err(|error| error.to_string())?;
+    if updates_provider_order {
+        let provider_order = preferences.provider_order.clone();
+        if let Ok(providers) = tauri::async_runtime::spawn_blocking(move || {
+            apply_provider_order(enabled_providers_sync(), &provider_order)
+        })
+        .await
+        {
+            app.emit("enabled-providers-changed", providers)
+                .map_err(|error| error.to_string())?;
+        }
+    }
     window_result?;
     Ok(preferences)
 }
@@ -1959,12 +2317,26 @@ fn minimize_window(window: WebviewWindow) -> Result<(), String> {
     window.minimize().map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn set_window_appearance(window: WebviewWindow, dark: bool) -> Result<(), String> {
+    let background = if dark {
+        Color(21, 26, 32, 255)
+    } else {
+        Color(255, 255, 255, 255)
+    };
+    window
+        .set_background_color(Some(background))
+        .map_err(|error| error.to_string())?;
+    configure_native_window_frame(&window, Some(dark))
+}
+
 fn show_settings_window(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("settings") {
         window.set_size(Size::Logical(LogicalSize::new(1120.0, 760.0))).map_err(|error| error.to_string())?;
         window.set_resizable(false).map_err(|error| error.to_string())?;
         window.set_minimizable(true).map_err(|error| error.to_string())?;
         window.set_shadow(true).map_err(|error| error.to_string())?;
+        configure_native_window_frame(&window, None)?;
         window.set_always_on_top(false).map_err(|error| error.to_string())?;
         window.unminimize().map_err(|error| error.to_string())?;
         window.show().map_err(|error| error.to_string())?;
@@ -1972,7 +2344,7 @@ fn show_settings_window(app: &AppHandle) -> Result<(), String> {
         return Ok(());
     }
 
-    WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
+    let window = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
         .inner_size(1120.0, 760.0)
         .min_inner_size(900.0, 620.0)
         .title("AI Translate 设置")
@@ -1999,8 +2371,8 @@ fn show_settings_window(app: &AppHandle) -> Result<(), String> {
             }
         })
         .build()
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    configure_native_window_frame(&window, None)
 }
 
 fn center_child_window(child: &WebviewWindow, parent: &WebviewWindow) -> Result<(), String> {
@@ -2020,6 +2392,8 @@ fn show_add_provider_window(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("add-provider") {
         window.set_size(Size::Logical(LogicalSize::new(640.0, 540.0))).map_err(|error| error.to_string())?;
         window.set_resizable(false).map_err(|error| error.to_string())?;
+        window.set_shadow(true).map_err(|error| error.to_string())?;
+        configure_native_window_frame(&window, None)?;
         if let Some(parent) = app.get_webview_window("settings") {
             center_child_window(&window, &parent)?;
         } else {
@@ -2051,7 +2425,7 @@ fn show_add_provider_window(app: &AppHandle) -> Result<(), String> {
     } else {
         builder
     };
-    builder
+    let window = builder
         .on_page_load(move |window, payload| {
             if matches!(payload.event(), PageLoadEvent::Finished) {
                 let position_result = if let Some(parent) = center_parent.as_ref() {
@@ -2071,8 +2445,8 @@ fn show_add_provider_window(app: &AppHandle) -> Result<(), String> {
             }
         })
         .build()
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    configure_native_window_frame(&window, None)
 }
 
 fn spawn_settings_window(app: &AppHandle) {
@@ -2275,6 +2649,9 @@ pub fn run() {
         .manage(Mutex::new(None::<TranslationBatch>))
         .manage(EnabledProvidersUpdateLock(Mutex::new(())))
         .setup(move |app| {
+            if let Some(window) = app.get_webview_window("main") {
+                configure_native_window_frame(&window, None)?;
+            }
             initialize_tray_icon(app)?;
             if let Err(error) = initialize_selection_float(app) {
                 eprintln!("Selection float disabled: {error}");
@@ -2300,6 +2677,7 @@ pub fn run() {
             set_user_preference,
             hide_window,
             minimize_window,
+            set_window_appearance,
             open_settings_window,
             open_add_provider_window,
             return_to_settings_window,

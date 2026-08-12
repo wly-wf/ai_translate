@@ -8,25 +8,37 @@ use windows::{
     Win32::{
         Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         Graphics::Gdi::ScreenToClient,
-        UI::WindowsAndMessaging::{
-            CallNextHookEx, GetAncestor, GetClientRect, GetMessageW, GetWindowRect,
-            IsWindowVisible, SendMessageTimeoutW, SetWindowsHookExW, UnhookWindowsHookEx,
-            WindowFromPoint, GA_ROOT, HTCLIENT, MSLLHOOKSTRUCT, MSG, SMTO_ABORTIFHUNG,
-            WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_NCHITTEST,
+        UI::{
+            Input::KeyboardAndMouse::GetDoubleClickTime,
+            WindowsAndMessaging::{
+                CallNextHookEx, GetAncestor, GetClientRect, GetMessageW, GetSystemMetrics,
+                GetWindowRect, IsWindowVisible, SendMessageTimeoutW, SetWindowsHookExW,
+                UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, HTCLIENT, MSLLHOOKSTRUCT, MSG,
+                SMTO_ABORTIFHUNG, SM_CXDOUBLECLK, SM_CYDOUBLECLK, WH_MOUSE_LL, WM_LBUTTONDOWN,
+                WM_LBUTTONUP, WM_NCHITTEST,
+            },
         },
     },
 };
 
-type MouseUpCallback = dyn Fn(RawMouseUp) + Send + Sync + 'static;
-type CallbackSlot = Mutex<Option<Arc<MouseUpCallback>>>;
+type MouseEventCallback = dyn Fn(RawMouseEvent) + Send + Sync + 'static;
+type CallbackSlot = Mutex<Option<Arc<MouseEventCallback>>>;
 
 static CALLBACK: OnceLock<CallbackSlot> = OnceLock::new();
-static BUTTON_DOWN: OnceLock<Mutex<Option<MouseDown>>> = OnceLock::new();
+
+const DRAG_THRESHOLD: i64 = 3;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RawMouseEventKind {
+    Down,
+    Up,
+}
 
 #[derive(Clone, Copy, Debug)]
-struct RawMouseUp {
+struct RawMouseEvent {
+    kind: RawMouseEventKind,
     point: POINT,
-    start: Option<MouseDown>,
+    timestamp: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -35,6 +47,15 @@ struct MouseDown {
     root_window: isize,
     initial_window_bounds: Option<RECT>,
     started_in_client_area: bool,
+    started_on_float: bool,
+    repeated_click: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CompletedClick {
+    point: POINT,
+    timestamp: u32,
+    root_window: isize,
 }
 
 #[derive(Debug)]
@@ -75,37 +96,58 @@ pub fn start_mouse_hook(
     on_mouse_up: impl Fn(MouseUpEvent) + Send + Sync + 'static,
 ) -> Result<(), HookError> {
     let float_window = float_window.0 as isize;
-    let (event_sender, event_receiver) = mpsc::sync_channel::<RawMouseUp>(32);
+    // The low-level hook must return immediately. Use an unbounded queue so a
+    // temporarily slow accessibility provider cannot make the hook drop a
+    // down/up pair and leave selection tracking in a corrupt state.
+    let (event_sender, event_receiver) = mpsc::channel::<RawMouseEvent>();
     thread::Builder::new()
         .name("selection-mouse-dispatch".into())
         .spawn(move || {
+            let float_window = HWND(float_window as *mut _);
+            let mut button_down = None;
+            let mut previous_click = None;
             while let Ok(event) = event_receiver.recv() {
-                let clicked_float = event
-                    .start
-                    .map(|start| clicked_float_at_event(HWND(float_window as *mut _), start.point))
-                    .unwrap_or(false)
-                    || clicked_float_at_event(HWND(float_window as *mut _), event.point);
-                // A release without a matching press can happen when the hook is
-                // installed mid-gesture. Treat it as unknown, never as a selection.
-                let selection_gesture = event.start.is_some_and(|start| {
-                    let window_changed = window_changed_since_mouse_down(start);
-                    is_selection_gesture(start, event.point, window_changed)
-                        && !clicked_float_at_event(
-                            HWND(float_window as *mut _),
-                            start.point,
-                        )
-                });
-                on_mouse_up(MouseUpEvent {
-                    point: event.point,
-                    start_point: event.start.map(|start| start.point),
-                    clicked_float,
-                    selection_gesture,
-                });
+                match event.kind {
+                    RawMouseEventKind::Down => {
+                        button_down = Some(capture_mouse_down(
+                            event.point,
+                            event.timestamp,
+                            float_window,
+                            previous_click,
+                        ));
+                    }
+                    RawMouseEventKind::Up => {
+                        let start = button_down.take();
+                        let clicked_float = start.is_some_and(|start| start.started_on_float)
+                            || clicked_float_at_event(float_window, event.point);
+                        // A release without a matching press can happen when the hook is
+                        // installed mid-gesture. Treat it as unknown, never as a selection.
+                        let selection_gesture = start.is_some_and(|start| {
+                            let window_changed = window_changed_since_mouse_down(start);
+                            (is_selection_gesture(start, event.point, window_changed)
+                                || is_repeated_click_selection(start, event.point, window_changed))
+                                && !start.started_on_float
+                        });
+
+                        previous_click = completed_click_after_mouse_up(
+                            start,
+                            event.point,
+                            event.timestamp,
+                            clicked_float,
+                        );
+                        on_mouse_up(MouseUpEvent {
+                            point: event.point,
+                            start_point: start.map(|start| start.point),
+                            clicked_float,
+                            selection_gesture,
+                        });
+                    }
+                }
             }
         })
         .map_err(|_| HookError::StartupChannelClosed)?;
-    let callback = Arc::new(move |event: RawMouseUp| {
-        let _ = event_sender.try_send(event);
+    let callback = Arc::new(move |event: RawMouseEvent| {
+        let _ = event_sender.send(event);
     });
     let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
 
@@ -142,43 +184,93 @@ fn callback_slot() -> &'static CallbackSlot {
     CALLBACK.get_or_init(|| Mutex::new(None))
 }
 
-fn button_down_slot() -> &'static Mutex<Option<MouseDown>> {
-    BUTTON_DOWN.get_or_init(|| Mutex::new(None))
-}
-
-fn remember_button_down(point: POINT) {
-    *button_down_slot()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(capture_mouse_down(point));
-}
-
-fn take_mouse_down() -> Option<MouseDown> {
-    button_down_slot()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .take()
-}
-
-fn capture_mouse_down(point: POINT) -> MouseDown {
+fn capture_mouse_down(
+    point: POINT,
+    timestamp: u32,
+    float_window: HWND,
+    previous_click: Option<CompletedClick>,
+) -> MouseDown {
     let hit_window = unsafe { WindowFromPoint(point) };
     let root_window = root_window(hit_window);
     let initial_window_bounds = window_bounds(root_window);
+    let repeated_click = previous_click.is_some_and(|previous| {
+        repeated_click_within_bounds(
+            previous,
+            point,
+            timestamp,
+            root_window.0 as isize,
+            unsafe { GetDoubleClickTime() },
+            unsafe { GetSystemMetrics(SM_CXDOUBLECLK) },
+            unsafe { GetSystemMetrics(SM_CYDOUBLECLK) },
+        )
+    });
     MouseDown {
         point,
         root_window: root_window.0 as isize,
         initial_window_bounds,
         started_in_client_area: point_is_in_client_area(root_window, point),
+        started_on_float: clicked_float_at_event(float_window, point),
+        repeated_click,
     }
 }
 
 fn is_selection_gesture(start: MouseDown, point: POINT, window_changed: bool) -> bool {
-    const DRAG_THRESHOLD: i64 = 3;
     if !start.started_in_client_area || window_changed {
         return false;
     }
-    let delta_x = i64::from(point.x) - i64::from(start.point.x);
-    let delta_y = i64::from(point.y) - i64::from(start.point.y);
-    delta_x * delta_x + delta_y * delta_y >= DRAG_THRESHOLD * DRAG_THRESHOLD
+    !is_simple_click(start.point, point)
+}
+
+fn is_repeated_click_selection(start: MouseDown, point: POINT, window_changed: bool) -> bool {
+    start.repeated_click
+        && start.started_in_client_area
+        && !window_changed
+        && is_simple_click(start.point, point)
+}
+
+fn is_simple_click(start: POINT, end: POINT) -> bool {
+    let delta_x = i64::from(end.x) - i64::from(start.x);
+    let delta_y = i64::from(end.y) - i64::from(start.y);
+    delta_x * delta_x + delta_y * delta_y < DRAG_THRESHOLD * DRAG_THRESHOLD
+}
+
+fn repeated_click_within_bounds(
+    previous: CompletedClick,
+    point: POINT,
+    timestamp: u32,
+    root_window: isize,
+    double_click_time: u32,
+    double_click_width: i32,
+    double_click_height: i32,
+) -> bool {
+    if previous.root_window != root_window
+        || timestamp.wrapping_sub(previous.timestamp) > double_click_time
+    {
+        return false;
+    }
+
+    let horizontal_radius = (double_click_width / 2).max(1);
+    let vertical_radius = (double_click_height / 2).max(1);
+    point.x.abs_diff(previous.point.x) <= horizontal_radius as u32
+        && point.y.abs_diff(previous.point.y) <= vertical_radius as u32
+}
+
+fn completed_click_after_mouse_up(
+    start: Option<MouseDown>,
+    point: POINT,
+    timestamp: u32,
+    clicked_float: bool,
+) -> Option<CompletedClick> {
+    let start = start?;
+    if clicked_float || !start.started_in_client_area || !is_simple_click(start.point, point) {
+        return None;
+    }
+
+    Some(CompletedClick {
+        point: start.point,
+        timestamp,
+        root_window: start.root_window,
+    })
 }
 
 fn root_window(window: HWND) -> HWND {
@@ -315,7 +407,7 @@ fn point_inside_round_rect(point: POINT, rectangle: RECT) -> bool {
 
 fn reserve_callback<'a>(
     slot: &'a CallbackSlot,
-    callback: Arc<MouseUpCallback>,
+    callback: Arc<MouseEventCallback>,
 ) -> Result<CallbackReservation<'a>, HookError> {
     let mut stored_callback = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if stored_callback.is_some() {
@@ -338,23 +430,25 @@ impl Drop for CallbackReservation<'_> {
 
 unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 && lparam.0 != 0 {
-        let point = unsafe { (*(lparam.0 as *const MSLLHOOKSTRUCT)).pt };
-        match wparam.0 as u32 {
-            WM_LBUTTONDOWN => remember_button_down(point),
-            WM_LBUTTONUP => {
-                let callback = callback_slot()
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .as_ref()
-                    .map(Arc::clone);
-                if let Some(callback) = callback {
-                    callback(RawMouseUp {
-                        point,
-                        start: take_mouse_down(),
-                    });
-                }
+        let kind = match wparam.0 as u32 {
+            WM_LBUTTONDOWN => Some(RawMouseEventKind::Down),
+            WM_LBUTTONUP => Some(RawMouseEventKind::Up),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            let hook_event = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+            let callback = callback_slot()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+                .map(Arc::clone);
+            if let Some(callback) = callback {
+                callback(RawMouseEvent {
+                    kind,
+                    point: hook_event.pt,
+                    timestamp: hook_event.time,
+                });
             }
-            _ => {}
         }
     }
 
@@ -369,12 +463,12 @@ mod tests {
     #[test]
     fn callback_slot_can_retry_after_failed_startup() {
         let slot = Mutex::new(None);
-        let first_callback: Arc<MouseUpCallback> = Arc::new(|_| {});
+        let first_callback: Arc<MouseEventCallback> = Arc::new(|_| {});
 
         let reservation = reserve_callback(&slot, first_callback).unwrap();
         drop(reservation);
 
-        let second_callback: Arc<MouseUpCallback> = Arc::new(|_| {});
+        let second_callback: Arc<MouseEventCallback> = Arc::new(|_| {});
         assert!(reserve_callback(&slot, second_callback).is_ok());
     }
 
@@ -406,6 +500,64 @@ mod tests {
         let start = test_mouse_down(POINT { x: 20, y: 30 }, true);
 
         assert!(!is_selection_gesture(start, POINT { x: 80, y: 30 }, true));
+    }
+
+    #[test]
+    fn repeated_click_is_treated_as_a_selection_gesture() {
+        let mut start = test_mouse_down(POINT { x: 20, y: 30 }, true);
+        start.repeated_click = true;
+
+        assert!(is_repeated_click_selection(
+            start,
+            POINT { x: 21, y: 30 },
+            false,
+        ));
+    }
+
+    #[test]
+    fn repeated_click_uses_system_time_position_and_window_boundaries() {
+        let previous = CompletedClick {
+            point: POINT { x: 20, y: 30 },
+            timestamp: 1_000,
+            root_window: 42,
+        };
+
+        assert!(repeated_click_within_bounds(
+            previous,
+            POINT { x: 22, y: 31 },
+            1_400,
+            42,
+            500,
+            4,
+            4,
+        ));
+        assert!(!repeated_click_within_bounds(
+            previous,
+            POINT { x: 30, y: 31 },
+            1_400,
+            42,
+            500,
+            4,
+            4,
+        ));
+        assert!(!repeated_click_within_bounds(
+            previous,
+            POINT { x: 22, y: 31 },
+            1_600,
+            42,
+            500,
+            4,
+            4,
+        ));
+        assert!(!repeated_click_within_bounds(
+            previous,
+            POINT { x: 22, y: 31 },
+            1_400,
+            99,
+            500,
+            4,
+            4,
+        ));
     }
 
     #[test]
@@ -469,6 +621,8 @@ mod tests {
             root_window: 0,
             initial_window_bounds: None,
             started_in_client_area,
+            started_on_float: false,
+            repeated_click: false,
         }
     }
 }

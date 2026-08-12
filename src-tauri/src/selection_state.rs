@@ -187,6 +187,29 @@ mod tests {
     }
 
     #[test]
+    fn completed_translation_does_not_block_the_next_selection() {
+        let mut controller = visible_controller("first");
+        assert_eq!(
+            controller.take_for_translation().map(|selection| selection.text),
+            Some("first".into())
+        );
+
+        let next_generation = controller.begin_selection_capture();
+        assert!(matches!(
+            controller.replace_selection(
+                next_generation,
+                "second".into(),
+                Anchor { x: 20, y: 30 },
+            ),
+            StateChange::Show(_)
+        ));
+        assert_eq!(
+            controller.take_for_translation().map(|selection| selection.text),
+            Some("second".into())
+        );
+    }
+
+    #[test]
     fn selection_at_12000_characters_is_shown() {
         let mut controller = SelectionController::default();
         let text = "x".repeat(12_000);

@@ -8,18 +8,31 @@ import bailianIcon from "@lobehub/icons-static-svg/icons/bailian-color.svg";
 import xiaomiMimoIcon from "@lobehub/icons-static-svg/icons/xiaomimimo.svg";
 import zhipuIcon from "@lobehub/icons-static-svg/icons/zhipu-color.svg";
 import { SelectionFloat } from "./SelectionFloat";
+import { useLongPressReorder } from "./useLongPressReorder";
 import appIcon from "../src-tauri/icons/tray-icon.svg";
 import "./App.css";
 
 type SettingsProviderId = "deepseek" | "xiaomi" | "qwen" | "zhipu" | "moonshot" | "openai";
 type ProviderId = SettingsProviderId;
 type GenericProviderId = "openai";
-type SettingsPage = "providers" | "generic" | "connection" | "general" | "interface" | "about";
+type SettingsPage = "providers" | "generic" | "connection" | "preferences" | "proxy" | "about";
 type ProviderTranslationResult = { providerId: ProviderId; model: string; translation?: string | null; error?: string | null };
 type Translation = { source: string; results: ProviderTranslationResult[]; requestId?: number };
 type TranslationError = { requestId: number; message: string };
 type ActiveProviderChanged = { providerId: ProviderId; model: string };
-type UserPreferences = { autoSelection: boolean; keepOnTop: boolean; quickTranslateProvider: ProviderId | null };
+type ThemeMode = "light" | "dark" | "system";
+type ProxyMode = "system" | "disabled" | "custom";
+type UserPreferences = {
+  autoSelection: boolean;
+  keepOnTop: boolean;
+  quickTranslateProvider: ProviderId | null;
+  themeMode: ThemeMode;
+  sourceFontSize: number;
+  translationFontSize: number;
+  proxyMode: ProxyMode;
+  proxyUrl: string;
+  providerOrder: string[];
+};
 type TitlebarDragState = {
   startX: number;
   startY: number;
@@ -190,7 +203,7 @@ function uniqueModels(models: string[]) {
 }
 
 function customProviderMark(name: string, fallback = "供") {
-  return Array.from(name.trim())[0]?.toLocaleLowerCase() || fallback;
+  return Array.from(name.trim())[0] || fallback;
 }
 
 function withCustomProviderIdentity(provider: SettingsProvider, name: string) {
@@ -223,7 +236,65 @@ const TRANSLATION_PROVIDERS: TranslationProvider[] = ALL_SETTINGS_PROVIDERS.map(
 const AVAILABLE_TRANSLATION_PROVIDERS = TRANSLATION_PROVIDERS.filter((provider) => provider.enabled);
 
 const DEFAULT_PROVIDER_ID: ProviderId = "deepseek";
-const DEFAULT_USER_PREFERENCES: UserPreferences = { autoSelection: true, keepOnTop: false, quickTranslateProvider: null };
+const DEFAULT_PROVIDER_ORDER = ALL_SETTINGS_PROVIDERS.map((provider) => provider.id);
+const DEFAULT_USER_PREFERENCES: UserPreferences = {
+  autoSelection: true,
+  keepOnTop: false,
+  quickTranslateProvider: null,
+  themeMode: "system",
+  sourceFontSize: 14,
+  translationFontSize: 16,
+  proxyMode: "system",
+  proxyUrl: "",
+  providerOrder: DEFAULT_PROVIDER_ORDER,
+};
+
+function orderedProviderIds(order: readonly string[], availableIds: readonly ProviderId[]) {
+  const available = new Set<string>(availableIds);
+  const result = order.filter((providerId): providerId is ProviderId => available.has(providerId));
+  for (const providerId of availableIds) {
+    if (!result.includes(providerId)) result.push(providerId);
+  }
+  return result;
+}
+
+function orderProviders<T extends { id: ProviderId }>(providers: readonly T[], order: readonly string[]) {
+  const byId = new Map(providers.map((provider) => [provider.id, provider]));
+  return orderedProviderIds(order, providers.map((provider) => provider.id))
+    .map((providerId) => byId.get(providerId))
+    .filter((provider): provider is T => Boolean(provider));
+}
+
+function orderProviderResults<T extends { providerId: ProviderId }>(results: readonly T[], order: readonly string[]) {
+  const rank = new Map(order.map((providerId, index) => [providerId, index]));
+  return results
+    .map((result, index) => ({ result, index }))
+    .sort((left, right) => (rank.get(left.result.providerId) ?? Number.MAX_SAFE_INTEGER)
+      - (rank.get(right.result.providerId) ?? Number.MAX_SAFE_INTEGER) || left.index - right.index)
+    .map(({ result }) => result);
+}
+
+function initialUserPreferences() {
+  if (typeof window === "undefined") return DEFAULT_USER_PREFERENCES;
+  try {
+    const stored = JSON.parse(window.localStorage.getItem("ai-translate-appearance") ?? "null") as Partial<UserPreferences> | null;
+    if (!stored) return DEFAULT_USER_PREFERENCES;
+    return {
+      ...DEFAULT_USER_PREFERENCES,
+      themeMode: stored.themeMode ?? DEFAULT_USER_PREFERENCES.themeMode,
+      sourceFontSize: stored.sourceFontSize ?? DEFAULT_USER_PREFERENCES.sourceFontSize,
+      translationFontSize: stored.translationFontSize ?? DEFAULT_USER_PREFERENCES.translationFontSize,
+    };
+  } catch {
+    return DEFAULT_USER_PREFERENCES;
+  }
+}
+
+function appearanceMatches(a: UserPreferences, b: UserPreferences) {
+  return a.themeMode === b.themeMode
+    && a.sourceFontSize === b.sourceFontSize
+    && a.translationFontSize === b.translationFontSize;
+}
 const isTauriDesktop = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 function containsCjk(value: string) {
@@ -327,6 +398,24 @@ function InlineSelect({ value, options, onChange, ariaLabel }: { value: string; 
   </div>;
 }
 
+function SegmentedControl({ value, options, onChange, ariaLabel }: {
+  value: string;
+  options: { value: string; label: string }[];
+  onChange: (value: string) => void;
+  ariaLabel: string;
+}) {
+  return <div className="segmented-control" role="radiogroup" aria-label={ariaLabel}>
+    {options.map((option) => <button
+      type="button"
+      role="radio"
+      aria-checked={value === option.value}
+      className={value === option.value ? "is-selected" : ""}
+      key={option.value}
+      onClick={() => onChange(option.value)}
+    >{option.label}</button>)}
+  </div>;
+}
+
 async function nativeInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (!isTauriDesktop()) {
     throw new Error("当前页面运行在普通浏览器中。请关闭此页面，并使用 `npm.cmd run tauri dev` 打开的 AI Translate 桌面窗口。");
@@ -335,9 +424,18 @@ async function nativeInvoke<T>(command: string, args?: Record<string, unknown>):
 }
 
 function useUserPreferences() {
-  const [preferences, setPreferences] = useState<UserPreferences>(DEFAULT_USER_PREFERENCES);
+  const [preferences, setPreferences] = useState<UserPreferences>(initialUserPreferences);
   const [preferencesError, setPreferencesError] = useState("");
   const saveChain = useRef<Promise<unknown>>(Promise.resolve());
+  const pendingPreferences = useRef<Partial<UserPreferences>>({});
+
+  function mergeStoredPreferences(current: UserPreferences, stored: Partial<UserPreferences> | null | undefined) {
+    const next = { ...DEFAULT_USER_PREFERENCES, ...(stored ?? {}) };
+    for (const key of Object.keys(pendingPreferences.current) as (keyof UserPreferences)[]) {
+      next[key] = current[key] as never;
+    }
+    return next;
+  }
 
   useEffect(() => {
     if (!isTauriDesktop()) {
@@ -346,7 +444,10 @@ function useUserPreferences() {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
     void listen<UserPreferences>("preferences-changed", (event) => {
-      if (!cancelled) setPreferences({ ...DEFAULT_USER_PREFERENCES, ...event.payload });
+      if (!cancelled) setPreferences((current) => {
+        const next = mergeStoredPreferences(current, event.payload);
+        return appearanceMatches(current, next) && JSON.stringify(current) === JSON.stringify(next) ? current : next;
+      });
     }).then((remove) => {
       if (cancelled) remove();
       else unlisten = remove;
@@ -354,7 +455,7 @@ function useUserPreferences() {
     void nativeInvoke<UserPreferences>("get_preferences")
       .then((stored) => {
         if (cancelled) return;
-        setPreferences({ ...DEFAULT_USER_PREFERENCES, ...(stored ?? {}) });
+        setPreferences((current) => mergeStoredPreferences(current, stored));
       })
       .catch((error) => {
         if (cancelled) return;
@@ -366,17 +467,56 @@ function useUserPreferences() {
     };
   }, []);
 
+  useEffect(() => {
+    const root = document.documentElement;
+    const systemTheme = typeof window.matchMedia === "function"
+      ? window.matchMedia("(prefers-color-scheme: dark)")
+      : null;
+    const applyAppearance = () => {
+      const resolvedTheme = preferences.themeMode === "system"
+        ? (systemTheme?.matches ? "dark" : "light")
+        : preferences.themeMode;
+      root.dataset.theme = resolvedTheme;
+      root.dataset.themeMode = preferences.themeMode;
+      root.style.setProperty("--source-font-size", `${preferences.sourceFontSize}px`);
+      root.style.setProperty("--translation-font-size", `${preferences.translationFontSize}px`);
+      root.style.colorScheme = resolvedTheme;
+      if (isTauriDesktop() && getCurrentWebviewWindow().label !== "selection-float") {
+        void nativeInvoke<void>("set_window_appearance", { dark: resolvedTheme === "dark" }).catch(() => undefined);
+      }
+      try {
+        window.localStorage.setItem("ai-translate-appearance", JSON.stringify({
+          themeMode: preferences.themeMode,
+          sourceFontSize: preferences.sourceFontSize,
+          translationFontSize: preferences.translationFontSize,
+        }));
+      } catch {
+        // WebView storage can be unavailable during shutdown; preferences are
+        // still persisted by the native settings store.
+      }
+    };
+    applyAppearance();
+    if (preferences.themeMode === "system") systemTheme?.addEventListener("change", applyAppearance);
+    return () => systemTheme?.removeEventListener("change", applyAppearance);
+  }, [preferences.themeMode, preferences.sourceFontSize, preferences.translationFontSize]);
+
   function updatePreference<K extends keyof UserPreferences>(preference: K, value: UserPreferences[K]) {
+    pendingPreferences.current[preference] = value;
     setPreferences((current) => ({ ...current, [preference]: value }));
     if (!isTauriDesktop()) return;
     saveChain.current = saveChain.current
       .catch(() => undefined)
       .then(() => nativeInvoke<UserPreferences>("set_user_preference", { preference, value }))
       .then((saved) => {
-        setPreferences((current) => ({ ...current, [preference]: saved ? saved[preference] : value }));
+        setPreferences((current) => {
+          if (current[preference] !== value) return current;
+          return { ...current, [preference]: saved ? saved[preference] : value };
+        });
+        if (pendingPreferences.current[preference] === value) delete pendingPreferences.current[preference];
         setPreferencesError("");
       })
       .catch((error) => {
+        if (pendingPreferences.current[preference] === value) delete pendingPreferences.current[preference];
         setPreferencesError(String(error));
       });
   }
@@ -385,9 +525,21 @@ function useUserPreferences() {
     autoSelection: preferences.autoSelection,
     keepOnTop: preferences.keepOnTop,
     quickTranslateProvider: preferences.quickTranslateProvider,
+    themeMode: preferences.themeMode,
+    sourceFontSize: preferences.sourceFontSize,
+    translationFontSize: preferences.translationFontSize,
+    proxyMode: preferences.proxyMode,
+    proxyUrl: preferences.proxyUrl,
+    providerOrder: preferences.providerOrder,
     setAutoSelection: (value: boolean) => updatePreference("autoSelection", value),
     setKeepOnTop: (value: boolean) => updatePreference("keepOnTop", value),
     setQuickTranslateProvider: (value: ProviderId | null) => updatePreference("quickTranslateProvider", value),
+    setThemeMode: (value: ThemeMode) => updatePreference("themeMode", value),
+    setSourceFontSize: (value: number) => updatePreference("sourceFontSize", value),
+    setTranslationFontSize: (value: number) => updatePreference("translationFontSize", value),
+    setProxyMode: (value: ProxyMode) => updatePreference("proxyMode", value),
+    setProxyUrl: (value: string) => updatePreference("proxyUrl", value),
+    setProviderOrder: (value: string[]) => updatePreference("providerOrder", value),
     preferencesError,
   };
 }
@@ -540,11 +692,11 @@ function AvailableModelsDialog({ provider, models, selectedModels, isLoading, fe
   </>;
 }
 
-function SettingsNavIcon({ name }: { name: "general" | "interface" | "providers" | "about" }) {
+function SettingsNavIcon({ name }: { name: "preferences" | "providers" | "proxy" | "about" }) {
   const paths = {
-    general: <><path d="M4 6h16M4 12h16M4 18h16" /><circle cx="9" cy="6" r="1.7" /><circle cx="15" cy="12" r="1.7" /><circle cx="11" cy="18" r="1.7" /></>,
-    interface: <><rect x="3.5" y="4" width="17" height="13" rx="2" /><path d="M8 21h8M12 17v4" /></>,
+    preferences: <><path d="M4 6h16M4 12h16M4 18h16" /><circle cx="9" cy="6" r="1.7" /><circle cx="15" cy="12" r="1.7" /><circle cx="11" cy="18" r="1.7" /></>,
     providers: <><rect x="4" y="4" width="7" height="7" rx="1.2" /><rect x="13" y="13" width="7" height="7" rx="1.2" /><path d="M11 7.5h2M16.5 11v2" /></>,
+    proxy: <><circle cx="6" cy="12" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="18" cy="18" r="2.5" /><path d="m8.3 10.9 7.4-3.8M8.3 13.1l7.4 3.8" /></>,
     about: <><circle cx="12" cy="12" r="8.5" /><path d="M12 10v6M12 7.5v.01" /></>,
   };
   return <svg className="settings-nav-icon" viewBox="0 0 24 24" aria-hidden="true">{paths[name]}</svg>;
@@ -567,7 +719,7 @@ function AboutIcon({ name }: { name: "intro" | "version" | "github" | "issues" |
 function MainWindow() {
   const [result, setResult] = useState<Translation | null>(null);
   const [text, setText] = useState("");
-  const { keepOnTop, quickTranslateProvider, setKeepOnTop, preferencesError } = useUserPreferences();
+  const { keepOnTop, quickTranslateProvider, providerOrder, setKeepOnTop, preferencesError } = useUserPreferences();
   const [hasApiKey, setHasApiKey] = useState(false);
   const [activeProviderId, setActiveProviderId] = useState<ProviderId>(DEFAULT_PROVIDER_ID);
   const [activeProviderModel, setActiveProviderModel] = useState(SETTINGS_PROVIDERS[0].model);
@@ -582,8 +734,10 @@ function MainWindow() {
   const latestRequestId = useRef(0);
   const latestTranslationAttempt = useRef(0);
   const titlebarDragRef = useRef<TitlebarDragState | null>(null);
+  const providerOrderRef = useRef(providerOrder);
   const activationGraceUntilRef = useRef(0);
   const focusLossTimerRef = useRef<number | null>(null);
+  providerOrderRef.current = providerOrder;
 
   useEffect(() => {
     if (!isTauriDesktop()) return;
@@ -661,19 +815,21 @@ function MainWindow() {
 
   function applyTranslationSnapshot(snapshot: Translation) {
     if (!acceptRequest(snapshot.requestId)) return;
-    const providerId = snapshot.results[0]?.providerId ?? DEFAULT_PROVIDER_ID;
+    const orderedSnapshot = { ...snapshot, results: orderProviderResults(snapshot.results, providerOrderRef.current) };
+    const providerId = orderedSnapshot.results[0]?.providerId ?? DEFAULT_PROVIDER_ID;
     setActiveProviderId(providerId);
-    if (snapshot.results[0]?.model) setActiveProviderModel(snapshot.results[0].model);
-    setResult(snapshot);
-    setExpandedProviderIds(snapshot.results.map(translationResultKey));
-    setLoading(translationIsPending(snapshot));
+    if (orderedSnapshot.results[0]?.model) setActiveProviderModel(orderedSnapshot.results[0].model);
+    setResult(orderedSnapshot);
+    setExpandedProviderIds(orderedSnapshot.results.map(translationResultKey));
+    setLoading(translationIsPending(orderedSnapshot));
     setNotice("");
     setShowQuickTranslate(false);
   }
 
   async function loadEnabledProviders(providerIds: ProviderId[]) {
-    setEnabledProviderIds(providerIds);
-    const entries = await Promise.all(providerIds.map(async (providerId) => {
+    const orderedIds = orderedProviderIds(providerOrderRef.current, providerIds);
+    setEnabledProviderIds(orderedIds);
+    const entries = await Promise.all(orderedIds.map(async (providerId) => {
       const config = await nativeInvoke<ProviderConfigResponse | null>("get_provider_config", { provider: providerId });
       return [providerId, config?.model] as const;
     }));
@@ -807,6 +963,11 @@ function MainWindow() {
     setQuickTranslateProviderId((current) => enabledProviderIds.includes(current) ? current : (enabledProviderIds[0] ?? current));
   }, [enabledProviderIds, quickTranslateProvider]);
 
+  useEffect(() => {
+    setEnabledProviderIds((current) => orderedProviderIds(providerOrder, current));
+    setResult((current) => current ? { ...current, results: orderProviderResults(current.results, providerOrder) } : current);
+  }, [providerOrder]);
+
   async function translate() {
     if (!text.trim() || quickTranslateChoices.length === 0) return;
     const attempt = latestTranslationAttempt.current + 1;
@@ -817,11 +978,12 @@ function MainWindow() {
     try {
       const translated = await nativeInvoke<Translation>("translate_text", { text, provider: quickTranslateProviderId });
       if (attempt !== latestTranslationAttempt.current || !acceptRequest(translated.requestId)) return;
-      const providerId = translated.results[0]?.providerId ?? activeProviderId;
+      const orderedTranslation = { ...translated, results: orderProviderResults(translated.results, providerOrder) };
+      const providerId = orderedTranslation.results[0]?.providerId ?? activeProviderId;
       setActiveProviderId(providerId);
-      if (translated.results[0]?.model) setActiveProviderModel(translated.results[0].model);
-      setExpandedProviderIds(translated.results.map(translationResultKey));
-      setResult(translated);
+      if (orderedTranslation.results[0]?.model) setActiveProviderModel(orderedTranslation.results[0].model);
+      setExpandedProviderIds(orderedTranslation.results.map(translationResultKey));
+      setResult(orderedTranslation);
       setShowQuickTranslate(false);
     } catch (error) {
       if (attempt === latestTranslationAttempt.current) setNotice(String(error));
@@ -928,10 +1090,17 @@ function SettingsWindow() {
   const [selectedSettingsProviderId, setSelectedSettingsProviderId] = useState<SettingsProviderId>("deepseek");
   const [providerDrafts, setProviderDrafts] = useState<Record<SettingsProviderId, ProviderDraft>>(createProviderDrafts);
   const [connectionState, setConnectionState] = useState<ConnectionState>({ providerId: null, status: "idle", message: "" });
-  const { autoSelection, keepOnTop, quickTranslateProvider, setAutoSelection, setKeepOnTop, setQuickTranslateProvider, preferencesError } = useUserPreferences();
+  const {
+    autoSelection, keepOnTop, quickTranslateProvider,
+    themeMode, sourceFontSize, translationFontSize, proxyMode, proxyUrl, providerOrder,
+    setAutoSelection, setKeepOnTop, setQuickTranslateProvider,
+    setThemeMode, setSourceFontSize, setTranslationFontSize, setProxyMode, setProxyUrl, setProviderOrder,
+    preferencesError,
+  } = useUserPreferences();
   const [notice, setNotice] = useState("");
   const [showApiKey, setShowApiKey] = useState(false);
   const [providerSearch, setProviderSearch] = useState("");
+  const [providerOrderPreview, setProviderOrderPreview] = useState<ProviderId[] | null>(null);
   const [providerContextMenu, setProviderContextMenu] = useState<{ providerId: GenericProviderId; x: number; y: number } | null>(null);
   const [deletingProviderId, setDeletingProviderId] = useState<GenericProviderId | null>(null);
   const [enabledProviderIds, setEnabledProviderIds] = useState<SettingsProviderId[]>([]);
@@ -956,6 +1125,7 @@ function SettingsWindow() {
   const testModelDialogCloseRef = useRef<HTMLButtonElement>(null);
   const providerContextMenuRef = useRef<HTMLDivElement>(null);
   const providerContextMenuActionRef = useRef<HTMLButtonElement>(null);
+  const providerOrderPreviewRef = useRef<ProviderId[] | null>(null);
   providerDraftsRef.current = providerDrafts;
 
   useEffect(() => {
@@ -1062,9 +1232,11 @@ function SettingsWindow() {
     const customName = provider.id === "openai" ? providerDrafts.openai.vendorName.trim() : "";
     return customName ? withCustomProviderIdentity(provider, customName) : provider;
   };
-  const providerCollection = settingsPage === "connection"
-    ? [...SETTINGS_PROVIDERS, ...GENERIC_PROVIDERS.filter((provider) => addedGenericProviders.includes(provider.id as GenericProviderId))].map(providerWithCustomName)
-    : [...SETTINGS_PROVIDERS, ...GENERIC_PROVIDERS.filter((provider) => addedGenericProviders.includes(provider.id as GenericProviderId))].map(providerWithCustomName);
+  const providerCollection = orderProviders(
+    [...SETTINGS_PROVIDERS, ...GENERIC_PROVIDERS.filter((provider) => addedGenericProviders.includes(provider.id as GenericProviderId))]
+      .map(providerWithCustomName),
+    providerOrderPreview ?? providerOrder,
+  );
   const selectedSettingsProvider = providerCollection.find((provider) => provider.id === selectedSettingsProviderId)
     ?? providerWithCustomName(SETTINGS_PROVIDERS[0]);
   const selectedDraft = providerDrafts[selectedSettingsProvider.id];
@@ -1078,6 +1250,38 @@ function SettingsWindow() {
   });
   const isProviderPage = settingsPage === "providers" || settingsPage === "generic" || settingsPage === "connection";
   const activeNavPage = isProviderPage ? "providers" : settingsPage;
+  const reorder = useLongPressReorder<ProviderId>({
+    items: providerCollection.map((provider) => provider.id),
+    disabled: Boolean(providerSearch.trim()),
+    getItemLabel: (providerId) => providerCollection.find((provider) => provider.id === providerId)?.vendor ?? providerId,
+    onReorderStart: () => {
+      const current = providerCollection.map((provider) => provider.id);
+      providerOrderPreviewRef.current = current;
+      setProviderOrderPreview(current);
+      setProviderContextMenu(null);
+    },
+    onReorder: ({ fromIndex, toIndex }) => {
+      const current = providerOrderPreviewRef.current ?? providerCollection.map((provider) => provider.id);
+      const next = [...current];
+      const [moved] = next.splice(fromIndex, 1);
+      if (!moved) return;
+      next.splice(toIndex, 0, moved);
+      providerOrderPreviewRef.current = next;
+      setProviderOrderPreview(next);
+    },
+    onReorderEnd: () => {
+      const orderedVisible = providerOrderPreviewRef.current;
+      providerOrderPreviewRef.current = null;
+      setProviderOrderPreview(null);
+      if (!orderedVisible) return;
+      const visibleIds = new Set<string>(orderedVisible);
+      setProviderOrder([...orderedVisible, ...providerOrder.filter((providerId) => !visibleIds.has(providerId))]);
+    },
+    onReorderCancel: () => {
+      providerOrderPreviewRef.current = null;
+      setProviderOrderPreview(null);
+    },
+  });
 
   useEffect(() => {
     if (!isTauriDesktop()) return;
@@ -1508,7 +1712,7 @@ function SettingsWindow() {
       <section className="settings-form-card provider-config-card">
         <div className="settings-field-group">
           <div className="settings-label-row"><label className="field-label" htmlFor="provider-api-key">API Key</label><button className="inline-test" type="button" onClick={() => void testConnection()} disabled={connectionState.status === "testing"}><span aria-hidden="true">♡</span>{connectionState.status === "testing" ? "测试中" : "测试连接"}</button></div>
-          <div className="api-key-input-wrap"><input id="provider-api-key" aria-label="API Key" value={selectedDraft.apiKey} onChange={(event) => updateSelectedDraft("apiKey", event.target.value)} type={showApiKey ? "text" : "password"} placeholder={selectedDraft.saved ? "已保存，留空以保留当前 Key" : "需要鉴权时填写 API Key"} /><button type="button" className="api-key-toggle" onClick={() => setShowApiKey((visible) => !visible)} aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"} title={showApiKey ? "隐藏 API Key" : "显示 API Key"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-5.5 9.5-5.5 9.5 5.5 9.5 5.5-3.4 5.5-9.5 5.5S2.5 12 2.5 12Z" /><circle cx="12" cy="12" r="2.5" /></svg></button></div>
+          <div className="api-key-input-wrap"><input id="provider-api-key" aria-label="API Key" value={selectedDraft.apiKey} onChange={(event) => updateSelectedDraft("apiKey", event.target.value)} type={showApiKey ? "text" : "password"} placeholder={selectedDraft.saved ? "已保存，留空以保留当前 Key" : ""} /><button type="button" className="api-key-toggle" onClick={() => setShowApiKey((visible) => !visible)} aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"} title={showApiKey ? "隐藏 API Key" : "显示 API Key"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-5.5 9.5-5.5 9.5 5.5 9.5 5.5-3.4 5.5-9.5 5.5S2.5 12 2.5 12Z" /><circle cx="12" cy="12" r="2.5" /></svg></button></div>
           {connectionState.providerId === selectedSettingsProvider.id && connectionState.status !== "idle" && <span className={`connection-inline-result connection-field-result ${connectionState.status}`} role="status" title={connectionState.message}>{connectionState.message}</span>}
         </div>
         <div className="settings-field-group"><label className="field-label" htmlFor="provider-base-url">API 地址</label><input id="provider-base-url" value={selectedDraft.baseUrl} onChange={(event) => updateSelectedDraft("baseUrl", event.target.value)} spellCheck={false} placeholder="填写服务地址或完整的 /chat/completions 地址" /></div>
@@ -1534,16 +1738,32 @@ function SettingsWindow() {
     return <div className="settings-page-view"><div className="settings-page-heading"><div><p className="settings-page-eyebrow">连通性</p><h1>连接测试</h1></div><span className="settings-page-meta">实时请求</span></div><p className="settings-description">选择一个已配置的接口，发送最小测试请求，确认地址、密钥和模型都可用。</p><div className="connection-selector-card"><label className="field-label" htmlFor="connection-provider">测试接口</label><select id="connection-provider" value={selectedSettingsProvider.id} onChange={(event) => selectSettingsProvider(event.target.value as SettingsProviderId)}><optgroup label="AI 提供商">{SETTINGS_PROVIDERS.map((provider) => <option value={provider.id} key={provider.id}>{provider.vendor} · {provider.model}</option>)}</optgroup><optgroup label="通用接口">{GENERIC_PROVIDERS.map((provider) => <option value={provider.id} key={provider.id}>{provider.vendor} · {provider.model}</option>)}</optgroup></select><div className="connection-summary"><ProviderIcon provider={selectedSettingsProvider} /><div><strong>{selectedSettingsProvider.vendor}</strong><span>{selectedDraft.baseUrl}</span><span>{selectedDraft.model}</span></div></div>{connectionState.providerId === selectedSettingsProvider.id && connectionState.status !== "idle" && <p className={`connection-result ${connectionState.status}`} role="status">{connectionState.message}</p>}<button className="primary connection-test-button" onClick={() => void testConnection()} disabled={connectionState.status === "testing"}>{connectionState.status === "testing" ? "正在测试…" : "开始测试连接"}</button></div><div className="connection-note"><span className="note-mark">i</span><p>测试只发送一条最小请求，不会触发翻译，也不会保存明文 API Key。</p></div></div>;
   }
 
-  function renderCommonPage() {
+  function renderPreferencesPage() {
     const defaultModelChoices = enabledProviderIds.map((providerId) => {
       const provider = AVAILABLE_TRANSLATION_PROVIDERS.find((item) => item.id === providerId);
       return provider ? { providerId, model: settingsEnabledProviderModels[providerId] ?? provider.model } : null;
     }).filter((choice): choice is ModelChoice => choice !== null);
-    return <div className="settings-page-view"><div className="settings-page-heading"><div><p className="settings-page-eyebrow">偏好</p><h1>通用设置</h1></div></div><p className="settings-description">管理应用的基础行为与默认工作方式。</p><section className="default-quick-model-card"><div className="default-quick-model-copy"><span className="default-quick-model-mark" aria-hidden="true"><QuickTranslateIcon /></span><div><strong>默认快速翻译模型</strong><small>打开快速翻译时优先选择此模型，仍可在翻译窗口中临时切换。</small></div></div><ModelPicker value={quickTranslateProvider} choices={defaultModelChoices} onChange={setQuickTranslateProvider} ariaLabel="设置默认快速翻译模型" disabled={!defaultModelChoices.length} />{!defaultModelChoices.length && <p className="default-quick-model-empty">请先在“供应商”页面启用至少一个翻译模型。</p>}</section><section className="placeholder-settings-card"><div className="placeholder-setting-row"><div><strong>启动时自动运行</strong><small>随 Windows 启动 AI Translate</small></div><span className="placeholder-badge">即将支持</span></div><div className="placeholder-setting-row"><div><strong>默认目标语言</strong><small>自动识别并翻译为指定语言</small></div><span className="placeholder-value">自动识别</span></div><div className="placeholder-setting-row"><div><strong>配置同步</strong><small>在设备之间同步供应商配置</small></div><span className="placeholder-badge">即将支持</span></div></section></div>;
+    return <div className="settings-page-view preferences-settings-page"><div className="settings-page-heading"><div><p className="settings-page-eyebrow">外观与行为</p><h1>偏好设置</h1></div></div><p className="settings-description">集中管理默认模型、颜色模式、翻译文字大小和窗口交互方式。</p>
+      <section className="default-quick-model-card"><div className="default-quick-model-copy"><span className="default-quick-model-mark" aria-hidden="true"><QuickTranslateIcon /></span><div><strong>默认快速翻译模型</strong><small>打开快速翻译时优先选择此模型，仍可在翻译窗口中临时切换。</small></div></div><ModelPicker value={quickTranslateProvider} choices={defaultModelChoices} onChange={setQuickTranslateProvider} ariaLabel="设置默认快速翻译模型" disabled={!defaultModelChoices.length} />{!defaultModelChoices.length && <p className="default-quick-model-empty">请先在“供应商”页面启用至少一个翻译模型。</p>}</section>
+      <section className="interface-settings-card">
+      <div className="appearance-setting-row"><div><strong>颜色模式</strong><small>“跟随系统”会在 Windows 外观变化时自动切换</small></div><SegmentedControl ariaLabel="颜色模式" value={themeMode} options={[{ value: "light", label: "浅色" }, { value: "dark", label: "深色" }, { value: "system", label: "跟随系统" }]} onChange={(value) => setThemeMode(value as ThemeMode)} /></div>
+      <div className="font-size-setting-row"><div><strong>原文字号</strong><small>翻译结果中原文的显示大小</small></div><label><span>{sourceFontSize}px</span><input aria-label="原文字号" type="range" min="12" max="24" step="1" value={sourceFontSize} onChange={(event) => setSourceFontSize(Number(event.target.value))} /></label></div>
+      <div className="font-size-setting-row"><div><strong>译文字号</strong><small>翻译结果中译文的显示大小</small></div><label><span>{translationFontSize}px</span><input aria-label="译文字号" type="range" min="12" max="28" step="1" value={translationFontSize} onChange={(event) => setTranslationFontSize(Number(event.target.value))} /></label></div>
+      <label className="preference-row"><span><strong>选中文本自动显示悬浮按钮</strong><small>鼠标完成选区后显示翻译入口</small></span><input type="checkbox" checked={autoSelection} onChange={(event) => setAutoSelection(event.target.checked)} /></label>
+      <label className="preference-row"><span><strong>翻译窗口保持置顶</strong><small>结果窗口不会被其他窗口遮挡</small></span><input type="checkbox" checked={keepOnTop} onChange={(event) => setKeepOnTop(event.target.checked)} /></label>
+      </section>
+      <section className="placeholder-settings-card preferences-secondary-card"><div className="placeholder-setting-row"><div><strong>启动时自动运行</strong><small>随 Windows 启动 AI Translate</small></div><span className="placeholder-badge">即将支持</span></div><div className="placeholder-setting-row"><div><strong>默认目标语言</strong><small>自动识别并翻译为指定语言</small></div><span className="placeholder-value">自动识别</span></div><div className="placeholder-setting-row"><div><strong>配置同步</strong><small>在设备之间同步供应商配置</small></div><span className="placeholder-badge">即将支持</span></div></section>
+    </div>;
   }
 
-  function renderInterfacePage() {
-    return <div className="settings-page-view"><div className="settings-page-heading"><div><p className="settings-page-eyebrow">外观与交互</p><h1>界面设置</h1></div></div><p className="settings-description">调整悬浮按钮和翻译结果窗口的显示方式。</p><section className="interface-settings-card"><label className="preference-row"><span><strong>选中文本自动显示悬浮按钮</strong><small>鼠标完成选区后显示翻译入口</small></span><input type="checkbox" checked={autoSelection} onChange={(event) => setAutoSelection(event.target.checked)} /></label><label className="preference-row"><span><strong>翻译窗口保持置顶</strong><small>结果窗口不会被其他窗口遮挡</small></span><input type="checkbox" checked={keepOnTop} onChange={(event) => setKeepOnTop(event.target.checked)} /></label><div className="placeholder-setting-row"><div><strong>主题与字体</strong><small>主题切换和字体大小设置</small></div><span className="placeholder-badge">即将支持</span></div></section></div>;
+  function renderProxyPage() {
+    return <div className="settings-page-view proxy-settings-page"><div className="settings-page-heading"><div><p className="settings-page-eyebrow">网络连接</p><h1>网络代理</h1></div></div><p className="settings-description">为翻译、模型获取和连接测试统一设置代理。修改后会立即用于下一次网络请求。</p>
+      <section className="proxy-settings-card">
+        <div className="proxy-mode-heading"><div><strong>代理模式</strong><small>系统代理适合已在 Windows 中配置的代理软件</small></div><SegmentedControl ariaLabel="代理模式" value={proxyMode} options={[{ value: "system", label: "跟随系统" }, { value: "custom", label: "自定义" }, { value: "disabled", label: "不使用代理" }]} onChange={(value) => setProxyMode(value as ProxyMode)} /></div>
+        <label className={`proxy-url-field${proxyMode === "custom" ? " is-active" : ""}`}><span><strong>代理地址</strong><small>支持 HTTP、HTTPS 与 SOCKS 代理</small></span><input aria-label="代理地址" value={proxyUrl} disabled={proxyMode !== "custom"} onChange={(event) => setProxyUrl(event.target.value)} placeholder="例如 http://127.0.0.1:7890" spellCheck={false} /></label>
+        <div className="proxy-note"><span aria-hidden="true">i</span><p>{proxyMode === "system" ? "将读取 Windows 系统代理及 HTTP_PROXY、HTTPS_PROXY、ALL_PROXY 环境变量。" : proxyMode === "custom" ? "本机地址会保持直连；其他模型请求通过此代理发送。" : "所有模型请求均直接连接，不读取系统或环境变量代理。"}</p></div>
+      </section>
+    </div>;
   }
 
   function renderAboutPage() {
@@ -1604,41 +1824,54 @@ function SettingsWindow() {
   function renderProviderColumn() {
     return <aside className="settings-provider-column">
       <div className="provider-search"><SearchIcon /><input aria-label="搜索供应商或分组" value={providerSearch} onChange={(event) => setProviderSearch(event.target.value)} placeholder="搜索供应商或分组" /></div>
-      <div className="provider-list-heading"><span>可用接口</span><strong>{filteredProviders.length}</strong></div>
-      <nav className="provider-list-nav" aria-label="供应商列表">{filteredProviders.map((provider) => {
+      <div className="provider-list-heading"><span>可用接口</span><strong>{filteredProviders.length}</strong><small>{providerSearch.trim() ? "清除搜索后可排序" : "按住手柄拖动排序"}</small></div>
+      <nav className="provider-list-nav" aria-label="供应商列表">{filteredProviders.map((provider, index) => {
         const enabled = enabledProviderIds.includes(provider.id);
         const isCustom = addedGenericProviders.includes(provider.id as GenericProviderId);
-        return <button
-          type="button"
-          className={`provider-list-item ${provider.id === selectedSettingsProvider.id ? "is-selected" : ""}`}
+        const isDragging = reorder.state.activeId === provider.id && (reorder.state.phase === "dragging" || reorder.state.phase === "keyboard");
+        const isOver = reorder.state.overId === provider.id && reorder.state.activeId !== provider.id;
+        return <div
+          className={`provider-list-row${isDragging ? " is-dragging" : ""}${isOver ? " is-over" : ""}`}
+          data-long-press-reorder-item={provider.id}
           key={provider.id}
-          onClick={() => selectSettingsProvider(provider.id)}
-          onContextMenu={(event) => {
-            if (!isCustom) {
-              setProviderContextMenu(null);
-              return;
-            }
-            event.preventDefault();
-            showProviderContextMenu(provider.id, event.clientX, event.clientY);
-          }}
-          onKeyDown={(event) => {
-            if (!isCustom || !(event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) return;
-            event.preventDefault();
-            const rect = event.currentTarget.getBoundingClientRect();
-            showProviderContextMenu(provider.id, rect.left + 28, rect.bottom - 4);
-          }}
-          aria-haspopup={isCustom ? "menu" : undefined}
-          aria-expanded={isCustom ? providerContextMenu?.providerId === provider.id : undefined}
-        ><ProviderIcon provider={provider} /><span className="provider-list-copy"><strong>{provider.vendor}</strong></span><span className={`provider-list-status-dot ${enabled ? "is-enabled" : ""}`} aria-hidden="true" /><span className="sr-only">{enabled ? "已启用" : "未启用"}</span></button>;
+        ><button
+            type="button"
+            className={`provider-list-item ${provider.id === selectedSettingsProvider.id ? "is-selected" : ""}`}
+            onClick={() => selectSettingsProvider(provider.id)}
+            onContextMenu={(event) => {
+              if (!isCustom) {
+                setProviderContextMenu(null);
+                return;
+              }
+              event.preventDefault();
+              showProviderContextMenu(provider.id, event.clientX, event.clientY);
+            }}
+            onKeyDown={(event) => {
+              if (!isCustom || !(event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) return;
+              event.preventDefault();
+              const rect = event.currentTarget.getBoundingClientRect();
+              showProviderContextMenu(provider.id, rect.left + 28, rect.bottom - 4);
+            }}
+            aria-haspopup={isCustom ? "menu" : undefined}
+            aria-expanded={isCustom ? providerContextMenu?.providerId === provider.id : undefined}
+          ><ProviderIcon provider={provider} /><span className="provider-list-copy"><strong>{provider.vendor}</strong></span><span className={`provider-list-status-dot ${enabled ? "is-enabled" : ""}`} aria-hidden="true" /><span className="sr-only">{enabled ? "已启用" : "未启用"}</span></button><button
+            type="button"
+            className="provider-reorder-handle"
+            aria-label={`调整第 ${index + 1} 个供应商的顺序`}
+            title={`按住后拖动 ${provider.vendor}`}
+            {...reorder.getItemProps<HTMLButtonElement>(provider.id)}
+          ><svg viewBox="0 0 12 18" aria-hidden="true"><circle cx="3" cy="4" r="1" /><circle cx="9" cy="4" r="1" /><circle cx="3" cy="9" r="1" /><circle cx="9" cy="9" r="1" /><circle cx="3" cy="14" r="1" /><circle cx="9" cy="14" r="1" /></svg></button></div>;
       })}</nav>
+      <span className="sr-only" role="status" {...reorder.liveRegionProps} />
       <div className="provider-column-footer"><button type="button" className="provider-add-button" onClick={() => openAddProvider()}>＋ 添加自定义供应商</button></div>
     </aside>;
   }
 
-  return <main className="app-shell settings-window-shell"><section className={`settings-shell settings-shell-${isProviderPage ? "providers" : "single"}`}><div className="settings-topbar" onMouseDown={dragWindow}><div className="settings-brand settings-brand-top"><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong></div></div><div className="settings-window-actions"><button type="button" className="settings-window-button settings-minimize-button" onClick={() => void nativeInvoke<void>("minimize_window").catch(() => undefined)} aria-label="最小化" title="最小化"><Icon name="minimize" /></button><button type="button" className="settings-close-button" onClick={() => void nativeInvoke("hide_settings_window")} aria-label="关闭设置" title="关闭设置"><Icon name="close" /></button></div></div><aside className="settings-nav-panel"><div className="settings-brand" onMouseDown={dragWindow}><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong><small>设置中心</small></div></div><nav className="settings-primary-nav" aria-label="设置分类"><button type="button" className={activeNavPage === "general" ? "is-active" : ""} onClick={() => switchSettingsPage("general")}><SettingsNavIcon name="general" />通用设置</button><button type="button" className={activeNavPage === "interface" ? "is-active" : ""} onClick={() => switchSettingsPage("interface")}><SettingsNavIcon name="interface" />界面设置</button><button type="button" className={activeNavPage === "providers" ? "is-active" : ""} onClick={() => switchSettingsPage("providers")}><SettingsNavIcon name="providers" />供应商</button><button type="button" className={activeNavPage === "about" ? "is-active" : ""} onClick={() => switchSettingsPage("about")}><SettingsNavIcon name="about" />关于</button></nav></aside>{isProviderPage && renderProviderColumn()}<section className="settings-main">{settingsPage === "connection" ? renderConnectionPage() : settingsPage === "general" ? renderCommonPage() : settingsPage === "interface" ? renderInterfacePage() : settingsPage === "about" ? renderAboutPage() : renderProviderDetails()}{notice && !isProviderPage && <p className="notice" role="status">{notice}</p>}</section>{renderModelDialog()}{renderProviderContextMenu()}</section></main>;
+  return <main className="app-shell settings-window-shell"><section className={`settings-shell settings-shell-${isProviderPage ? "providers" : "single"}`}><div className="settings-topbar" onMouseDown={dragWindow}><div className="settings-brand settings-brand-top"><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong></div></div><div className="settings-window-actions"><button type="button" className="settings-window-button settings-minimize-button" onClick={() => void nativeInvoke<void>("minimize_window").catch(() => undefined)} aria-label="最小化" title="最小化"><Icon name="minimize" /></button><button type="button" className="settings-close-button" onClick={() => void nativeInvoke("hide_settings_window")} aria-label="关闭设置" title="关闭设置"><Icon name="close" /></button></div></div><aside className="settings-nav-panel"><div className="settings-brand" onMouseDown={dragWindow}><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong><small>设置中心</small></div></div><nav className="settings-primary-nav" aria-label="设置分类"><button type="button" className={activeNavPage === "preferences" ? "is-active" : ""} onClick={() => switchSettingsPage("preferences")}><SettingsNavIcon name="preferences" />偏好设置</button><button type="button" className={activeNavPage === "providers" ? "is-active" : ""} onClick={() => switchSettingsPage("providers")}><SettingsNavIcon name="providers" />供应商</button><button type="button" className={activeNavPage === "proxy" ? "is-active" : ""} onClick={() => switchSettingsPage("proxy")}><SettingsNavIcon name="proxy" />网络代理</button><button type="button" className={activeNavPage === "about" ? "is-active" : ""} onClick={() => switchSettingsPage("about")}><SettingsNavIcon name="about" />关于</button></nav></aside>{isProviderPage && renderProviderColumn()}<section className="settings-main">{settingsPage === "connection" ? renderConnectionPage() : settingsPage === "preferences" ? renderPreferencesPage() : settingsPage === "proxy" ? renderProxyPage() : settingsPage === "about" ? renderAboutPage() : renderProviderDetails()}{notice && !isProviderPage && <p className="notice" role="status">{notice}</p>}</section>{renderModelDialog()}{renderProviderContextMenu()}</section></main>;
 }
 
 function AddProviderWindow() {
+  useUserPreferences();
   const [providerDrafts, setProviderDrafts] = useState<Record<SettingsProviderId, ProviderDraft>>(() => {
     const drafts = createProviderDrafts();
     return { ...drafts, openai: { ...drafts.openai, vendorName: "" } };

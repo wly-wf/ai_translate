@@ -7,20 +7,17 @@ const nativeInvoke = invoke;
 
 export function SelectionFloat() {
   const [translating, setTranslating] = useState(false);
-  const [visible, setVisible] = useState(false);
   const [appearanceCycle, setAppearanceCycle] = useState(0);
 
   useEffect(() => {
     const showListener = listen<{ generation: number }>("selection-float:show", () => {
       setTranslating(false);
-      setVisible(true);
       // Remount the animated layer for every selection, including when the
       // native window is already visible and only moves to a new anchor.
       setAppearanceCycle((cycle) => cycle + 1);
     });
     const hideListener = listen("selection-float:hide", () => {
       setTranslating(false);
-      setVisible(false);
     });
 
     return () => {
@@ -41,7 +38,7 @@ export function SelectionFloat() {
   return (
     <button
       key={appearanceCycle}
-      className={`selection-float-button${visible ? " is-visible" : ""}`}
+      className="selection-float-button is-visible"
       type="button"
       aria-label="翻译选中文本"
       disabled={translating}
