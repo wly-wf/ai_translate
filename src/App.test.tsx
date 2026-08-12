@@ -169,6 +169,7 @@ describe("App", () => {
     expect(invokeMock).toHaveBeenCalledWith("minimize_window", undefined);
     const apiKeyInput = screen.getByLabelText("API Key");
     expect(apiKeyInput).toHaveAttribute("type", "password");
+    expect(screen.queryByText("API Key（可选）")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "显示 API Key" }));
     expect(apiKeyInput).toHaveAttribute("type", "text");
     expect(screen.queryByLabelText("模型名称")).not.toBeInTheDocument();
@@ -212,6 +213,11 @@ describe("App", () => {
     expect(screen.queryByRole("button", { name: "返回设置" })).not.toBeInTheDocument();
     expect(screen.queryByText("AI Translate")).not.toBeInTheDocument();
     expect(screen.getByText("OpenAI 兼容接口")).toBeInTheDocument();
+    expect(screen.getByLabelText("供应商名称")).toHaveValue("");
+    expect(screen.getByLabelText("供应商名称")).toHaveAttribute("placeholder", "供应商名称");
+    expect(screen.getByLabelText("API Key")).toBeRequired();
+    expect(screen.getByLabelText("API Key")).toHaveAttribute("placeholder", "");
+    expect(screen.queryByText("API Key（可选）")).not.toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "Google" })).not.toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "Claude" })).not.toBeInTheDocument();
     expect(screen.queryByText("Use Responses API")).not.toBeInTheDocument();
@@ -232,9 +238,14 @@ describe("App", () => {
     });
     render(<App />);
 
+    fireEvent.change(screen.getByLabelText("供应商名称"), { target: { value: "modelscope" } });
+    fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "modelscope-key" } });
+    expect(document.querySelector(".add-provider-model-row .provider-mark")).toHaveTextContent("m");
+    expect(document.querySelector(".add-provider-model-row .provider-mark")).toHaveStyle({ backgroundColor: "#5f83bd" });
+
     fireEvent.click(screen.getByRole("button", { name: "获取模型" }));
 
-    const dialog = await screen.findByRole("dialog", { name: "OpenAI 兼容接口 可用模型" });
+    const dialog = await screen.findByRole("dialog", { name: "modelscope 可用模型" });
     expect(within(dialog).queryByRole("combobox")).not.toBeInTheDocument();
     fireEvent.click(await within(dialog).findByRole("button", { name: "添加模型 agnes-2.0-flash" }));
     fireEvent.click(within(dialog).getByRole("button", { name: "添加模型 agnes-2.5-pro" }));
@@ -245,12 +256,25 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "添加接口" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("save_provider_config", {
       provider: "openai",
-      vendorName: "OpenAI 兼容接口",
-      apiKey: "",
+      vendorName: "modelscope",
+      apiKey: "modelscope-key",
       baseUrl: "https://api.openai.com",
       model: "agnes-2.0-flash",
       models: ["agnes-2.0-flash", "agnes-2.5-pro"],
     }));
+  });
+
+  it("requires a provider name and API Key before adding a custom provider", async () => {
+    mockWindowLabel("add-provider");
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "添加接口" }));
+    expect(screen.getByRole("status")).toHaveTextContent("请填写供应商名称。");
+
+    fireEvent.change(screen.getByLabelText("供应商名称"), { target: { value: "modelscope" } });
+    fireEvent.click(screen.getByRole("button", { name: "添加接口" }));
+    expect(screen.getByRole("status")).toHaveTextContent("请填写 API Key。");
+    expect(invokeMock).not.toHaveBeenCalledWith("save_provider_config", expect.anything());
   });
 
   it("uses green and gray dots for enabled provider status", async () => {
@@ -295,6 +319,34 @@ describe("App", () => {
     });
     expect(screen.queryByText(/与其他启用模型同时返回结果/)).not.toBeInTheDocument();
     expect(screen.queryByText(/已加入翻译/)).not.toBeInTheDocument();
+  });
+
+  it("automatically saves valid provider edits without a save button or success notice", async () => {
+    mockWindowLabel("settings");
+    invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_enabled_providers") return Promise.resolve(["deepseek"]);
+      if (command === "get_provider_config" && args?.provider === "deepseek") {
+        return Promise.resolve({ apiKey: "saved-key", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash", models: ["deepseek-v4-flash"] });
+      }
+      if (command === "get_provider_config") return Promise.resolve(null);
+      return Promise.resolve(undefined);
+    });
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByLabelText("API 地址")).toHaveValue("https://api.deepseek.com"));
+    expect(screen.queryByRole("button", { name: "保存配置" })).not.toBeInTheDocument();
+    invokeMock.mockClear();
+    fireEvent.change(screen.getByLabelText("API 地址"), { target: { value: "https://api.deepseek.example.com" } });
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("save_provider_config", {
+      provider: "deepseek",
+      apiKey: "saved-key",
+      baseUrl: "https://api.deepseek.example.com",
+      model: "deepseek-v4-flash",
+      models: ["deepseek-v4-flash"],
+    }), { timeout: 2000 });
+    expect(screen.getByLabelText("API 地址")).toHaveValue("https://api.deepseek.example.com");
+    expect(screen.queryByText("保存成功")).not.toBeInTheDocument();
   });
 
   it("shows a red delete menu only for user-added providers and removes their configuration", async () => {
@@ -391,7 +443,7 @@ describe("App", () => {
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "DeepSeek 可用模型" })).not.toBeInTheDocument());
   });
 
-  it("shows model fetch errors beside the fetch button", async () => {
+  it("shows a concise model fetch error beside the fetch button", async () => {
     mockWindowLabel("settings");
     invokeMock.mockImplementation((command: string) => {
       if (command === "get_enabled_providers") return Promise.resolve([]);
@@ -404,13 +456,15 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: /阿里云百炼/ }));
     fireEvent.click(screen.getByRole("button", { name: "获取" }));
 
-    await waitFor(() => expect(container.querySelector(".model-fetch-message")).toHaveTextContent("请先保存 阿里云百炼 的 API Key。"));
+    await waitFor(() => expect(container.querySelector(".model-fetch-message")).toHaveTextContent("获取模型列表失败"));
     const message = container.querySelector<HTMLElement>(".model-fetch-message");
     const fetchButton = screen.getByRole("button", { name: "获取" });
     expect(message).toHaveClass("model-fetch-message");
-    expect(message).toHaveTextContent("请先保存 阿里云百炼 的 API Key。");
+    expect(message).toHaveTextContent("获取模型列表失败");
     expect(message?.closest(".model-toolbar")).not.toBeNull();
     expect(message && (message.compareDocumentPosition(fetchButton) & Node.DOCUMENT_POSITION_FOLLOWING)).toBeTruthy();
+    const dialog = screen.getByRole("dialog", { name: "阿里云百炼 可用模型" });
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("请先保存 阿里云百炼 的 API Key。");
   });
 
   it("shows connection latency beside the test button", async () => {

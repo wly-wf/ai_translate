@@ -220,7 +220,6 @@ textarea:focus, input:focus { outline: 2px solid rgba(242, 117, 50, .28); outlin
 .model-row-actions { display: flex; align-items: center; gap: 8px; }
 .model-row-actions button { min-width: 32px; min-height: 32px; padding: 2px 6px; color: #4b535b; background: transparent; border: 0; border-radius: 8px; font-size: 23px; line-height: 1; }
 .model-row-actions button:hover { background: #f1f3f5; }
-.provider-detail-footer { display: flex; align-items: flex-end; justify-content: flex-end; gap: 24px; margin-top: 30px; padding-top: 22px; border-top: 1px solid #eef0f2; }
 .settings-form-help { max-width: 560px; color: #8b949c; font-size: 13px; line-height: 1.6; }
 .settings-actions { flex: 0 0 auto; margin-top: 0; }
 .settings-actions .secondary { margin-left: 7px; }
@@ -497,8 +496,7 @@ textarea:focus, input:focus { outline: 2px solid rgba(242, 117, 50, .28); outlin
 .model-dialog-error > span { color: #b16a36; background: #fff3e8; font-size: 18px; font-weight: 800; }
 .model-dialog-error > button { min-height: 34px; margin-top: 16px; padding: 0 14px; color: #456f99; background: #eef4fa; border: 1px solid #dce7f1; border-radius: 9px; font-size: 11px; font-weight: 750; }
 .model-dialog-error > button:hover { background: #e5eff8; }
-.model-dialog-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 18px; background: #fff; border-top: 1px solid #e5ebf0; }
-.model-dialog-footer p { max-width: 280px; margin: 0; color: #8c98a3; font-size: 10px; line-height: 1.45; }
+.model-dialog-footer { display: flex; align-items: center; justify-content: flex-end; gap: 16px; padding: 14px 18px; background: #fff; border-top: 1px solid #e5ebf0; }
 .model-dialog-footer button { min-width: 72px; min-height: 35px; padding: 0 14px; color: #fff; background: var(--accent); border: 0; border-radius: 9px; font-size: 11px; font-weight: 750; }
 .model-dialog-footer button:hover { background: var(--accent-deep); }
 .model-dialog-footer button:focus-visible { outline: 2px solid rgba(73, 110, 169, .38); outline-offset: 2px; }
@@ -508,10 +506,6 @@ textarea:focus, input:focus { outline: 2px solid rgba(242, 117, 50, .28); outlin
 @media (prefers-reduced-motion: reduce) { .model-dialog-backdrop, .model-dialog-spinner { animation: none; } .model-dialog-card { animation: none; transform: translate(-50%, -50%); } .model-dialog-action { transition: none; } }
 .model-remove-button { min-width: 28px; min-height: 28px; color: #7b8792; background: transparent; border: 0; border-radius: 7px; font-size: 22px; }
 .model-remove-button:hover { color: #b14f42; background: #fff1ef; }
-.provider-detail-footer { display: flex; align-items: center; justify-content: flex-end; gap: 18px; margin-top: 20px; padding-top: 18px; border-top: 1px solid #e8edf1; }
-.provider-save-notice { min-width: 0; max-width: 240px; flex: 0 1 auto; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.provider-detail-footer .settings-form-help { max-width: 480px; color: #8b97a1; font-size: 12px; line-height: 1.55; }
-.provider-detail-footer .settings-actions { margin-top: 0; }
 .test-model-dialog-card { width: min(430px, calc(100vw - 48px)); height: auto; max-height: min(540px, calc(100vh - 48px)); overflow: visible; }
 .test-model-dialog-content { overflow: visible; padding: 16px 20px 18px; }
 .test-model-select-field { display: grid; gap: 7px; }
@@ -631,6 +625,7 @@ textarea:focus, input:focus { outline: 2px solid rgba(242, 117, 50, .28); outlin
 .add-provider-field { display: grid; gap: 6px; }
 .add-provider-field label { color: #536273; font-size: 12px; font-weight: 650; }
 .add-provider-field input { width: 100%; min-height: 48px; margin: 0; padding: 0 14px; color: #303c49; background: #fff; border: 1px solid #e1e3e5; border-radius: 11px; font-size: 14px; transition: border-color .16s ease, box-shadow .16s ease; }
+.add-provider-field input::placeholder { color: #a6afb9; opacity: 1; }
 .add-provider-field input[readonly] { color: #74808c; background: #f6f7f7; }
 .add-provider-field input:focus { outline: 0; border-color: #91add0; box-shadow: 0 0 0 3px rgba(78, 127, 176, .13); }
 .add-provider-field .api-key-input-wrap input { padding-right: 50px; }

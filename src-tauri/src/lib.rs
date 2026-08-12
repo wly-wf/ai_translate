@@ -38,6 +38,7 @@ const USER_PREFERENCES_VERSION: u8 = 1;
 const FLOAT_BUTTON_SIZE: i32 = 28;
 const FLOAT_SIZE: i32 = FLOAT_BUTTON_SIZE + 4;
 pub(crate) const FLOAT_PADDING: i32 = (FLOAT_SIZE - FLOAT_BUTTON_SIZE) / 2;
+const FLOAT_ANCHOR_GAP: i32 = 6;
 const TRANSLATION_WINDOW_WIDTH: f64 = 480.0;
 const TRANSLATION_WINDOW_HEIGHT: f64 = 660.0;
 pub(crate) const FLOAT_CORNER_RADIUS: i32 = 10;
@@ -150,10 +151,18 @@ mod selection_float_tests {
     }
 
     #[test]
+    fn float_position_uses_the_upper_right_of_the_selection_anchor() {
+        assert_eq!(
+            clamp_float_position(Anchor { x: 100, y: 100 }, 0, 0, 500, 500),
+            Anchor { x: 104, y: 64 },
+        );
+    }
+
+    #[test]
     fn float_position_stays_inside_the_monitor_work_area() {
         assert_eq!(
             clamp_float_position(Anchor { x: 188, y: 4 }, 0, 0, 200, 100),
-            Anchor { x: 168, y: 8 },
+            Anchor { x: 168, y: 0 },
         );
     }
 
@@ -361,10 +370,13 @@ mod selection_float_tests {
     }
 
     #[test]
-    fn local_providers_can_run_without_an_api_key() {
-        assert!(!api_key_required("http://localhost:11434/v1"));
-        assert!(!api_key_required("http://127.0.0.1:1234/v1"));
-        assert!(api_key_required("https://api.example.com/v1"));
+    fn empty_api_keys_create_anonymous_requests() {
+        let endpoint = "https://api.example.com/v1/models";
+        let request = authenticated_request(Client::new().get(endpoint), "openai", "", endpoint)
+            .build()
+            .unwrap();
+        assert!(request.headers().get(reqwest::header::AUTHORIZATION).is_none());
+        assert!(request.headers().get("api-key").is_none());
     }
 
     #[test]
@@ -550,13 +562,14 @@ fn clamp_float_position(
     Anchor {
         x: anchor
             .x
-            .saturating_add(6)
+            .saturating_add(FLOAT_ANCHOR_GAP)
             .saturating_sub(FLOAT_PADDING)
             .clamp(work_x, max_x),
         y: anchor
             .y
-            .saturating_add(6)
-            .saturating_sub(FLOAT_PADDING)
+            .saturating_sub(FLOAT_ANCHOR_GAP)
+            .saturating_sub(FLOAT_SIZE)
+            .saturating_add(FLOAT_PADDING)
             .clamp(work_y, max_y),
     }
 }
@@ -979,10 +992,10 @@ fn stored_provider_config(provider: &str) -> Result<StoredProviderConfig, String
     serde_json::from_str(&password).map_err(|error| format!("无法读取 {provider} 配置：{error}"))
 }
 
-fn provider_api_key(provider: &str, api_key: &str) -> Result<String, String> {
+fn provider_api_key(provider: &str, api_key: &str) -> String {
     let value = api_key.trim();
     if !value.is_empty() {
-        return Ok(value.to_string());
+        return value.to_string();
     }
     stored_provider_config(provider).map(|config| config.api_key).or_else(|error| {
         if provider == "deepseek" {
@@ -990,7 +1003,7 @@ fn provider_api_key(provider: &str, api_key: &str) -> Result<String, String> {
         } else {
             Err(error)
         }
-    })
+    }).unwrap_or_default()
 }
 
 fn legacy_api_key() -> Result<String, String> {
@@ -1065,9 +1078,6 @@ fn configured_provider(provider: &str) -> Result<StoredProviderConfig, String> {
         }
         Err(error) => return Err(error),
     };
-    if config.api_key.trim().is_empty() && api_key_required(&config.base_url) {
-        return Err(format!("{provider} API Key 不能为空。"));
-    }
     if config.base_url.trim().is_empty() {
         return Err(format!("{provider} Base URL 不能为空。"));
     }
@@ -1181,16 +1191,6 @@ fn api_endpoint(base_url: &str, endpoint: &str) -> Result<String, String> {
     }
     url.set_path(&format!("{root}/{endpoint}"));
     Ok(url.to_string())
-}
-
-fn is_loopback_url(base_url: &str) -> bool {
-    reqwest::Url::parse(base_url.trim()).ok().is_some_and(|url| {
-        matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"))
-    })
-}
-
-fn api_key_required(base_url: &str) -> bool {
-    !is_loopback_url(base_url)
 }
 
 fn normalize_provider_base_url(provider: &str, base_url: &str) -> String {
@@ -1409,6 +1409,9 @@ async fn fetch_models(
 
     let status = response.status();
     if !status.is_success() {
+        if matches!(status.as_u16(), 401 | 403) {
+            return Err(format!("获取模型列表失败（{status}）：接口需要 API Key，请填写后重试。"));
+        }
         let detail = response.text().await.unwrap_or_default().chars().take(400).collect::<String>();
         return Err(format!("获取模型列表失败（{status}）：{detail}"));
     }
@@ -1647,22 +1650,7 @@ fn save_provider_config_sync(
         return Err("Base URL 不能为空，并且至少需要配置一个模型。".to_string());
     }
     validate_base_url(&base_url)?;
-    let key = if api_key.trim().is_empty() && !api_key_required(&base_url) {
-        String::new()
-    } else if api_key.trim().is_empty() {
-        stored_provider_config(&provider).map(|config| config.api_key).or_else(|error| {
-            if provider == "deepseek" {
-                legacy_api_key()
-            } else {
-                Err(error)
-            }
-        })?
-    } else {
-        api_key.trim().to_string()
-    };
-    if key.is_empty() && api_key_required(&base_url) {
-        return Err("API Key 不能为空。".to_string());
-    }
+    let key = provider_api_key(&provider, &api_key);
     let config = StoredProviderConfig {
         vendor_name: vendor_name.unwrap_or_default().trim().to_string(),
         api_key: key.clone(),
@@ -1790,7 +1778,7 @@ async fn test_provider_connection(
     if !supported_provider(&provider) {
         return Err(format!("不支持的 AI 提供商：{provider}"));
     }
-    let key = provider_api_key(&provider, &api_key)?;
+    let key = provider_api_key(&provider, &api_key);
     let started = Instant::now();
     send_connection_test(&provider, &key, &base_url, &model).await?;
     Ok(ConnectionTestResult {
@@ -1808,7 +1796,7 @@ async fn fetch_provider_models(
     if !supported_provider(&provider) {
         return Err(format!("不支持的 AI 提供商：{provider}"));
     }
-    let key = provider_api_key(&provider, &api_key)?;
+    let key = provider_api_key(&provider, &api_key);
     fetch_models(&provider, &key, &base_url).await
 }
 

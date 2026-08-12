@@ -163,7 +163,7 @@ const GENERIC_PROVIDERS: SettingsProvider[] = [
     model: "gpt-4o-mini",
     baseUrl: "https://api.openai.com",
     mark: "O",
-    accent: "#111827",
+    accent: "#5f83bd",
     summary: "标准 OpenAI Chat Completions 兼容接口。",
   },
 ];
@@ -187,6 +187,20 @@ function uniqueModels(models: string[]) {
     if (normalized && !result.includes(normalized)) result.push(normalized);
     return result;
   }, []);
+}
+
+function customProviderMark(name: string, fallback = "供") {
+  return Array.from(name.trim())[0]?.toLocaleLowerCase() || fallback;
+}
+
+function withCustomProviderIdentity(provider: SettingsProvider, name: string) {
+  const vendor = name.trim();
+  return {
+    ...provider,
+    vendor: vendor || provider.vendor,
+    mark: customProviderMark(vendor),
+    accent: "#5f83bd",
+  };
 }
 
 function modelsFromConfig(config: Pick<ProviderConfigResponse, "model" | "models">) {
@@ -521,7 +535,7 @@ function AvailableModelsDialog({ provider, models, selectedModels, isLoading, fe
             </div>
             : <div className="model-dialog-empty"><span aria-hidden="true"><ModelRefreshIcon /></span><strong>没有获取到可用模型</strong><p>请检查接口地址或稍后重新获取。</p></div>}
 
-      <footer className="model-dialog-footer"><p>{isLoading ? "模型列表将在获取完成后自动显示。" : "可添加多个模型；使用＋添加、使用−移除，保存配置后生效。"}</p><button type="button" onClick={onClose}>{isLoading ? "隐藏" : "完成"}</button></footer>
+      <footer className="model-dialog-footer"><button type="button" onClick={onClose}>{isLoading ? "隐藏" : "完成"}</button></footer>
     </div>
   </>;
 }
@@ -927,21 +941,32 @@ function SettingsWindow() {
   const [fetchingProviderId, setFetchingProviderId] = useState<SettingsProviderId | null>(null);
   const [modelDialogProviderId, setModelDialogProviderId] = useState<SettingsProviderId | null>(null);
   const [modelFetchMessage, setModelFetchMessage] = useState<{ providerId: SettingsProviderId | null; message: string }>({ providerId: null, message: "" });
+  const [modelFetchDetail, setModelFetchDetail] = useState<{ providerId: SettingsProviderId | null; message: string }>({ providerId: null, message: "" });
   const [manualModelProviderIds, setManualModelProviderIds] = useState<SettingsProviderId[]>([]);
   const [testModels, setTestModels] = useState<Partial<Record<SettingsProviderId, string>>>({});
   const [testModelDialogProviderId, setTestModelDialogProviderId] = useState<SettingsProviderId | null>(null);
   const [testModelDialogSelection, setTestModelDialogSelection] = useState("");
   const connectionRequestId = useRef(0);
   const modelFetchRequestId = useRef(0);
+  const providerAutoSaveTimers = useRef<Partial<Record<SettingsProviderId, number>>>({});
+  const providerAutoSaveRequestIds = useRef<Partial<Record<SettingsProviderId, number>>>({});
+  const providerDraftsRef = useRef(providerDrafts);
   const modelFetchButtonRef = useRef<HTMLButtonElement>(null);
   const modelDialogCloseRef = useRef<HTMLButtonElement>(null);
   const testModelDialogCloseRef = useRef<HTMLButtonElement>(null);
   const providerContextMenuRef = useRef<HTMLDivElement>(null);
   const providerContextMenuActionRef = useRef<HTMLButtonElement>(null);
+  providerDraftsRef.current = providerDrafts;
 
   useEffect(() => {
     if (preferencesError) setNotice(preferencesError);
   }, [preferencesError]);
+
+  useEffect(() => () => {
+    Object.values(providerAutoSaveTimers.current).forEach((timer) => {
+      if (timer !== undefined) window.clearTimeout(timer);
+    });
+  }, []);
 
   useEffect(() => {
     if (!modelDialogProviderId) return;
@@ -1035,7 +1060,7 @@ function SettingsWindow() {
 
   const providerWithCustomName = (provider: SettingsProvider) => {
     const customName = provider.id === "openai" ? providerDrafts.openai.vendorName.trim() : "";
-    return customName ? { ...provider, vendor: customName } : provider;
+    return customName ? withCustomProviderIdentity(provider, customName) : provider;
   };
   const providerCollection = settingsPage === "connection"
     ? [...SETTINGS_PROVIDERS, ...GENERIC_PROVIDERS.filter((provider) => addedGenericProviders.includes(provider.id as GenericProviderId))].map(providerWithCustomName)
@@ -1156,6 +1181,7 @@ function SettingsWindow() {
     }
     setConnectionState({ providerId: null, status: "idle", message: "" });
     setModelFetchMessage({ providerId: null, message: "" });
+    setModelFetchDetail({ providerId: null, message: "" });
     setShowApiKey(false);
     setNotice("");
   }
@@ -1184,6 +1210,7 @@ function SettingsWindow() {
 
   async function deleteCustomProvider(providerId: GenericProviderId) {
     const providerName = providerCollection.find((provider) => provider.id === providerId)?.vendor ?? "自定义供应商";
+    cancelProviderAutoSave(providerId);
     setDeletingProviderId(providerId);
     setNotice("");
     try {
@@ -1220,20 +1247,20 @@ function SettingsWindow() {
   }
 
   function toggleFetchedModel(providerId: SettingsProviderId, model: string) {
-    setProviderDrafts((drafts) => {
-      const draft = drafts[providerId];
-      const models = draft.models.includes(model)
-        ? draft.models.filter((item) => item !== model)
-        : [...draft.models, model];
-      return { ...drafts, [providerId]: { ...draft, model: models[0] ?? "", models } };
-    });
+    const draft = providerDraftsRef.current[providerId];
+    const models = draft.models.includes(model)
+      ? draft.models.filter((item) => item !== model)
+      : [...draft.models, model];
+    const nextDraft = { ...draft, model: models[0] ?? "", models };
+    updateProviderDraft(providerId, nextDraft);
+    scheduleProviderAutoSave(providerId, nextDraft);
   }
 
   function updateSelectedDraft<K extends keyof ProviderDraft>(field: K, value: ProviderDraft[K]) {
-    setProviderDrafts((drafts) => ({
-      ...drafts,
-      [selectedSettingsProviderId]: { ...drafts[selectedSettingsProviderId], [field]: value },
-    }));
+    const providerId = selectedSettingsProviderId;
+    const nextDraft = { ...providerDraftsRef.current[providerId], [field]: value };
+    updateProviderDraft(providerId, nextDraft);
+    scheduleProviderAutoSave(providerId, nextDraft);
   }
 
   function addManualModel() {
@@ -1247,19 +1274,21 @@ function SettingsWindow() {
   }
 
   function updateSelectedModel(index: number, value: string) {
-    setProviderDrafts((drafts) => {
-      const draft = drafts[selectedSettingsProviderId];
-      const models = draft.models.map((model, modelIndex) => modelIndex === index ? value : model);
-      return { ...drafts, [selectedSettingsProviderId]: { ...draft, model: models[0] ?? "", models } };
-    });
+    const providerId = selectedSettingsProviderId;
+    const draft = providerDraftsRef.current[providerId];
+    const models = draft.models.map((model, modelIndex) => modelIndex === index ? value : model);
+    const nextDraft = { ...draft, model: models[0] ?? "", models };
+    updateProviderDraft(providerId, nextDraft);
+    scheduleProviderAutoSave(providerId, nextDraft);
   }
 
   function removeSelectedModel(index: number) {
-    setProviderDrafts((drafts) => {
-      const draft = drafts[selectedSettingsProviderId];
-      const models = draft.models.filter((_, modelIndex) => modelIndex !== index);
-      return { ...drafts, [selectedSettingsProviderId]: { ...draft, model: models[0] ?? "", models } };
-    });
+    const providerId = selectedSettingsProviderId;
+    const draft = providerDraftsRef.current[providerId];
+    const models = draft.models.filter((_, modelIndex) => modelIndex !== index);
+    const nextDraft = { ...draft, model: models[0] ?? "", models };
+    updateProviderDraft(providerId, nextDraft);
+    scheduleProviderAutoSave(providerId, nextDraft);
   }
 
   function providerConfigPayload(provider: SettingsProvider, draft: ProviderDraft, models: string[]) {
@@ -1268,24 +1297,48 @@ function SettingsWindow() {
     return payload;
   }
 
-  async function saveProviderConfig() {
-    const provider = selectedSettingsProvider;
-    const draft = providerDrafts[provider.id];
+  function updateProviderDraft(providerId: SettingsProviderId, draft: ProviderDraft) {
+    providerDraftsRef.current = { ...providerDraftsRef.current, [providerId]: draft };
+    setProviderDrafts((drafts) => ({ ...drafts, [providerId]: draft }));
+  }
+
+  function scheduleProviderAutoSave(providerId: SettingsProviderId, draft: ProviderDraft) {
+    const pendingTimer = providerAutoSaveTimers.current[providerId];
+    if (pendingTimer !== undefined) window.clearTimeout(pendingTimer);
     const models = uniqueModels(draft.models);
     if (!draft.baseUrl.trim() || !models.length) {
-      setNotice("请填写完整的 Base URL，并至少添加一个模型。");
+      delete providerAutoSaveTimers.current[providerId];
       return;
     }
+    providerAutoSaveTimers.current[providerId] = window.setTimeout(() => {
+      delete providerAutoSaveTimers.current[providerId];
+      void persistProviderDraft(providerId, draft, models);
+    }, 500);
+  }
+
+  function cancelProviderAutoSave(providerId: SettingsProviderId) {
+    const pendingTimer = providerAutoSaveTimers.current[providerId];
+    if (pendingTimer !== undefined) window.clearTimeout(pendingTimer);
+    delete providerAutoSaveTimers.current[providerId];
+  }
+
+  async function persistProviderDraft(providerId: SettingsProviderId, draft: ProviderDraft, models: string[]) {
+    const provider = ALL_SETTINGS_PROVIDERS.find((item) => item.id === providerId);
+    if (!provider) return;
+    const requestId = (providerAutoSaveRequestIds.current[providerId] ?? 0) + 1;
+    providerAutoSaveRequestIds.current[providerId] = requestId;
     try {
       await nativeInvoke("save_provider_config", providerConfigPayload(provider, draft, models));
-      const savedConfig = await nativeInvoke<ProviderConfigResponse | null>("get_provider_config", { provider: provider.id });
+      if (providerAutoSaveRequestIds.current[providerId] !== requestId) return;
       setProviderDrafts((drafts) => ({
         ...drafts,
-        [provider.id]: savedConfig ? draftFromConfig(savedConfig, provider.vendor) : { ...draft, model: models[0], models, saved: true },
+        [providerId]: { ...drafts[providerId], saved: true },
       }));
-      setNotice("保存成功");
+      if (enabledProviderIds.includes(providerId)) {
+        setSettingsEnabledProviderModels((current) => ({ ...current, [providerId]: models[0] }));
+      }
     } catch (error) {
-      setNotice(String(error));
+      if (providerAutoSaveRequestIds.current[providerId] === requestId) setNotice(String(error));
     }
   }
 
@@ -1295,10 +1348,11 @@ function SettingsWindow() {
     try {
       if (enabled) {
         const models = uniqueModels(draft.models);
-        if ((!draft.saved && !draft.apiKey.trim()) || !draft.baseUrl.trim() || !models.length) {
-          setNotice("请先填写 API Key、URL，并至少添加一个模型。");
+        if (!draft.baseUrl.trim() || !models.length) {
+          setNotice("请先填写 API 地址，并至少添加一个模型。");
           return;
         }
+        cancelProviderAutoSave(provider.id);
         await nativeInvoke("save_provider_config", providerConfigPayload(provider, draft, models));
         setProviderDrafts((drafts) => ({ ...drafts, [provider.id]: { ...drafts[provider.id], model: models[0], models, saved: true } }));
       }
@@ -1380,6 +1434,7 @@ function SettingsWindow() {
     setModelDialogProviderId(provider.id);
     setFetchingProviderId(provider.id);
     setModelFetchMessage({ providerId: provider.id, message: "" });
+    setModelFetchDetail({ providerId: provider.id, message: "" });
     try {
       const models = await nativeInvoke<string[]>("fetch_provider_models", {
         provider: provider.id,
@@ -1389,10 +1444,11 @@ function SettingsWindow() {
       if (requestId !== modelFetchRequestId.current) return;
       setFetchedModels((current) => ({ ...current, [provider.id]: models }));
       setModelFetchMessage({ providerId: provider.id, message: "" });
+      setModelFetchDetail({ providerId: provider.id, message: "" });
     } catch (error) {
       if (requestId !== modelFetchRequestId.current) return;
-      const message = String(error).replace(provider.id, provider.vendor);
-      setModelFetchMessage({ providerId: provider.id, message });
+      setModelFetchMessage({ providerId: provider.id, message: "获取模型列表失败" });
+      setModelFetchDetail({ providerId: provider.id, message: String(error).replace(provider.id, provider.vendor) });
     } finally {
       if (requestId === modelFetchRequestId.current) setFetchingProviderId(null);
     }
@@ -1405,7 +1461,7 @@ function SettingsWindow() {
     const models = fetchedModels[provider.id] ?? [];
     const selectedModels = providerDrafts[provider.id]?.models ?? [];
     const isLoading = fetchingProviderId === provider.id;
-    const fetchError = modelFetchMessage.providerId === provider.id ? modelFetchMessage.message : "";
+    const fetchError = modelFetchDetail.providerId === provider.id ? modelFetchDetail.message : "";
 
     return <AvailableModelsDialog
       provider={provider}
@@ -1452,7 +1508,7 @@ function SettingsWindow() {
       <section className="settings-form-card provider-config-card">
         <div className="settings-field-group">
           <div className="settings-label-row"><label className="field-label" htmlFor="provider-api-key">API Key</label><button className="inline-test" type="button" onClick={() => void testConnection()} disabled={connectionState.status === "testing"}><span aria-hidden="true">♡</span>{connectionState.status === "testing" ? "测试中" : "测试连接"}</button></div>
-          <div className="api-key-input-wrap"><input id="provider-api-key" value={selectedDraft.apiKey} onChange={(event) => updateSelectedDraft("apiKey", event.target.value)} type={showApiKey ? "text" : "password"} placeholder={selectedDraft.saved ? "已保存，留空以保留当前 Key" : "粘贴 API Key"} /><button type="button" className="api-key-toggle" onClick={() => setShowApiKey((visible) => !visible)} aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"} title={showApiKey ? "隐藏 API Key" : "显示 API Key"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-5.5 9.5-5.5 9.5 5.5 9.5 5.5-3.4 5.5-9.5 5.5S2.5 12 2.5 12Z" /><circle cx="12" cy="12" r="2.5" /></svg></button></div>
+          <div className="api-key-input-wrap"><input id="provider-api-key" aria-label="API Key" value={selectedDraft.apiKey} onChange={(event) => updateSelectedDraft("apiKey", event.target.value)} type={showApiKey ? "text" : "password"} placeholder={selectedDraft.saved ? "已保存，留空以保留当前 Key" : "需要鉴权时填写 API Key"} /><button type="button" className="api-key-toggle" onClick={() => setShowApiKey((visible) => !visible)} aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"} title={showApiKey ? "隐藏 API Key" : "显示 API Key"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-5.5 9.5-5.5 9.5 5.5 9.5 5.5-3.4 5.5-9.5 5.5S2.5 12 2.5 12Z" /><circle cx="12" cy="12" r="2.5" /></svg></button></div>
           {connectionState.providerId === selectedSettingsProvider.id && connectionState.status !== "idle" && <span className={`connection-inline-result connection-field-result ${connectionState.status}`} role="status" title={connectionState.message}>{connectionState.message}</span>}
         </div>
         <div className="settings-field-group"><label className="field-label" htmlFor="provider-base-url">API 地址</label><input id="provider-base-url" value={selectedDraft.baseUrl} onChange={(event) => updateSelectedDraft("baseUrl", event.target.value)} spellCheck={false} placeholder="填写服务地址或完整的 /chat/completions 地址" /></div>
@@ -1471,7 +1527,6 @@ function SettingsWindow() {
           </div>}
         </div>
       </section>
-      <div className="provider-detail-footer">{notice && <p className="notice provider-save-notice" role="status">{notice}</p>}<div className="action-row settings-actions"><button className="primary" onClick={() => void saveProviderConfig()}>保存配置</button></div></div>
     </div>;
   }
 
@@ -1584,7 +1639,10 @@ function SettingsWindow() {
 }
 
 function AddProviderWindow() {
-  const [providerDrafts, setProviderDrafts] = useState<Record<SettingsProviderId, ProviderDraft>>(createProviderDrafts);
+  const [providerDrafts, setProviderDrafts] = useState<Record<SettingsProviderId, ProviderDraft>>(() => {
+    const drafts = createProviderDrafts();
+    return { ...drafts, openai: { ...drafts.openai, vendorName: "" } };
+  });
   const [showApiKey, setShowApiKey] = useState(false);
   const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState(false);
@@ -1596,7 +1654,7 @@ function AddProviderWindow() {
   const modelFetchButtonRef = useRef<HTMLButtonElement>(null);
   const provider = GENERIC_PROVIDERS[0];
   const draft = providerDrafts.openai;
-  const dialogProvider = { ...provider, vendor: draft.vendorName.trim() || provider.vendor };
+  const dialogProvider = withCustomProviderIdentity(provider, draft.vendorName);
 
   useEffect(() => {
     if (!modelDialogOpen) return;
@@ -1678,6 +1736,14 @@ function AddProviderWindow() {
 
   async function addProvider() {
     const configuredModels = uniqueModels(draft.models.length ? draft.models : [draft.model]);
+    if (!draft.vendorName.trim()) {
+      setNotice("请填写供应商名称。");
+      return;
+    }
+    if (!draft.apiKey.trim()) {
+      setNotice("请填写 API Key。");
+      return;
+    }
     if (!draft.baseUrl.trim() || !configuredModels.length) {
       setNotice("请填写 Base URL 和模型名称。");
       return;
@@ -1704,8 +1770,8 @@ function AddProviderWindow() {
       <div className="add-provider-scroll">
         <div className="add-provider-protocol"><strong>OpenAI 兼容接口</strong><small>适用于支持 Chat Completions 协议的模型服务</small></div>
         <div className="add-provider-form">
-          <div className="add-provider-field"><label htmlFor="add-provider-name">供应商名称</label><input id="add-provider-name" value={draft.vendorName} onChange={(event) => updateDraft("vendorName", event.target.value)} placeholder="例如 Ollama、硅基流动" /></div>
-          <div className="add-provider-field"><label htmlFor="add-provider-api-key">API Key（本机服务可留空）</label><div className="api-key-input-wrap"><input id="add-provider-api-key" value={draft.apiKey} onChange={(event) => updateDraft("apiKey", event.target.value)} type={showApiKey ? "text" : "password"} autoComplete="off" /><button type="button" className="api-key-toggle" onClick={() => setShowApiKey((visible) => !visible)} aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"} title={showApiKey ? "隐藏 API Key" : "显示 API Key"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-5.5 9.5-5.5 9.5 5.5 9.5 5.5-3.4 5.5-9.5 5.5S2.5 12 2.5 12Z" /><circle cx="12" cy="12" r="2.5" /></svg></button></div></div>
+          <div className="add-provider-field"><label htmlFor="add-provider-name">供应商名称</label><input id="add-provider-name" value={draft.vendorName} onChange={(event) => updateDraft("vendorName", event.target.value)} placeholder="供应商名称" required /></div>
+          <div className="add-provider-field"><label htmlFor="add-provider-api-key">API Key</label><div className="api-key-input-wrap"><input id="add-provider-api-key" value={draft.apiKey} onChange={(event) => updateDraft("apiKey", event.target.value)} type={showApiKey ? "text" : "password"} autoComplete="off" placeholder="" required /><button type="button" className="api-key-toggle" onClick={() => setShowApiKey((visible) => !visible)} aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"} title={showApiKey ? "隐藏 API Key" : "显示 API Key"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-5.5 9.5-5.5 9.5 5.5 9.5 5.5-3.4 5.5-9.5 5.5S2.5 12 2.5 12Z" /><circle cx="12" cy="12" r="2.5" /></svg></button></div></div>
           <div className="add-provider-field"><label htmlFor="add-provider-base-url">API 地址</label><input id="add-provider-base-url" value={draft.baseUrl} onChange={(event) => updateDraft("baseUrl", event.target.value)} spellCheck={false} placeholder="填写服务地址或完整的 /chat/completions 地址" /></div>
           <div className="add-provider-field"><div className="add-provider-model-label"><label htmlFor="add-provider-model">模型名称</label><button ref={modelFetchButtonRef} type="button" className="add-provider-fetch" onClick={() => void fetchModels()} disabled={fetchingModels || !draft.baseUrl.trim()} aria-busy={fetchingModels}>{fetchingModels ? "获取中…" : "获取模型"}</button></div><div className="add-provider-model-list">{(draft.models.length ? draft.models : [draft.model]).map((model, index) => <div className="add-provider-model-row" key={index}><ProviderIcon provider={dialogProvider} /><input id={index === 0 ? "add-provider-model" : undefined} aria-label={index === 0 ? undefined : `模型名称 ${index + 1}`} value={model} onChange={(event) => updateModel(index, event.target.value)} spellCheck={false} placeholder={index === 0 ? "可手动输入，也可点击获取模型" : undefined} />{draft.models.length > 0 && <button type="button" onClick={() => removeModel(index)} aria-label={model ? `移除模型 ${model}` : "移除模型"} title="移除模型">−</button>}</div>)}</div></div>
         </div>
