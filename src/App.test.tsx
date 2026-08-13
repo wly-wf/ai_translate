@@ -40,7 +40,10 @@ function deferred<T>() {
 }
 
 describe("App", () => {
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
 
   beforeEach(() => {
     mockWindowLabel("main");
@@ -309,7 +312,7 @@ describe("App", () => {
     expect(screen.queryByText("未配置")).not.toBeInTheDocument();
   });
 
-  it("persists provider reordering from the accessible long-press handle", async () => {
+  it("persists provider reordering directly from the provider row", async () => {
     mockWindowLabel("settings");
     invokeMock.mockImplementation((command: string) => {
       if (command === "get_enabled_providers") return Promise.resolve(["deepseek", "xiaomi"]);
@@ -320,10 +323,13 @@ describe("App", () => {
     });
     render(<App />);
 
-    const handle = await screen.findByRole("button", { name: "调整第 1 个供应商的顺序" });
-    fireEvent.keyDown(handle, { key: " " });
-    fireEvent.keyDown(handle, { key: "ArrowDown" });
-    fireEvent.keyDown(handle, { key: "Enter" });
+    const providerList = screen.getByRole("navigation", { name: "供应商列表" });
+    const deepSeekRow = await within(providerList).findByRole("button", { name: /DeepSeek/ });
+    expect(screen.queryByText("按住手柄拖动排序")).not.toBeInTheDocument();
+    expect(document.querySelector(".provider-reorder-handle")).not.toBeInTheDocument();
+    fireEvent.keyDown(deepSeekRow, { key: " " });
+    fireEvent.keyDown(deepSeekRow, { key: "ArrowDown" });
+    fireEvent.keyDown(deepSeekRow, { key: "Enter" });
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_user_preference", {
       preference: "providerOrder",
@@ -674,6 +680,9 @@ describe("App", () => {
     render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: "偏好设置" }));
+    expect(screen.queryByText("“跟随系统”会在 Windows 外观变化时自动切换")).not.toBeInTheDocument();
+    expect(screen.queryByText("翻译结果中原文的显示大小")).not.toBeInTheDocument();
+    expect(screen.queryByText("鼠标完成选区后显示翻译入口")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("radio", { name: "深色" }));
     fireEvent.change(screen.getByLabelText("原文字号"), { target: { value: "18" } });
     fireEvent.change(screen.getByLabelText("译文字号"), { target: { value: "20" } });
@@ -682,6 +691,51 @@ describe("App", () => {
     expect(document.documentElement.style.getPropertyValue("--source-font-size")).toBe("18px");
     expect(document.documentElement.style.getPropertyValue("--translation-font-size")).toBe("20px");
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_user_preference", { preference: "translationFontSize", value: 20 }));
+  });
+
+  it("keeps system color mode synchronized with operating-system changes", async () => {
+    mockWindowLabel("settings");
+    let systemDark = false;
+    let themeListener: ((event: MediaQueryListEvent) => void) | undefined;
+    const mediaQuery = {
+      get matches() { return systemDark; },
+      media: "(prefers-color-scheme: dark)",
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn((_type: string, listener: (event: MediaQueryListEvent) => void) => {
+        themeListener = listener;
+      }),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(() => true),
+    } as unknown as MediaQueryList;
+    vi.stubGlobal("matchMedia", vi.fn(() => mediaQuery));
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_enabled_providers") return Promise.resolve([]);
+      if (command === "get_preferences") return Promise.resolve({
+        themeMode: "system",
+        sourceFontSize: 14,
+        translationFontSize: 16,
+      });
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(document.documentElement).toHaveAttribute("data-theme", "light"));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_window_appearance", {
+      dark: false,
+      followSystem: true,
+    }));
+
+    systemDark = true;
+    act(() => themeListener?.({ matches: true } as MediaQueryListEvent));
+
+    expect(document.documentElement).toHaveAttribute("data-theme", "dark");
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_window_appearance", {
+      dark: true,
+      followSystem: true,
+    }));
   });
 
   it("configures a custom network proxy from its own settings page", async () => {
@@ -794,10 +848,36 @@ describe("App", () => {
     });
     const { container } = render(<App />);
 
-    await waitFor(() => expect(container.querySelectorAll(".provider-card")).toHaveLength(2));
-    expect(Array.from(container.querySelectorAll(".provider-heading strong")).map((node) => node.textContent)).toEqual([
+    await waitFor(() => expect(
+      Array.from(container.querySelectorAll(".provider-heading strong")).map((node) => node.textContent),
+    ).toEqual([
       "mimo-v2.5-pro/Xiaomi MiMo", "deepseek-v4-flash/DeepSeek",
-    ]);
+    ]));
+  });
+
+  it("renders a custom provider name beside its model in the translation window", async () => {
+    invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_enabled_providers") return Promise.resolve(["openai"]);
+      if (command === "get_provider_config" && args?.provider === "openai") {
+        return Promise.resolve({
+          vendorName: "Agnes",
+          apiKey: "saved",
+          baseUrl: "https://example.com/v1",
+          model: "agnes-2.5-flash",
+          models: ["agnes-2.5-flash"],
+        });
+      }
+      if (command === "get_latest_translation") return Promise.resolve({
+        source: "hello",
+        requestId: 19,
+        results: [{ providerId: "openai", model: "agnes-2.5-flash", translation: "你好" }],
+      });
+      return Promise.resolve(undefined);
+    });
+    render(<App />);
+
+    expect(await screen.findByText("agnes-2.5-flash/Agnes")).toBeInTheDocument();
+    expect(screen.queryByText("agnes-2.5-flash/OpenAI 兼容接口")).not.toBeInTheDocument();
   });
 
   it("preserves captured source line breaks instead of merging them into a paragraph", async () => {

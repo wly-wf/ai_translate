@@ -26,8 +26,8 @@ function Harness({ onReorder = () => {}, onStart, onEnd, onCancel, onItemClick }
     onReorderEnd: onEnd,
     onReorderCancel: onCancel,
     getItemLabel: (itemId) => `项目 ${itemId}`,
-    longPressMs: 350,
-    movementTolerance: 5,
+    longPressMs: 180,
+    movementTolerance: 10,
   });
 
   return (
@@ -86,7 +86,7 @@ describe("useLongPressReorder", () => {
     });
     expect(screen.getByTestId("phase").textContent).toBe("pressing");
 
-    act(() => vi.advanceTimersByTime(349));
+    act(() => vi.advanceTimersByTime(179));
     expect(onStart).not.toHaveBeenCalled();
     act(() => vi.advanceTimersByTime(1));
     expect(onStart).toHaveBeenCalledWith({ activeId: "alpha", input: "pointer" });
@@ -101,10 +101,9 @@ describe("useLongPressReorder", () => {
     });
   });
 
-  it("cancels a pending press after early movement and preserves the ordinary click", () => {
+  it("keeps a mouse long-press active when the pointer starts moving early", () => {
     const onStart = vi.fn();
-    const onItemClick = vi.fn();
-    render(<Harness onStart={onStart} onItemClick={onItemClick} />);
+    render(<Harness onStart={onStart} />);
     const alpha = screen.getByRole("button", { name: "alpha" });
 
     fireEvent.pointerDown(alpha, {
@@ -116,12 +115,92 @@ describe("useLongPressReorder", () => {
       clientY: 10,
     });
     fireEvent.pointerMove(alpha, { pointerId: 3, clientX: 16, clientY: 10 });
-    act(() => vi.advanceTimersByTime(500));
-    fireEvent.click(alpha);
+    act(() => vi.advanceTimersByTime(180));
+
+    expect(screen.getByTestId("phase").textContent).toBe("dragging");
+    expect(onStart).toHaveBeenCalledWith({ activeId: "alpha", input: "pointer" });
+  });
+
+  it("still cancels touch long-press intent when the user scrolls", () => {
+    const onStart = vi.fn();
+    render(<Harness onStart={onStart} />);
+    const alpha = screen.getByRole("button", { name: "alpha" });
+
+    fireEvent.pointerDown(alpha, {
+      pointerId: 4,
+      pointerType: "touch",
+      isPrimary: true,
+      button: 0,
+      clientX: 10,
+      clientY: 10,
+    });
+    fireEvent.pointerMove(alpha, { pointerId: 4, clientX: 10, clientY: 24 });
+    act(() => vi.advanceTimersByTime(300));
 
     expect(screen.getByTestId("phase").textContent).toBe("idle");
     expect(onStart).not.toHaveBeenCalled();
+  });
+
+  it("preserves an ordinary click released before the activation delay", () => {
+    const onItemClick = vi.fn();
+    render(<Harness onItemClick={onItemClick} />);
+    const alpha = screen.getByRole("button", { name: "alpha" });
+
+    fireEvent.pointerDown(alpha, {
+      pointerId: 5,
+      pointerType: "mouse",
+      isPrimary: true,
+      button: 0,
+      clientX: 10,
+      clientY: 10,
+    });
+    act(() => vi.advanceTimersByTime(100));
+    fireEvent.pointerUp(alpha, { pointerId: 5, clientX: 10, clientY: 10 });
+    fireEvent.click(alpha);
+
+    expect(screen.getByTestId("phase").textContent).toBe("idle");
     expect(onItemClick).toHaveBeenCalledWith("alpha");
+  });
+
+  it("moves downward by list-row geometry even between elements", () => {
+    const onReorder = vi.fn();
+    render(<Harness onReorder={onReorder} />);
+    const alpha = screen.getByRole("button", { name: "alpha" });
+    const beta = screen.getByRole("button", { name: "beta" });
+    const gamma = screen.getByRole("button", { name: "gamma" });
+    const rect = (top: number) => ({
+      top,
+      bottom: top + 40,
+      left: 0,
+      right: 200,
+      width: 200,
+      height: 40,
+      x: 0,
+      y: top,
+      toJSON: () => ({}),
+    } as DOMRect);
+    vi.spyOn(alpha, "getBoundingClientRect").mockReturnValue(rect(0));
+    vi.spyOn(beta, "getBoundingClientRect").mockReturnValue(rect(50));
+    vi.spyOn(gamma, "getBoundingClientRect").mockReturnValue(rect(100));
+
+    fireEvent.pointerDown(alpha, {
+      pointerId: 9,
+      pointerType: "mouse",
+      isPrimary: true,
+      button: 0,
+      clientX: 20,
+      clientY: 20,
+    });
+    act(() => vi.advanceTimersByTime(180));
+    fireEvent.pointerMove(alpha, { pointerId: 9, clientX: 20, clientY: 118 });
+
+    expect(onReorder).toHaveBeenCalledWith({
+      activeId: "alpha",
+      overId: "gamma",
+      fromIndex: 0,
+      toIndex: 2,
+      input: "pointer",
+    });
   });
 
   it("suppresses the synthetic click after a completed pointer drag", () => {
@@ -138,7 +217,7 @@ describe("useLongPressReorder", () => {
       clientX: 10,
       clientY: 10,
     });
-    act(() => vi.advanceTimersByTime(350));
+    act(() => vi.advanceTimersByTime(180));
     fireEvent.pointerUp(alpha, { pointerId: 1, clientX: 10, clientY: 10 });
     fireEvent.click(alpha);
 
@@ -159,7 +238,7 @@ describe("useLongPressReorder", () => {
       clientX: 10,
       clientY: 10,
     });
-    act(() => vi.advanceTimersByTime(350));
+    act(() => vi.advanceTimersByTime(180));
     fireEvent.pointerCancel(alpha, { pointerId: 8 });
 
     expect(onCancel).toHaveBeenCalledWith({ activeId: "alpha", input: "pointer" });

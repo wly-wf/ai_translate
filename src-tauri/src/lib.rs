@@ -1027,9 +1027,12 @@ fn show_translation_window(app: &AppHandle, open_quick_translate: bool) {
                 eprintln!("Translation window size lock failed: {lock_error}");
             }
             let preferences = current_preferences(app);
-            if let Err(frame_error) =
-                configure_standard_window_frame(&window, current_dark_theme(app))
-            {
+            let appearance = current_window_appearance(app);
+            if let Err(frame_error) = configure_standard_window_frame(
+                &window,
+                appearance.dark,
+                appearance.follow_system,
+            ) {
                 eprintln!("Translation window frame refresh failed: {frame_error}");
             }
             if let Err(top_error) = window.set_always_on_top(preferences.keep_on_top) {
@@ -1118,14 +1121,29 @@ fn current_preferences(app: &AppHandle) -> UserPreferences {
         .clone()
 }
 
-fn current_dark_theme(app: &AppHandle) -> bool {
+#[derive(Clone, Copy)]
+struct WindowAppearance {
+    dark: bool,
+    follow_system: bool,
+}
+
+fn current_window_appearance(app: &AppHandle) -> WindowAppearance {
     match current_preferences(app).theme_mode {
-        ThemeMode::Dark => true,
-        ThemeMode::Light => false,
-        ThemeMode::System => app
-            .get_webview_window("main")
-            .as_ref()
-            .is_some_and(window_uses_dark_theme),
+        ThemeMode::Dark => WindowAppearance {
+            dark: true,
+            follow_system: false,
+        },
+        ThemeMode::Light => WindowAppearance {
+            dark: false,
+            follow_system: false,
+        },
+        ThemeMode::System => WindowAppearance {
+            dark: app
+                .get_webview_window("main")
+                .as_ref()
+                .is_some_and(window_uses_dark_theme),
+            follow_system: true,
+        },
     }
 }
 
@@ -1793,7 +1811,8 @@ async fn translate_and_display(
     }
     let window = app.get_webview_window("main").ok_or_else(|| "未找到结果窗口。".to_string())?;
     lock_translation_window(&window)?;
-    configure_standard_window_frame(&window, current_dark_theme(&app))?;
+    let appearance = current_window_appearance(&app);
+    configure_standard_window_frame(&window, appearance.dark, appearance.follow_system)?;
     if let Some(placement) = float_placement {
         position_translation_window(&window, placement)?;
     }
@@ -2282,17 +2301,23 @@ fn minimize_window(window: WebviewWindow) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_window_appearance(window: WebviewWindow, dark: bool) -> Result<(), String> {
-    configure_standard_window_frame(&window, dark)
+fn set_window_appearance(
+    window: WebviewWindow,
+    dark: bool,
+    follow_system: bool,
+) -> Result<(), String> {
+    configure_standard_window_frame(&window, dark, follow_system)
 }
 
 fn show_settings_window(app: &AppHandle) -> Result<(), String> {
-    let dark = current_dark_theme(app);
+    let appearance = current_window_appearance(app);
+    let dark = appearance.dark;
+    let follow_system = appearance.follow_system;
     if let Some(window) = app.get_webview_window("settings") {
         window.set_size(Size::Logical(LogicalSize::new(1120.0, 760.0))).map_err(|error| error.to_string())?;
         window.set_resizable(false).map_err(|error| error.to_string())?;
         window.set_minimizable(true).map_err(|error| error.to_string())?;
-        configure_standard_window_frame(&window, dark)?;
+        configure_standard_window_frame(&window, dark, follow_system)?;
         window.set_always_on_top(false).map_err(|error| error.to_string())?;
         window.unminimize().map_err(|error| error.to_string())?;
         window.show().map_err(|error| error.to_string())?;
@@ -2308,18 +2333,29 @@ fn show_settings_window(app: &AppHandle) -> Result<(), String> {
         .shadow(true)
         .transparent(false)
         .background_color(standard_window_background(dark))
-        .theme(Some(if dark { Theme::Dark } else { Theme::Light }))
+        .theme(if follow_system {
+            None
+        } else {
+            Some(if dark { Theme::Dark } else { Theme::Light })
+        })
         .always_on_top(false)
         .skip_taskbar(false)
         .minimizable(true)
         .resizable(false)
         .focused(false)
         .visible(false)
-        .on_page_load(|window, payload| {
+        .on_page_load(move |window, payload| {
             if matches!(payload.event(), PageLoadEvent::Finished) {
-                if let Err(error) =
-                    configure_standard_window_frame(&window, window_uses_dark_theme(&window))
-                {
+                let resolved_dark = if follow_system {
+                    window_uses_dark_theme(&window)
+                } else {
+                    dark
+                };
+                if let Err(error) = configure_standard_window_frame(
+                    &window,
+                    resolved_dark,
+                    follow_system,
+                ) {
                     eprintln!("Settings custom frame refresh failed: {error}");
                 }
                 if let Err(error) = window.set_always_on_top(false) {
@@ -2335,7 +2371,7 @@ fn show_settings_window(app: &AppHandle) -> Result<(), String> {
         })
         .build()
         .map_err(|error| error.to_string())?;
-    configure_standard_window_frame(&window, dark)
+    configure_standard_window_frame(&window, dark, follow_system)
 }
 
 fn center_child_window(child: &WebviewWindow, parent: &WebviewWindow) -> Result<(), String> {
@@ -2352,11 +2388,13 @@ fn center_child_window(child: &WebviewWindow, parent: &WebviewWindow) -> Result<
 }
 
 fn show_add_provider_window(app: &AppHandle) -> Result<(), String> {
-    let dark = current_dark_theme(app);
+    let appearance = current_window_appearance(app);
+    let dark = appearance.dark;
+    let follow_system = appearance.follow_system;
     if let Some(window) = app.get_webview_window("add-provider") {
         window.set_size(Size::Logical(LogicalSize::new(640.0, 600.0))).map_err(|error| error.to_string())?;
         window.set_resizable(false).map_err(|error| error.to_string())?;
-        configure_standard_window_frame(&window, dark)?;
+        configure_standard_window_frame(&window, dark, follow_system)?;
         if let Some(parent) = app.get_webview_window("settings") {
             center_child_window(&window, &parent)?;
         } else {
@@ -2378,7 +2416,11 @@ fn show_add_provider_window(app: &AppHandle) -> Result<(), String> {
         .shadow(true)
         .transparent(false)
         .background_color(standard_window_background(dark))
-        .theme(Some(if dark { Theme::Dark } else { Theme::Light }))
+        .theme(if follow_system {
+            None
+        } else {
+            Some(if dark { Theme::Dark } else { Theme::Light })
+        })
         .always_on_top(false)
         .skip_taskbar(true)
         .minimizable(false)
@@ -2393,9 +2435,16 @@ fn show_add_provider_window(app: &AppHandle) -> Result<(), String> {
     let window = builder
         .on_page_load(move |window, payload| {
             if matches!(payload.event(), PageLoadEvent::Finished) {
-                if let Err(error) =
-                    configure_standard_window_frame(&window, window_uses_dark_theme(&window))
-                {
+                let resolved_dark = if follow_system {
+                    window_uses_dark_theme(&window)
+                } else {
+                    dark
+                };
+                if let Err(error) = configure_standard_window_frame(
+                    &window,
+                    resolved_dark,
+                    follow_system,
+                ) {
                     eprintln!("Add-provider custom frame refresh failed: {error}");
                 }
                 let position_result = if let Some(parent) = center_parent.as_ref() {
@@ -2416,7 +2465,7 @@ fn show_add_provider_window(app: &AppHandle) -> Result<(), String> {
         })
         .build()
         .map_err(|error| error.to_string())?;
-    configure_standard_window_frame(&window, dark)
+    configure_standard_window_frame(&window, dark, follow_system)
 }
 
 fn spawn_settings_window(app: &AppHandle) {
@@ -2620,7 +2669,12 @@ pub fn run() {
         .manage(EnabledProvidersUpdateLock(Mutex::new(())))
         .setup(move |app| {
             if let Some(window) = app.get_webview_window("main") {
-                configure_standard_window_frame(&window, current_dark_theme(app.handle()))?;
+                let appearance = current_window_appearance(app.handle());
+                configure_standard_window_frame(
+                    &window,
+                    appearance.dark,
+                    appearance.follow_system,
+                )?;
             }
             initialize_tray_icon(app)?;
             if let Err(error) = initialize_selection_float(app) {

@@ -153,6 +153,7 @@ fn apply_windows_custom_frame(window: &WebviewWindow, dark: bool) -> Result<(), 
 pub(crate) fn configure_standard_window_frame(
     window: &WebviewWindow,
     dark: bool,
+    follow_system: bool,
 ) -> Result<(), String> {
     if !is_standard_window(window.label()) {
         return Err(format!(
@@ -169,7 +170,11 @@ pub(crate) fn configure_standard_window_frame(
         .set_background_color(Some(standard_window_background(dark)))
         .map_err(|error| error.to_string())?;
     window
-        .set_theme(Some(if dark { Theme::Dark } else { Theme::Light }))
+        .set_theme(if follow_system {
+            None
+        } else {
+            Some(if dark { Theme::Dark } else { Theme::Light })
+        })
         .map_err(|error| error.to_string())?;
 
     #[cfg(target_os = "windows")]

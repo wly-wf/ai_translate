@@ -60,9 +60,12 @@ export interface LongPressReorderItemProps<ElementType extends HTMLElement> {
 
 interface PointerSession<ItemId extends string> {
   pointerId: number;
+  pointerType: string;
   activeId: ItemId;
   startX: number;
   startY: number;
+  currentX: number;
+  currentY: number;
   element: HTMLElement;
   phase: "pressing" | "dragging";
   timer: ReturnType<typeof setTimeout>;
@@ -71,8 +74,8 @@ interface PointerSession<ItemId extends string> {
 
 const ITEM_ATTRIBUTE = "data-long-press-reorder-item";
 const KEYBOARD_SHORTCUTS = "Space Enter ArrowUp ArrowDown Home End Escape";
-const DEFAULT_LONG_PRESS_MS = 350;
-const DEFAULT_MOVEMENT_TOLERANCE = 5;
+const DEFAULT_LONG_PRESS_MS = 180;
+const DEFAULT_MOVEMENT_TOLERANCE = 10;
 
 const idleState = <ItemId extends string>(): LongPressReorderState<ItemId> => ({
   phase: "idle",
@@ -81,10 +84,9 @@ const idleState = <ItemId extends string>(): LongPressReorderState<ItemId> => ({
 });
 
 /**
- * Adds long-press pointer sorting and an equivalent keyboard interaction to a
- * dedicated reorder handle. Spread `getItemProps(id)` onto that handle, not the
- * entire row: its `touchAction: "none"` is required to keep Pointer Events from
- * being cancelled by browser panning while a press is pending.
+ * Adds long-press pointer sorting and an equivalent keyboard interaction to an
+ * interactive list item. Spread `getItemProps(id)` onto the item's primary
+ * button so an ordinary click is preserved until the long-press activates.
  */
 export function useLongPressReorder<ItemId extends string>({
   items,
@@ -174,6 +176,31 @@ export function useLongPressReorder<ItemId extends string>({
   );
 
   const targetItemAtPoint = useCallback((clientX: number, clientY: number) => {
+    const orderedItems = latestRef.current.items;
+    const candidates = Array.from(
+      document.querySelectorAll<HTMLElement>(`[${ITEM_ATTRIBUTE}]`),
+    ).map((element) => ({
+      id: element.getAttribute(ITEM_ATTRIBUTE) as ItemId | null,
+      rect: element.getBoundingClientRect(),
+    })).filter((candidate): candidate is { id: ItemId; rect: DOMRect } => (
+      Boolean(candidate.id)
+      && orderedItems.includes(candidate.id as ItemId)
+      && candidate.rect.height > 0
+      && candidate.rect.width > 0
+    )).sort((left, right) => left.rect.top - right.rect.top);
+
+    if (candidates.length) {
+      const left = Math.min(...candidates.map((candidate) => candidate.rect.left));
+      const right = Math.max(...candidates.map((candidate) => candidate.rect.right));
+      if (clientX >= left - 48 && clientX <= right + 48) {
+        return candidates.reduce((closest, candidate) => {
+          const closestDistance = Math.abs(clientY - (closest.rect.top + closest.rect.height / 2));
+          const candidateDistance = Math.abs(clientY - (candidate.rect.top + candidate.rect.height / 2));
+          return candidateDistance < closestDistance ? candidate : closest;
+        }).id;
+      }
+    }
+
     const hit = document.elementFromPoint?.(clientX, clientY);
     const item = hit?.closest<HTMLElement>(`[${ITEM_ATTRIBUTE}]`);
     const itemId = item?.getAttribute(ITEM_ATTRIBUTE) as ItemId | null;
@@ -213,9 +240,12 @@ export function useLongPressReorder<ItemId extends string>({
 
         const session: PointerSession<ItemId> = {
           pointerId: event.pointerId,
+          pointerType: event.pointerType,
           activeId: itemId,
           startX: event.clientX,
           startY: event.clientY,
+          currentX: event.clientX,
+          currentY: event.clientY,
           element,
           phase: "pressing",
           timer: 0 as unknown as ReturnType<typeof setTimeout>,
@@ -224,11 +254,14 @@ export function useLongPressReorder<ItemId extends string>({
         session.timer = setTimeout(() => {
           if (pointerSessionRef.current !== session || latestRef.current.disabled) return;
           session.phase = "dragging";
-          setState({ phase: "dragging", activeId: itemId, overId: itemId });
+          const overId = targetItemAtPoint(session.currentX, session.currentY) ?? itemId;
+          session.lastOverId = overId;
+          setState({ phase: "dragging", activeId: itemId, overId });
           setAnnouncement(
             `${latestRef.current.getItemLabel(itemId)} 已抓取。使用指针拖动，松开以放置。`,
           );
           latestRef.current.onReorderStart?.({ activeId: itemId, input: "pointer" });
+          if (overId !== itemId) requestMove(itemId, overId, "pointer");
         }, Math.max(0, latestRef.current.longPressMs));
         pointerSessionRef.current = session;
         setState({ phase: "pressing", activeId: itemId, overId: itemId });
@@ -237,12 +270,20 @@ export function useLongPressReorder<ItemId extends string>({
       const onPointerMove: PointerEventHandler<ElementType> = (event) => {
         const session = pointerSessionRef.current;
         if (!session || session.pointerId !== event.pointerId) return;
+        session.currentX = event.clientX;
+        session.currentY = event.clientY;
 
         if (session.phase === "pressing") {
           const deltaX = event.clientX - session.startX;
           const deltaY = event.clientY - session.startY;
           const tolerance = Math.max(0, latestRef.current.movementTolerance);
-          if (deltaX * deltaX + deltaY * deltaY > tolerance * tolerance) {
+          // A mouse user naturally starts moving just before the long-press
+          // timer fires. Keep that intent alive; touch/pen still cancel so a
+          // vertical gesture remains available to the surrounding scroller.
+          if (
+            session.pointerType !== "mouse"
+            && deltaX * deltaX + deltaY * deltaY > tolerance * tolerance
+          ) {
             clearPointerSession(false);
           }
           return;
@@ -343,8 +384,8 @@ export function useLongPressReorder<ItemId extends string>({
         "aria-keyshortcuts": KEYBOARD_SHORTCUTS,
         "aria-pressed": state.activeId === itemId && state.phase !== "pressing",
         tabIndex: disabled ? -1 : 0,
-        // Apply these props to a small handle so touch zoom remains available
-        // elsewhere in the view while the browser leaves this gesture to us.
+        // Keep the pending long-press in the Pointer Events stream until the
+        // user either releases for a normal click or starts reordering.
         style: { touchAction: "none", userSelect: "none" },
         onPointerDown,
         onPointerMove,

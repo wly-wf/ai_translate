@@ -86,6 +86,7 @@ type ConnectionState = {
 type ModelChoice = {
   providerId: ProviderId;
   model: string;
+  vendor: string;
 };
 
 const APP_VERSION = "0.1.0";
@@ -206,7 +207,7 @@ function customProviderMark(name: string, fallback = "供") {
   return Array.from(name.trim())[0] || fallback;
 }
 
-function withCustomProviderIdentity(provider: SettingsProvider, name: string) {
+function withCustomProviderIdentity<T extends { vendor: string; mark: string; accent: string }>(provider: T, name: string): T {
   const vendor = name.trim();
   return {
     ...provider,
@@ -342,7 +343,11 @@ function ModelPicker({ value, choices, onChange, ariaLabel, disabled = false }: 
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const selectedChoice = choices.find((choice) => choice.providerId === value) ?? null;
-  const selectedProvider = selectedChoice ? AVAILABLE_TRANSLATION_PROVIDERS.find((provider) => provider.id === selectedChoice.providerId) : null;
+  const providerForChoice = (choice: ModelChoice) => {
+    const provider = AVAILABLE_TRANSLATION_PROVIDERS.find((item) => item.id === choice.providerId);
+    return provider ? withCustomProviderIdentity(provider, choice.vendor) : provider;
+  };
+  const selectedProvider = selectedChoice ? providerForChoice(selectedChoice) : null;
 
   useEffect(() => {
     if (!open) return;
@@ -366,7 +371,7 @@ function ModelPicker({ value, choices, onChange, ariaLabel, disabled = false }: 
       <span className="model-picker-value">{selectedChoice && selectedProvider ? <><strong>{selectedChoice.model}</strong><small>{selectedProvider.vendor}</small></> : <strong>未设置默认模型</strong>}</span>
       <svg className="model-picker-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
     </button>
-    {open && <div className="model-picker-menu" role="listbox" aria-label={ariaLabel}>{choices.map((choice) => { const provider = AVAILABLE_TRANSLATION_PROVIDERS.find((item) => item.id === choice.providerId); if (!provider) return null; const selected = choice.providerId === value; return <button className={`model-picker-option${selected ? " is-selected" : ""}`} type="button" role="option" aria-selected={selected} key={choice.providerId} onClick={() => { onChange(choice.providerId); setOpen(false); }}><ProviderIcon provider={provider} /><span><strong>{choice.model}</strong><small>{provider.vendor}</small></span>{selected && <span className="model-picker-selected-dot" aria-hidden="true" />}</button>; })}</div>}
+    {open && <div className="model-picker-menu" role="listbox" aria-label={ariaLabel}>{choices.map((choice) => { const provider = providerForChoice(choice); if (!provider) return null; const selected = choice.providerId === value; return <button className={`model-picker-option${selected ? " is-selected" : ""}`} type="button" role="option" aria-selected={selected} key={choice.providerId} onClick={() => { onChange(choice.providerId); setOpen(false); }}><ProviderIcon provider={provider} /><span><strong>{choice.model}</strong><small>{provider.vendor}</small></span>{selected && <span className="model-picker-selected-dot" aria-hidden="true" />}</button>; })}</div>}
   </div>;
 }
 
@@ -482,7 +487,10 @@ function useUserPreferences() {
       root.style.setProperty("--translation-font-size", `${preferences.translationFontSize}px`);
       root.style.colorScheme = resolvedTheme;
       if (isTauriDesktop() && getCurrentWebviewWindow().label !== "selection-float") {
-        void nativeInvoke<void>("set_window_appearance", { dark: resolvedTheme === "dark" }).catch(() => undefined);
+        void nativeInvoke<void>("set_window_appearance", {
+          dark: resolvedTheme === "dark",
+          followSystem: preferences.themeMode === "system",
+        }).catch(() => undefined);
       }
       try {
         window.localStorage.setItem("ai-translate-appearance", JSON.stringify({
@@ -725,6 +733,7 @@ function MainWindow() {
   const [activeProviderModel, setActiveProviderModel] = useState(SETTINGS_PROVIDERS[0].model);
   const [enabledProviderIds, setEnabledProviderIds] = useState<ProviderId[]>([DEFAULT_PROVIDER_ID]);
   const [enabledProviderModels, setEnabledProviderModels] = useState<Partial<Record<ProviderId, string>>>({ deepseek: SETTINGS_PROVIDERS[0].model });
+  const [enabledProviderNames, setEnabledProviderNames] = useState<Partial<Record<ProviderId, string>>>({});
   const [quickTranslateProviderId, setQuickTranslateProviderId] = useState<ProviderId>(DEFAULT_PROVIDER_ID);
   const [loading, setLoading] = useState(false);
   const [expandedProviderIds, setExpandedProviderIds] = useState<string[]>([DEFAULT_PROVIDER_ID]);
@@ -831,9 +840,10 @@ function MainWindow() {
     setEnabledProviderIds(orderedIds);
     const entries = await Promise.all(orderedIds.map(async (providerId) => {
       const config = await nativeInvoke<ProviderConfigResponse | null>("get_provider_config", { provider: providerId });
-      return [providerId, config?.model] as const;
+      return [providerId, config?.model, config?.vendorName?.trim()] as const;
     }));
-    setEnabledProviderModels(Object.fromEntries(entries.filter((entry): entry is readonly [ProviderId, string] => Boolean(entry[1]))));
+    setEnabledProviderModels(Object.fromEntries(entries.flatMap(([providerId, model]) => model ? [[providerId, model]] : [])));
+    setEnabledProviderNames(Object.fromEntries(entries.flatMap(([providerId, , vendorName]) => vendorName ? [[providerId, vendorName]] : [])));
     setHasApiKey(providerIds.length > 0);
   }
 
@@ -1010,11 +1020,16 @@ function MainWindow() {
     openQuickTranslate();
   }
 
-  const activeProviderDefinition = AVAILABLE_TRANSLATION_PROVIDERS.find((provider) => provider.id === activeProviderId) ?? AVAILABLE_TRANSLATION_PROVIDERS[0];
+  const runtimeProvider = (providerId: ProviderId) => {
+    const provider = AVAILABLE_TRANSLATION_PROVIDERS.find((item) => item.id === providerId);
+    const vendorName = enabledProviderNames[providerId];
+    return provider && vendorName ? withCustomProviderIdentity(provider, vendorName) : provider;
+  };
+  const activeProviderDefinition = runtimeProvider(activeProviderId) ?? AVAILABLE_TRANSLATION_PROVIDERS[0];
   const activeProvider = { ...activeProviderDefinition, model: enabledProviderModels[activeProviderId] ?? activeProviderModel ?? activeProviderDefinition.model };
   const quickTranslateChoices = enabledProviderIds.map((providerId) => {
-    const provider = AVAILABLE_TRANSLATION_PROVIDERS.find((item) => item.id === providerId);
-    return provider ? { providerId, model: enabledProviderModels[providerId] ?? provider.model } : null;
+    const provider = runtimeProvider(providerId);
+    return provider ? { providerId, model: enabledProviderModels[providerId] ?? provider.model, vendor: provider.vendor } : null;
   }).filter((choice): choice is ModelChoice => choice !== null);
   return <main className="app-shell">
     <header className="titlebar" onMouseDown={beginTitlebarDrag} onMouseUp={finishTitlebarDrag}>
@@ -1053,7 +1068,7 @@ function MainWindow() {
       </div> : result ? <div className="translation-result">
         <div className="provider-list">
           {result.results.map((providerResult) => {
-            const providerDefinition = AVAILABLE_TRANSLATION_PROVIDERS.find((provider) => provider.id === providerResult.providerId) ?? activeProvider;
+            const providerDefinition = runtimeProvider(providerResult.providerId) ?? activeProvider;
             const provider = { ...providerDefinition, model: providerResult.model || providerDefinition.model };
             const resultKey = translationResultKey(providerResult);
             const isOpen = expandedProviderIds.includes(resultKey);
@@ -1126,6 +1141,9 @@ function SettingsWindow() {
   const providerContextMenuRef = useRef<HTMLDivElement>(null);
   const providerContextMenuActionRef = useRef<HTMLButtonElement>(null);
   const providerOrderPreviewRef = useRef<ProviderId[] | null>(null);
+  const providerRowElementsRef = useRef(new Map<ProviderId, HTMLDivElement>());
+  const providerRowRectsRef = useRef(new Map<ProviderId, DOMRect>());
+  const providerRowAnimationsRef = useRef(new Map<ProviderId, Animation>());
   providerDraftsRef.current = providerDrafts;
 
   useEffect(() => {
@@ -1282,6 +1300,60 @@ function SettingsWindow() {
       setProviderOrderPreview(null);
     },
   });
+
+  useLayoutEffect(() => {
+    const nextRects = new Map<ProviderId, DOMRect>();
+    const isReordering = reorder.state.phase === "dragging" || reorder.state.phase === "keyboard";
+    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+
+    for (const provider of filteredProviders) {
+      const element = providerRowElementsRef.current.get(provider.id);
+      if (!element) continue;
+
+      const runningAnimation = providerRowAnimationsRef.current.get(provider.id);
+      if (!isReordering && runningAnimation) {
+        nextRects.set(
+          provider.id,
+          providerRowRectsRef.current.get(provider.id) ?? element.getBoundingClientRect(),
+        );
+        continue;
+      }
+      let previousTop = providerRowRectsRef.current.get(provider.id)?.top;
+      if (runningAnimation) {
+        previousTop = element.getBoundingClientRect().top;
+        runningAnimation.cancel();
+      }
+
+      const nextRect = element.getBoundingClientRect();
+      nextRects.set(provider.id, nextRect);
+      const deltaY = previousTop === undefined ? 0 : previousTop - nextRect.top;
+      if (!isReordering || reduceMotion || Math.abs(deltaY) < 0.5 || typeof element.animate !== "function") continue;
+
+      const scale = reorder.state.activeId === provider.id ? " scale(1.015)" : "";
+      const animation = element.animate([
+        { transform: `translate3d(0, ${deltaY}px, 0)${scale}` },
+        { transform: `translate3d(0, 0, 0)${scale}` },
+      ], {
+        duration: 190,
+        easing: "cubic-bezier(0.2, 0.8, 0.2, 1)",
+      });
+      providerRowAnimationsRef.current.set(provider.id, animation);
+      const forgetAnimation = () => {
+        if (providerRowAnimationsRef.current.get(provider.id) === animation) {
+          providerRowAnimationsRef.current.delete(provider.id);
+        }
+      };
+      animation.onfinish = forgetAnimation;
+      animation.oncancel = forgetAnimation;
+    }
+
+    providerRowRectsRef.current = nextRects;
+  }, [filteredProviders, reorder.state.activeId, reorder.state.phase]);
+
+  useEffect(() => () => {
+    providerRowAnimationsRef.current.forEach((animation) => animation.cancel());
+    providerRowAnimationsRef.current.clear();
+  }, []);
 
   useEffect(() => {
     if (!isTauriDesktop()) return;
@@ -1740,27 +1812,27 @@ function SettingsWindow() {
 
   function renderPreferencesPage() {
     const defaultModelChoices = enabledProviderIds.map((providerId) => {
-      const provider = AVAILABLE_TRANSLATION_PROVIDERS.find((item) => item.id === providerId);
-      return provider ? { providerId, model: settingsEnabledProviderModels[providerId] ?? provider.model } : null;
+      const provider = providerCollection.find((item) => item.id === providerId);
+      return provider ? { providerId, model: settingsEnabledProviderModels[providerId] ?? provider.model, vendor: provider.vendor } : null;
     }).filter((choice): choice is ModelChoice => choice !== null);
     return <div className="settings-page-view preferences-settings-page"><div className="settings-page-heading"><div><p className="settings-page-eyebrow">外观与行为</p><h1>偏好设置</h1></div></div><p className="settings-description">集中管理默认模型、颜色模式、翻译文字大小和窗口交互方式。</p>
-      <section className="default-quick-model-card"><div className="default-quick-model-copy"><span className="default-quick-model-mark" aria-hidden="true"><QuickTranslateIcon /></span><div><strong>默认快速翻译模型</strong><small>打开快速翻译时优先选择此模型，仍可在翻译窗口中临时切换。</small></div></div><ModelPicker value={quickTranslateProvider} choices={defaultModelChoices} onChange={setQuickTranslateProvider} ariaLabel="设置默认快速翻译模型" disabled={!defaultModelChoices.length} />{!defaultModelChoices.length && <p className="default-quick-model-empty">请先在“供应商”页面启用至少一个翻译模型。</p>}</section>
+      <section className="default-quick-model-card"><div className="default-quick-model-copy"><span className="default-quick-model-mark" aria-hidden="true"><QuickTranslateIcon /></span><div><strong>默认快速翻译模型</strong></div></div><ModelPicker value={quickTranslateProvider} choices={defaultModelChoices} onChange={setQuickTranslateProvider} ariaLabel="设置默认快速翻译模型" disabled={!defaultModelChoices.length} />{!defaultModelChoices.length && <p className="default-quick-model-empty">请先在“供应商”页面启用至少一个翻译模型。</p>}</section>
       <section className="interface-settings-card">
-      <div className="appearance-setting-row"><div><strong>颜色模式</strong><small>“跟随系统”会在 Windows 外观变化时自动切换</small></div><SegmentedControl ariaLabel="颜色模式" value={themeMode} options={[{ value: "light", label: "浅色" }, { value: "dark", label: "深色" }, { value: "system", label: "跟随系统" }]} onChange={(value) => setThemeMode(value as ThemeMode)} /></div>
-      <div className="font-size-setting-row"><div><strong>原文字号</strong><small>翻译结果中原文的显示大小</small></div><label><span>{sourceFontSize}px</span><input aria-label="原文字号" type="range" min="12" max="24" step="1" value={sourceFontSize} onChange={(event) => setSourceFontSize(Number(event.target.value))} /></label></div>
-      <div className="font-size-setting-row"><div><strong>译文字号</strong><small>翻译结果中译文的显示大小</small></div><label><span>{translationFontSize}px</span><input aria-label="译文字号" type="range" min="12" max="28" step="1" value={translationFontSize} onChange={(event) => setTranslationFontSize(Number(event.target.value))} /></label></div>
-      <label className="preference-row"><span><strong>选中文本自动显示悬浮按钮</strong><small>鼠标完成选区后显示翻译入口</small></span><input type="checkbox" checked={autoSelection} onChange={(event) => setAutoSelection(event.target.checked)} /></label>
-      <label className="preference-row"><span><strong>翻译窗口保持置顶</strong><small>结果窗口不会被其他窗口遮挡</small></span><input type="checkbox" checked={keepOnTop} onChange={(event) => setKeepOnTop(event.target.checked)} /></label>
+      <div className="appearance-setting-row"><div><strong>颜色模式</strong></div><SegmentedControl ariaLabel="颜色模式" value={themeMode} options={[{ value: "light", label: "浅色" }, { value: "dark", label: "深色" }, { value: "system", label: "跟随系统" }]} onChange={(value) => setThemeMode(value as ThemeMode)} /></div>
+      <div className="font-size-setting-row"><div><strong>原文字号</strong></div><label><span>{sourceFontSize}px</span><input aria-label="原文字号" type="range" min="12" max="24" step="1" value={sourceFontSize} onChange={(event) => setSourceFontSize(Number(event.target.value))} /></label></div>
+      <div className="font-size-setting-row"><div><strong>译文字号</strong></div><label><span>{translationFontSize}px</span><input aria-label="译文字号" type="range" min="12" max="28" step="1" value={translationFontSize} onChange={(event) => setTranslationFontSize(Number(event.target.value))} /></label></div>
+      <label className="preference-row"><span><strong>选中文本自动显示悬浮按钮</strong></span><input type="checkbox" checked={autoSelection} onChange={(event) => setAutoSelection(event.target.checked)} /></label>
+      <label className="preference-row"><span><strong>翻译窗口保持置顶</strong></span><input type="checkbox" checked={keepOnTop} onChange={(event) => setKeepOnTop(event.target.checked)} /></label>
       </section>
-      <section className="placeholder-settings-card preferences-secondary-card"><div className="placeholder-setting-row"><div><strong>启动时自动运行</strong><small>随 Windows 启动 AI Translate</small></div><span className="placeholder-badge">即将支持</span></div><div className="placeholder-setting-row"><div><strong>默认目标语言</strong><small>自动识别并翻译为指定语言</small></div><span className="placeholder-value">自动识别</span></div><div className="placeholder-setting-row"><div><strong>配置同步</strong><small>在设备之间同步供应商配置</small></div><span className="placeholder-badge">即将支持</span></div></section>
+      <section className="placeholder-settings-card preferences-secondary-card"><div className="placeholder-setting-row"><div><strong>启动时自动运行</strong></div><span className="placeholder-badge">即将支持</span></div><div className="placeholder-setting-row"><div><strong>默认目标语言</strong></div><span className="placeholder-value">自动识别</span></div><div className="placeholder-setting-row"><div><strong>配置同步</strong></div><span className="placeholder-badge">即将支持</span></div></section>
     </div>;
   }
 
   function renderProxyPage() {
     return <div className="settings-page-view proxy-settings-page"><div className="settings-page-heading"><div><p className="settings-page-eyebrow">网络连接</p><h1>网络代理</h1></div></div><p className="settings-description">为翻译、模型获取和连接测试统一设置代理。修改后会立即用于下一次网络请求。</p>
       <section className="proxy-settings-card">
-        <div className="proxy-mode-heading"><div><strong>代理模式</strong><small>系统代理适合已在 Windows 中配置的代理软件</small></div><SegmentedControl ariaLabel="代理模式" value={proxyMode} options={[{ value: "system", label: "跟随系统" }, { value: "custom", label: "自定义" }, { value: "disabled", label: "不使用代理" }]} onChange={(value) => setProxyMode(value as ProxyMode)} /></div>
-        <label className={`proxy-url-field${proxyMode === "custom" ? " is-active" : ""}`}><span><strong>代理地址</strong><small>支持 HTTP、HTTPS 与 SOCKS 代理</small></span><input aria-label="代理地址" value={proxyUrl} disabled={proxyMode !== "custom"} onChange={(event) => setProxyUrl(event.target.value)} placeholder="例如 http://127.0.0.1:7890" spellCheck={false} /></label>
+        <div className="proxy-mode-heading"><div><strong>代理模式</strong></div><SegmentedControl ariaLabel="代理模式" value={proxyMode} options={[{ value: "system", label: "跟随系统" }, { value: "custom", label: "自定义" }, { value: "disabled", label: "不使用代理" }]} onChange={(value) => setProxyMode(value as ProxyMode)} /></div>
+        <label className={`proxy-url-field${proxyMode === "custom" ? " is-active" : ""}`}><span><strong>代理地址</strong></span><input aria-label="代理地址" value={proxyUrl} disabled={proxyMode !== "custom"} onChange={(event) => setProxyUrl(event.target.value)} placeholder="例如 http://127.0.0.1:7890" spellCheck={false} /></label>
         <div className="proxy-note"><span aria-hidden="true">i</span><p>{proxyMode === "system" ? "将读取 Windows 系统代理及 HTTP_PROXY、HTTPS_PROXY、ALL_PROXY 环境变量。" : proxyMode === "custom" ? "本机地址会保持直连；其他模型请求通过此代理发送。" : "所有模型请求均直接连接，不读取系统或环境变量代理。"}</p></div>
       </section>
     </div>;
@@ -1824,19 +1896,25 @@ function SettingsWindow() {
   function renderProviderColumn() {
     return <aside className="settings-provider-column">
       <div className="provider-search"><SearchIcon /><input aria-label="搜索供应商或分组" value={providerSearch} onChange={(event) => setProviderSearch(event.target.value)} placeholder="搜索供应商或分组" /></div>
-      <div className="provider-list-heading"><span>可用接口</span><strong>{filteredProviders.length}</strong><small>{providerSearch.trim() ? "清除搜索后可排序" : "按住手柄拖动排序"}</small></div>
-      <nav className="provider-list-nav" aria-label="供应商列表">{filteredProviders.map((provider, index) => {
+      <div className="provider-list-heading"><span>可用接口</span><strong>{filteredProviders.length}</strong></div>
+      <nav className="provider-list-nav" aria-label="供应商列表">{filteredProviders.map((provider) => {
         const enabled = enabledProviderIds.includes(provider.id);
         const isCustom = addedGenericProviders.includes(provider.id as GenericProviderId);
+        const isPressing = reorder.state.activeId === provider.id && reorder.state.phase === "pressing";
         const isDragging = reorder.state.activeId === provider.id && (reorder.state.phase === "dragging" || reorder.state.phase === "keyboard");
         const isOver = reorder.state.overId === provider.id && reorder.state.activeId !== provider.id;
+        const reorderProps = reorder.getItemProps<HTMLButtonElement>(provider.id);
         return <div
-          className={`provider-list-row${isDragging ? " is-dragging" : ""}${isOver ? " is-over" : ""}`}
-          data-long-press-reorder-item={provider.id}
+          className={`provider-list-row${isPressing ? " is-pressing" : ""}${isDragging ? " is-dragging" : ""}${isOver ? " is-over" : ""}`}
           key={provider.id}
+          ref={(element) => {
+            if (element) providerRowElementsRef.current.set(provider.id, element);
+            else providerRowElementsRef.current.delete(provider.id);
+          }}
         ><button
             type="button"
             className={`provider-list-item ${provider.id === selectedSettingsProvider.id ? "is-selected" : ""}`}
+            {...reorderProps}
             onClick={() => selectSettingsProvider(provider.id)}
             onContextMenu={(event) => {
               if (!isCustom) {
@@ -1847,6 +1925,8 @@ function SettingsWindow() {
               showProviderContextMenu(provider.id, event.clientX, event.clientY);
             }}
             onKeyDown={(event) => {
+              reorderProps.onKeyDown(event);
+              if (event.defaultPrevented) return;
               if (!isCustom || !(event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) return;
               event.preventDefault();
               const rect = event.currentTarget.getBoundingClientRect();
@@ -1854,13 +1934,7 @@ function SettingsWindow() {
             }}
             aria-haspopup={isCustom ? "menu" : undefined}
             aria-expanded={isCustom ? providerContextMenu?.providerId === provider.id : undefined}
-          ><ProviderIcon provider={provider} /><span className="provider-list-copy"><strong>{provider.vendor}</strong></span><span className={`provider-list-status-dot ${enabled ? "is-enabled" : ""}`} aria-hidden="true" /><span className="sr-only">{enabled ? "已启用" : "未启用"}</span></button><button
-            type="button"
-            className="provider-reorder-handle"
-            aria-label={`调整第 ${index + 1} 个供应商的顺序`}
-            title={`按住后拖动 ${provider.vendor}`}
-            {...reorder.getItemProps<HTMLButtonElement>(provider.id)}
-          ><svg viewBox="0 0 12 18" aria-hidden="true"><circle cx="3" cy="4" r="1" /><circle cx="9" cy="4" r="1" /><circle cx="3" cy="9" r="1" /><circle cx="9" cy="9" r="1" /><circle cx="3" cy="14" r="1" /><circle cx="9" cy="14" r="1" /></svg></button></div>;
+          ><ProviderIcon provider={provider} /><span className="provider-list-copy"><strong>{provider.vendor}</strong></span><span className={`provider-list-status-dot ${enabled ? "is-enabled" : ""}`} aria-hidden="true" /><span className="sr-only">{enabled ? "已启用" : "未启用"}</span></button></div>;
       })}</nav>
       <span className="sr-only" role="status" {...reorder.liveRegionProps} />
       <div className="provider-column-footer"><button type="button" className="provider-add-button" onClick={() => openAddProvider()}>＋ 添加自定义供应商</button></div>
