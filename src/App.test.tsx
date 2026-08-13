@@ -827,6 +827,23 @@ describe("App", () => {
     expect(status).toHaveTextContent("翻译中…");
     expect(container.querySelector(".provider-body")).toHaveAttribute("aria-busy", "true");
     expect(container.querySelector(".translation-line")).toContainElement(status);
+    expect(container.querySelector(".translation-reveal")).not.toBeInTheDocument();
+
+    const resultHandler = listenMock.mock.calls.find(([eventName]) => eventName === "translation-result")?.[1];
+    act(() => resultHandler({
+      payload: {
+        source: "Known source text",
+        requestId: 12,
+        results: [{ providerId: "deepseek", model: "deepseek-v4-flash", translation: "已完成的翻译" }],
+      },
+    }));
+
+    const reveal = await waitFor(() => {
+      const element = container.querySelector(".translation-reveal");
+      expect(element).toHaveTextContent("已完成的翻译");
+      return element;
+    });
+    expect(reveal?.querySelector(".translation-reveal-inner")).toBeInTheDocument();
   });
 
   it("renders translation cards in the persisted provider order", async () => {

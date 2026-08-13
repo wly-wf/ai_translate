@@ -18,10 +18,18 @@ interface HarnessProps {
 }
 
 function Harness({ onReorder = () => {}, onStart, onEnd, onCancel, onItemClick }: HarnessProps) {
-  const [items] = useState<readonly ItemId[]>(["alpha", "beta", "gamma"]);
+  const [items, setItems] = useState<readonly ItemId[]>(["alpha", "beta", "gamma"]);
   const reorder = useLongPressReorder({
     items,
-    onReorder,
+    onReorder: (request) => {
+      setItems((current) => {
+        const next = [...current];
+        const [moved] = next.splice(request.fromIndex, 1);
+        if (moved) next.splice(request.toIndex, 0, moved);
+        return next;
+      });
+      onReorder(request);
+    },
     onReorderStart: onStart,
     onReorderEnd: onEnd,
     onReorderCancel: onCancel,
@@ -34,6 +42,11 @@ function Harness({ onReorder = () => {}, onStart, onEnd, onCancel, onItemClick }
     <>
       <div role="status" {...reorder.liveRegionProps} />
       <span data-testid="phase">{reorder.state.phase}</span>
+      <span data-testid="drag-offset">{reorder.state.dragOffsetY}</span>
+      <span data-testid="drag-overlay-top">{reorder.state.dragOverlay?.top ?? ""}</span>
+      <span data-testid="drag-overlay-left">{reorder.state.dragOverlay?.left ?? ""}</span>
+      <span data-testid="drag-overlay-width">{reorder.state.dragOverlay?.width ?? ""}</span>
+      <span data-testid="drag-overlay-height">{reorder.state.dragOverlay?.height ?? ""}</span>
       {items.map((itemId) => (
         <button
           key={itemId}
@@ -179,9 +192,12 @@ describe("useLongPressReorder", () => {
       y: top,
       toJSON: () => ({}),
     } as DOMRect);
-    vi.spyOn(alpha, "getBoundingClientRect").mockReturnValue(rect(0));
-    vi.spyOn(beta, "getBoundingClientRect").mockReturnValue(rect(50));
-    vi.spyOn(gamma, "getBoundingClientRect").mockReturnValue(rect(100));
+    const itemTop = (element: HTMLElement) => Array.from(
+      document.querySelectorAll<HTMLElement>("[data-long-press-reorder-item]"),
+    ).indexOf(element) * 50;
+    vi.spyOn(alpha, "getBoundingClientRect").mockImplementation(() => rect(itemTop(alpha)));
+    vi.spyOn(beta, "getBoundingClientRect").mockImplementation(() => rect(itemTop(beta)));
+    vi.spyOn(gamma, "getBoundingClientRect").mockImplementation(() => rect(itemTop(gamma)));
 
     fireEvent.pointerDown(alpha, {
       pointerId: 9,
@@ -201,6 +217,82 @@ describe("useLongPressReorder", () => {
       toIndex: 2,
       input: "pointer",
     });
+  });
+
+  it("keeps the dragged row at the same screen position while crossing a slot", () => {
+    render(<Harness />);
+    const alpha = screen.getByRole("button", { name: "alpha" });
+    const beta = screen.getByRole("button", { name: "beta" });
+    const gamma = screen.getByRole("button", { name: "gamma" });
+    const rect = (top: number) => ({
+      top,
+      bottom: top + 40,
+      left: 0,
+      right: 200,
+      width: 200,
+      height: 40,
+      x: 0,
+      y: top,
+      toJSON: () => ({}),
+    } as DOMRect);
+    const itemTop = (element: HTMLElement) => Array.from(
+      document.querySelectorAll<HTMLElement>("[data-long-press-reorder-item]"),
+    ).indexOf(element) * 50;
+    vi.spyOn(alpha, "getBoundingClientRect").mockImplementation(() => rect(itemTop(alpha)));
+    vi.spyOn(beta, "getBoundingClientRect").mockImplementation(() => rect(itemTop(beta)));
+    vi.spyOn(gamma, "getBoundingClientRect").mockImplementation(() => rect(itemTop(gamma)));
+
+    fireEvent.pointerDown(alpha, {
+      pointerId: 11,
+      pointerType: "mouse",
+      isPrimary: true,
+      button: 0,
+      clientX: 20,
+      clientY: 20,
+    });
+    act(() => vi.advanceTimersByTime(180));
+    fireEvent.pointerMove(alpha, { pointerId: 11, clientX: 20, clientY: 60 });
+
+    expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual([
+      "beta", "alpha", "gamma",
+    ]);
+    expect(screen.getByTestId("drag-offset").textContent).toBe("-10");
+    expect(screen.getByTestId("drag-overlay-top").textContent).toBe("40");
+    expect(screen.getByTestId("drag-overlay-left").textContent).toBe("0");
+    expect(screen.getByTestId("drag-overlay-width").textContent).toBe("200");
+    expect(screen.getByTestId("drag-overlay-height").textContent).toBe("40");
+  });
+
+  it("continues moving downward after React reorders the captured item", () => {
+    render(<Harness />);
+    const alpha = screen.getByRole("button", { name: "alpha" });
+    const beta = screen.getByRole("button", { name: "beta" });
+    const gamma = screen.getByRole("button", { name: "gamma" });
+
+    fireEvent.pointerDown(alpha, {
+      pointerId: 10,
+      pointerType: "mouse",
+      isPrimary: true,
+      button: 0,
+      clientX: 20,
+      clientY: 20,
+    });
+    act(() => vi.advanceTimersByTime(180));
+
+    vi.mocked(document.elementFromPoint).mockReturnValue(beta);
+    fireEvent.pointerMove(alpha, { pointerId: 10, clientX: 20, clientY: 70 });
+    expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual([
+      "beta", "alpha", "gamma",
+    ]);
+
+    fireEvent.lostPointerCapture(alpha, { pointerId: 10 });
+    vi.mocked(document.elementFromPoint).mockReturnValue(gamma);
+    fireEvent.pointerMove(window, { pointerId: 10, clientX: 20, clientY: 120 });
+
+    expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual([
+      "beta", "gamma", "alpha",
+    ]);
+    expect(screen.getByTestId("drag-offset").textContent).toBe("100");
   });
 
   it("suppresses the synthetic click after a completed pointer drag", () => {

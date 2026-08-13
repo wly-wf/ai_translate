@@ -41,6 +41,13 @@ export interface LongPressReorderState<ItemId extends string> {
   phase: ReorderPhase;
   activeId: ItemId | null;
   overId: ItemId | null;
+  dragOffsetY: number;
+  dragOverlay: {
+    top: number;
+    left: number;
+    width: number;
+    height: number;
+  } | null;
 }
 
 export interface LongPressReorderItemProps<ElementType extends HTMLElement> {
@@ -70,6 +77,12 @@ interface PointerSession<ItemId extends string> {
   phase: "pressing" | "dragging";
   timer: ReturnType<typeof setTimeout>;
   lastOverId: ItemId | null;
+  grabOffsetY: number;
+  dragOffsetY: number;
+  overlayLeft: number;
+  overlayWidth: number;
+  overlayHeight: number;
+  cleanupWindowListeners: () => void;
 }
 
 const ITEM_ATTRIBUTE = "data-long-press-reorder-item";
@@ -81,7 +94,31 @@ const idleState = <ItemId extends string>(): LongPressReorderState<ItemId> => ({
   phase: "idle",
   activeId: null,
   overId: null,
+  dragOffsetY: 0,
+  dragOverlay: null,
 });
+
+function elementLayoutTop(element: HTMLElement) {
+  const visualRect = element.getBoundingClientRect();
+  if (element.offsetHeight <= 0) return visualRect.top;
+
+  let top = 0;
+  let current: HTMLElement | null = element;
+  while (current) {
+    top += current.offsetTop;
+    current = current.offsetParent as HTMLElement | null;
+  }
+  for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+    top -= parent.scrollTop;
+  }
+  return top - window.scrollY;
+}
+
+function reorderItemElement(itemId: string) {
+  return Array.from(
+    document.querySelectorAll<HTMLElement>(`[${ITEM_ATTRIBUTE}]`),
+  ).find((element) => element.getAttribute(ITEM_ATTRIBUTE) === itemId) ?? null;
+}
 
 /**
  * Adds long-press pointer sorting and an equivalent keyboard interaction to an
@@ -105,6 +142,7 @@ export function useLongPressReorder<ItemId extends string>({
   const keyboardActiveRef = useRef<ItemId | null>(null);
   const suppressedClickRef = useRef<ItemId | null>(null);
   const clickResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handledWindowPointerEventsRef = useRef(new WeakSet<Event>());
   const mountedRef = useRef(true);
 
   const latestRef = useRef({
@@ -147,6 +185,7 @@ export function useLongPressReorder<ItemId extends string>({
 
       pointerSessionRef.current = null;
       clearTimeout(session.timer);
+      session.cleanupWindowListeners();
       releasePointer(session);
       if (notifyCancel && session.phase === "dragging") {
         latestRef.current.onReorderCancel?.({
@@ -179,10 +218,22 @@ export function useLongPressReorder<ItemId extends string>({
     const orderedItems = latestRef.current.items;
     const candidates = Array.from(
       document.querySelectorAll<HTMLElement>(`[${ITEM_ATTRIBUTE}]`),
-    ).map((element) => ({
-      id: element.getAttribute(ITEM_ATTRIBUTE) as ItemId | null,
-      rect: element.getBoundingClientRect(),
-    })).filter((candidate): candidate is { id: ItemId; rect: DOMRect } => (
+    ).map((element) => {
+      const visualRect = element.getBoundingClientRect();
+      return {
+        id: element.getAttribute(ITEM_ATTRIBUTE) as ItemId | null,
+        rect: {
+          top: elementLayoutTop(element),
+          left: visualRect.left,
+          right: visualRect.right,
+          width: visualRect.width,
+          height: element.offsetHeight || visualRect.height,
+        },
+      };
+    }).filter((candidate): candidate is {
+      id: ItemId;
+      rect: { top: number; left: number; right: number; width: number; height: number };
+    } => (
       Boolean(candidate.id)
       && orderedItems.includes(candidate.id as ItemId)
       && candidate.rect.height > 0
@@ -216,6 +267,107 @@ export function useLongPressReorder<ItemId extends string>({
     }, 0);
   }, []);
 
+  const updateDragOffset = useCallback((session: PointerSession<ItemId>) => {
+    if (pointerSessionRef.current !== session || session.phase !== "dragging") return;
+    const dragOffsetY = session.currentY - session.grabOffsetY - elementLayoutTop(session.element);
+    const dragOverlay = {
+      top: session.currentY - session.grabOffsetY,
+      left: session.overlayLeft,
+      width: session.overlayWidth,
+      height: session.overlayHeight,
+    };
+    session.dragOffsetY = dragOffsetY;
+    setState((current) => current.phase === "dragging" && current.activeId === session.activeId
+      ? { ...current, dragOffsetY, dragOverlay }
+      : current);
+  }, []);
+
+  const dragOffsetForTarget = useCallback((session: PointerSession<ItemId>, targetId: ItemId) => {
+    const target = reorderItemElement(targetId);
+    return target
+      ? session.currentY - session.grabOffsetY - elementLayoutTop(target)
+      : session.dragOffsetY;
+  }, []);
+
+  const movePointerSession = useCallback((
+    pointerId: number,
+    clientX: number,
+    clientY: number,
+    preventDefault: () => void,
+  ) => {
+    const session = pointerSessionRef.current;
+    if (!session || session.pointerId !== pointerId) return;
+    session.currentX = clientX;
+    session.currentY = clientY;
+
+    if (session.phase === "pressing") {
+      const deltaX = clientX - session.startX;
+      const deltaY = clientY - session.startY;
+      const tolerance = Math.max(0, latestRef.current.movementTolerance);
+      // A mouse user naturally starts moving just before the long-press
+      // timer fires. Keep that intent alive; touch/pen still cancel so a
+      // vertical gesture remains available to the surrounding scroller.
+      if (
+        session.pointerType !== "mouse"
+        && deltaX * deltaX + deltaY * deltaY > tolerance * tolerance
+      ) {
+        clearPointerSession(false);
+      }
+      return;
+    }
+
+    preventDefault();
+    updateDragOffset(session);
+    const overId = targetItemAtPoint(clientX, clientY);
+    if (!overId || overId === session.lastOverId) return;
+    session.lastOverId = overId;
+    const nextDragOffsetY = overId === session.activeId
+      ? session.dragOffsetY
+      : dragOffsetForTarget(session, overId);
+    const moved = requestMove(session.activeId, overId, "pointer");
+    if (moved) session.dragOffsetY = nextDragOffsetY;
+    setState(() => ({
+      phase: "dragging",
+      activeId: session.activeId,
+      overId,
+      dragOffsetY: session.dragOffsetY,
+      dragOverlay: {
+        top: session.currentY - session.grabOffsetY,
+        left: session.overlayLeft,
+        width: session.overlayWidth,
+        height: session.overlayHeight,
+      },
+    }));
+  }, [
+    clearPointerSession,
+    dragOffsetForTarget,
+    requestMove,
+    targetItemAtPoint,
+    updateDragOffset,
+  ]);
+
+  const finishPointerSession = useCallback((pointerId: number, preventDefault: () => void) => {
+    const session = pointerSessionRef.current;
+    if (!session || session.pointerId !== pointerId) return;
+
+    const wasDragging = session.phase === "dragging";
+    const activeId = session.activeId;
+    if (wasDragging) {
+      preventDefault();
+      suppressNextClick(activeId);
+    }
+    clearPointerSession(false);
+    if (wasDragging) {
+      latestRef.current.onReorderEnd?.({ activeId, input: "pointer" });
+      setAnnouncement(`${latestRef.current.getItemLabel(activeId)} 已放置。`);
+    }
+  }, [clearPointerSession, suppressNextClick]);
+
+  const cancelPointerSession = useCallback((pointerId: number) => {
+    const session = pointerSessionRef.current;
+    if (session?.pointerId === pointerId) clearPointerSession(true);
+  }, [clearPointerSession]);
+
   const getItemProps = useCallback(
     <ElementType extends HTMLElement = HTMLElement>(
       itemId: ItemId,
@@ -238,6 +390,7 @@ export function useLongPressReorder<ItemId extends string>({
           return;
         }
 
+        const elementRect = element.getBoundingClientRect();
         const session: PointerSession<ItemId> = {
           pointerId: event.pointerId,
           pointerType: event.pointerType,
@@ -250,73 +403,95 @@ export function useLongPressReorder<ItemId extends string>({
           phase: "pressing",
           timer: 0 as unknown as ReturnType<typeof setTimeout>,
           lastOverId: itemId,
+          grabOffsetY: event.clientY - elementRect.top,
+          dragOffsetY: 0,
+          overlayLeft: elementRect.left,
+          overlayWidth: elementRect.width,
+          overlayHeight: elementRect.height,
+          cleanupWindowListeners: () => {},
+        };
+        const handleWindowPointerMove = (windowEvent: globalThis.PointerEvent) => {
+          handledWindowPointerEventsRef.current.add(windowEvent);
+          movePointerSession(
+            windowEvent.pointerId,
+            windowEvent.clientX,
+            windowEvent.clientY,
+            () => windowEvent.preventDefault(),
+          );
+        };
+        const handleWindowPointerUp = (windowEvent: globalThis.PointerEvent) => {
+          handledWindowPointerEventsRef.current.add(windowEvent);
+          finishPointerSession(windowEvent.pointerId, () => windowEvent.preventDefault());
+        };
+        const handleWindowPointerCancel = (windowEvent: globalThis.PointerEvent) => {
+          handledWindowPointerEventsRef.current.add(windowEvent);
+          cancelPointerSession(windowEvent.pointerId);
+        };
+        window.addEventListener("pointermove", handleWindowPointerMove, true);
+        window.addEventListener("pointerup", handleWindowPointerUp, true);
+        window.addEventListener("pointercancel", handleWindowPointerCancel, true);
+        session.cleanupWindowListeners = () => {
+          window.removeEventListener("pointermove", handleWindowPointerMove, true);
+          window.removeEventListener("pointerup", handleWindowPointerUp, true);
+          window.removeEventListener("pointercancel", handleWindowPointerCancel, true);
         };
         session.timer = setTimeout(() => {
           if (pointerSessionRef.current !== session || latestRef.current.disabled) return;
           session.phase = "dragging";
           const overId = targetItemAtPoint(session.currentX, session.currentY) ?? itemId;
           session.lastOverId = overId;
-          setState({ phase: "dragging", activeId: itemId, overId });
+          updateDragOffset(session);
           setAnnouncement(
             `${latestRef.current.getItemLabel(itemId)} 已抓取。使用指针拖动，松开以放置。`,
           );
           latestRef.current.onReorderStart?.({ activeId: itemId, input: "pointer" });
-          if (overId !== itemId) requestMove(itemId, overId, "pointer");
+          const nextDragOffsetY = overId !== itemId
+            ? dragOffsetForTarget(session, overId)
+            : session.dragOffsetY;
+          const moved = overId !== itemId && requestMove(itemId, overId, "pointer");
+          if (moved) {
+            session.dragOffsetY = nextDragOffsetY;
+          }
+          setState({
+            phase: "dragging",
+            activeId: itemId,
+            overId,
+            dragOffsetY: session.dragOffsetY,
+            dragOverlay: {
+              top: session.currentY - session.grabOffsetY,
+              left: session.overlayLeft,
+              width: session.overlayWidth,
+              height: session.overlayHeight,
+            },
+          });
         }, Math.max(0, latestRef.current.longPressMs));
         pointerSessionRef.current = session;
-        setState({ phase: "pressing", activeId: itemId, overId: itemId });
+        setState({ phase: "pressing", activeId: itemId, overId: itemId, dragOffsetY: 0, dragOverlay: null });
       };
 
       const onPointerMove: PointerEventHandler<ElementType> = (event) => {
-        const session = pointerSessionRef.current;
-        if (!session || session.pointerId !== event.pointerId) return;
-        session.currentX = event.clientX;
-        session.currentY = event.clientY;
-
-        if (session.phase === "pressing") {
-          const deltaX = event.clientX - session.startX;
-          const deltaY = event.clientY - session.startY;
-          const tolerance = Math.max(0, latestRef.current.movementTolerance);
-          // A mouse user naturally starts moving just before the long-press
-          // timer fires. Keep that intent alive; touch/pen still cancel so a
-          // vertical gesture remains available to the surrounding scroller.
-          if (
-            session.pointerType !== "mouse"
-            && deltaX * deltaX + deltaY * deltaY > tolerance * tolerance
-          ) {
-            clearPointerSession(false);
-          }
-          return;
-        }
-
-        event.preventDefault();
-        const overId = targetItemAtPoint(event.clientX, event.clientY);
-        if (!overId || overId === session.lastOverId) return;
-        session.lastOverId = overId;
-        setState({ phase: "dragging", activeId: session.activeId, overId });
-        requestMove(session.activeId, overId, "pointer");
+        if (handledWindowPointerEventsRef.current.has(event.nativeEvent)) return;
+        movePointerSession(event.pointerId, event.clientX, event.clientY, () => event.preventDefault());
       };
 
       const onPointerUp: PointerEventHandler<ElementType> = (event) => {
-        const session = pointerSessionRef.current;
-        if (!session || session.pointerId !== event.pointerId) return;
-
-        const wasDragging = session.phase === "dragging";
-        const activeId = session.activeId;
-        if (wasDragging) {
-          event.preventDefault();
-          suppressNextClick(activeId);
-        }
-        clearPointerSession(false);
-        if (wasDragging) {
-          latestRef.current.onReorderEnd?.({ activeId, input: "pointer" });
-          setAnnouncement(`${latestRef.current.getItemLabel(activeId)} 已放置。`);
-        }
+        if (handledWindowPointerEventsRef.current.has(event.nativeEvent)) return;
+        finishPointerSession(event.pointerId, () => event.preventDefault());
       };
 
       const cancelPointer: PointerEventHandler<ElementType> = (event) => {
+        if (handledWindowPointerEventsRef.current.has(event.nativeEvent)) return;
+        cancelPointerSession(event.pointerId);
+      };
+
+      // A keyed React list can temporarily release capture when the active
+      // element is moved downward in the DOM. Window listeners keep the same
+      // pointer session alive until pointerup/pointercancel completes it.
+      const onLostPointerCapture: PointerEventHandler<ElementType> = (event) => {
         const session = pointerSessionRef.current;
-        if (session?.pointerId === event.pointerId) clearPointerSession(true);
+        if (session?.pointerId === event.pointerId && session.phase === "pressing") {
+          cancelPointerSession(event.pointerId);
+        }
       };
 
       const onClickCapture: MouseEventHandler<ElementType> = (event) => {
@@ -335,7 +510,7 @@ export function useLongPressReorder<ItemId extends string>({
         if (!activeId && (event.key === " " || event.key === "Enter")) {
           event.preventDefault();
           keyboardActiveRef.current = itemId;
-          setState({ phase: "keyboard", activeId: itemId, overId: itemId });
+          setState({ phase: "keyboard", activeId: itemId, overId: itemId, dragOffsetY: 0, dragOverlay: null });
           setAnnouncement(
             `${latestRef.current.getItemLabel(itemId)} 已抓取。使用方向键移动，空格或回车放置，Esc 取消。`,
           );
@@ -375,7 +550,7 @@ export function useLongPressReorder<ItemId extends string>({
         event.preventDefault();
         const overId = currentItems[targetIndex];
         if (!overId) return;
-        setState({ phase: "keyboard", activeId, overId });
+        setState({ phase: "keyboard", activeId, overId, dragOffsetY: 0, dragOverlay: null });
         requestMove(activeId, overId, "keyboard");
       };
 
@@ -391,12 +566,22 @@ export function useLongPressReorder<ItemId extends string>({
         onPointerMove,
         onPointerUp,
         onPointerCancel: cancelPointer,
-        onLostPointerCapture: cancelPointer,
+        onLostPointerCapture,
         onClickCapture,
         onKeyDown,
       };
     },
-    [clearPointerSession, disabled, requestMove, state, suppressNextClick, targetItemAtPoint],
+    [
+      cancelPointerSession,
+      disabled,
+      dragOffsetForTarget,
+      finishPointerSession,
+      movePointerSession,
+      requestMove,
+      state,
+      targetItemAtPoint,
+      updateDragOffset,
+    ],
   );
 
   useEffect(() => {
@@ -418,6 +603,7 @@ export function useLongPressReorder<ItemId extends string>({
       if (session) {
         pointerSessionRef.current = null;
         clearTimeout(session.timer);
+        session.cleanupWindowListeners();
         releasePointer(session);
         if (session.phase === "dragging") {
           latestRef.current.onReorderCancel?.({

@@ -1,4 +1,4 @@
-import { type MouseEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { type CSSProperties, type MouseEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
@@ -1082,7 +1082,11 @@ function MainWindow() {
                 <div className="text-line"><ExpandableText kind="source" text={normalizeSourceText(result.source)} /></div>
                 <div className="text-line translation-line">
                   {providerResult.translation
-                    ? <ExpandableText kind="translation" text={providerResult.translation} textClassName={translationLanguageClass(result.source)} />
+                    ? <div className="translation-reveal" key={providerResult.translation}>
+                      <div className="translation-reveal-inner">
+                        <ExpandableText kind="translation" text={providerResult.translation} textClassName={translationLanguageClass(result.source)} />
+                      </div>
+                    </div>
                     : <div className="provider-placeholder" role="status" aria-live="polite"><span className="placeholder-dot" />{providerResult.error ?? (loading ? "翻译中…" : "翻译失败")}</div>}
                 </div>
               </div>}
@@ -1311,6 +1315,12 @@ function SettingsWindow() {
       if (!element) continue;
 
       const runningAnimation = providerRowAnimationsRef.current.get(provider.id);
+      const isPointerActive = reorder.state.phase === "dragging" && reorder.state.activeId === provider.id;
+      if (isPointerActive) {
+        runningAnimation?.cancel();
+        nextRects.set(provider.id, element.getBoundingClientRect());
+        continue;
+      }
       if (!isReordering && runningAnimation) {
         nextRects.set(
           provider.id,
@@ -1329,7 +1339,7 @@ function SettingsWindow() {
       const deltaY = previousTop === undefined ? 0 : previousTop - nextRect.top;
       if (!isReordering || reduceMotion || Math.abs(deltaY) < 0.5 || typeof element.animate !== "function") continue;
 
-      const scale = reorder.state.activeId === provider.id ? " scale(1.015)" : "";
+      const scale = reorder.state.activeId === provider.id ? " scale(1.008)" : "";
       const animation = element.animate([
         { transform: `translate3d(0, ${deltaY}px, 0)${scale}` },
         { transform: `translate3d(0, 0, 0)${scale}` },
@@ -1894,18 +1904,35 @@ function SettingsWindow() {
   }
 
   function renderProviderColumn() {
+    const draggedProvider = reorder.state.phase === "dragging" && reorder.state.activeId
+      ? providerCollection.find((provider) => provider.id === reorder.state.activeId) ?? null
+      : null;
+    const draggedProviderEnabled = draggedProvider
+      ? enabledProviderIds.includes(draggedProvider.id)
+      : false;
+    const dragOverlayStyle = reorder.state.dragOverlay
+      ? {
+          "--provider-overlay-x": `${reorder.state.dragOverlay.left}px`,
+          "--provider-overlay-y": `${reorder.state.dragOverlay.top}px`,
+          width: `${reorder.state.dragOverlay.width}px`,
+          height: `${reorder.state.dragOverlay.height}px`,
+        } as CSSProperties
+      : undefined;
     return <aside className="settings-provider-column">
       <div className="provider-search"><SearchIcon /><input aria-label="搜索供应商或分组" value={providerSearch} onChange={(event) => setProviderSearch(event.target.value)} placeholder="搜索供应商或分组" /></div>
       <div className="provider-list-heading"><span>可用接口</span><strong>{filteredProviders.length}</strong></div>
-      <nav className="provider-list-nav" aria-label="供应商列表">{filteredProviders.map((provider) => {
+      <nav className={`provider-list-nav${reorder.state.phase === "dragging" ? " is-pointer-dragging" : ""}`} aria-label="供应商列表">{filteredProviders.map((provider) => {
         const enabled = enabledProviderIds.includes(provider.id);
         const isCustom = addedGenericProviders.includes(provider.id as GenericProviderId);
         const isPressing = reorder.state.activeId === provider.id && reorder.state.phase === "pressing";
-        const isDragging = reorder.state.activeId === provider.id && (reorder.state.phase === "dragging" || reorder.state.phase === "keyboard");
-        const isOver = reorder.state.overId === provider.id && reorder.state.activeId !== provider.id;
+        const isPointerPlaceholder = reorder.state.activeId === provider.id && reorder.state.phase === "dragging";
+        const isDragging = reorder.state.activeId === provider.id && reorder.state.phase === "keyboard";
+        const isOver = reorder.state.phase === "keyboard"
+          && reorder.state.overId === provider.id
+          && reorder.state.activeId !== provider.id;
         const reorderProps = reorder.getItemProps<HTMLButtonElement>(provider.id);
         return <div
-          className={`provider-list-row${isPressing ? " is-pressing" : ""}${isDragging ? " is-dragging" : ""}${isOver ? " is-over" : ""}`}
+          className={`provider-list-row${isPressing ? " is-pressing" : ""}${isPointerPlaceholder ? " is-placeholder" : ""}${isDragging ? " is-dragging" : ""}${isOver ? " is-over" : ""}`}
           key={provider.id}
           ref={(element) => {
             if (element) providerRowElementsRef.current.set(provider.id, element);
@@ -1936,6 +1963,15 @@ function SettingsWindow() {
             aria-expanded={isCustom ? providerContextMenu?.providerId === provider.id : undefined}
           ><ProviderIcon provider={provider} /><span className="provider-list-copy"><strong>{provider.vendor}</strong></span><span className={`provider-list-status-dot ${enabled ? "is-enabled" : ""}`} aria-hidden="true" /><span className="sr-only">{enabled ? "已启用" : "未启用"}</span></button></div>;
       })}</nav>
+      {draggedProvider && dragOverlayStyle && <div
+        className="provider-list-row provider-drag-overlay"
+        style={dragOverlayStyle}
+        aria-hidden="true"
+      ><div className={`provider-list-item ${draggedProvider.id === selectedSettingsProvider.id ? "is-selected" : ""}`}>
+          <ProviderIcon provider={draggedProvider} />
+          <span className="provider-list-copy"><strong>{draggedProvider.vendor}</strong></span>
+          <span className={`provider-list-status-dot ${draggedProviderEnabled ? "is-enabled" : ""}`} />
+        </div></div>}
       <span className="sr-only" role="status" {...reorder.liveRegionProps} />
       <div className="provider-column-footer"><button type="button" className="provider-add-button" onClick={() => openAddProvider()}>＋ 添加自定义供应商</button></div>
     </aside>;
