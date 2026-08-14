@@ -43,7 +43,8 @@ const LOOPBACK_PROXY_BYPASS: &str = "localhost,127.0.0.1,::1";
 const FLOAT_BUTTON_SIZE: i32 = 28;
 const FLOAT_SIZE: i32 = FLOAT_BUTTON_SIZE + 4;
 pub(crate) const FLOAT_PADDING: i32 = (FLOAT_SIZE - FLOAT_BUTTON_SIZE) / 2;
-const FLOAT_ANCHOR_GAP: i32 = 6;
+const FLOAT_ANCHOR_GAP: i32 = 10;
+const FLOAT_ANCHOR_VERTICAL_GAP: i32 = 18;
 const TRANSLATION_WINDOW_WIDTH: f64 = 480.0;
 const TRANSLATION_WINDOW_HEIGHT: f64 = 660.0;
 pub(crate) const FLOAT_CORNER_RADIUS: i32 = 10;
@@ -159,7 +160,7 @@ mod selection_float_tests {
     fn float_position_uses_the_upper_right_of_the_selection_anchor() {
         assert_eq!(
             clamp_float_position(Anchor { x: 100, y: 100 }, 0, 0, 500, 500),
-            Anchor { x: 104, y: 64 },
+            Anchor { x: 108, y: 52 },
         );
     }
 
@@ -787,7 +788,7 @@ fn clamp_float_position(
             .clamp(work_x, max_x),
         y: anchor
             .y
-            .saturating_sub(FLOAT_ANCHOR_GAP)
+            .saturating_sub(FLOAT_ANCHOR_VERTICAL_GAP)
             .saturating_sub(FLOAT_SIZE)
             .saturating_add(FLOAT_PADDING)
             .clamp(work_y, max_y),

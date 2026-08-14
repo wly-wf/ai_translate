@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use windows::{
     core::Error,
     Win32::{
-        Foundation::{HGLOBAL, POINT},
+        Foundation::{HGLOBAL, POINT, RECT},
         System::{
             Com::{
                 CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
@@ -25,7 +25,8 @@ use windows::{
             Memory::{GlobalLock, GlobalSize, GlobalUnlock},
             Ole::{
                 OleFlushClipboard, OleGetClipboard, OleInitialize, OleSetClipboard,
-                OleUninitialize, CF_UNICODETEXT,
+                OleUninitialize, CF_UNICODETEXT, SafeArrayAccessData, SafeArrayDestroy,
+                SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayUnaccessData,
             },
         },
         UI::{
@@ -413,6 +414,59 @@ fn text_pattern_from_element_or_ancestors(
     None
 }
 
+/// Reads the bounding rectangles UIA reports for a selected range. The
+/// returned SAFEARRAY contains plain VT_R8 doubles, four per rectangle in
+/// left/top/right/bottom order, in screen coordinates. Providers that expose
+/// no geometry yield `None` so the caller falls back to the release point.
+fn selection_bounding_rects(range: &IUIAutomationTextRange) -> Option<Vec<RECT>> {
+    let array = unsafe { range.GetBoundingRectangles() }.ok()?;
+    if array.is_null() {
+        return None;
+    }
+    let parsed = (|| {
+        let upper = unsafe { SafeArrayGetUBound(array, 1) }.ok()?;
+        let lower = unsafe { SafeArrayGetLBound(array, 1) }.ok()?;
+        let count = upper.checked_sub(lower)?.checked_add(1)? as usize;
+        if count == 0 || count % 4 != 0 {
+            return None;
+        }
+        let mut data: *mut std::ffi::c_void = std::ptr::null_mut();
+        unsafe { SafeArrayAccessData(array, &mut data) }.ok()?;
+        let result = (|| {
+            let doubles = unsafe { std::slice::from_raw_parts(data as *const f64, count) };
+            let mut rects = Vec::with_capacity(count / 4);
+            for chunk in doubles.chunks_exact(4) {
+                rects.push(RECT {
+                    left: chunk[0].round() as i32,
+                    top: chunk[1].round() as i32,
+                    right: chunk[2].round() as i32,
+                    bottom: chunk[3].round() as i32,
+                });
+            }
+            Some(rects)
+        })();
+        unsafe { SafeArrayUnaccessData(array) }.ok()?;
+        result
+    })();
+    let _ = unsafe { SafeArrayDestroy(array) };
+    parsed
+}
+
+/// Anchors the selection float above the top edge of the selection while
+/// keeping the release point as the horizontal reference. Without usable
+/// geometry the plain release point is kept.
+fn selection_anchor(point: POINT, rects: &[RECT]) -> POINT {
+    let top = rects
+        .iter()
+        .filter(|rect| rect.right > rect.left && rect.bottom > rect.top)
+        .map(|rect| rect.top)
+        .min();
+    POINT {
+        x: point.x,
+        y: top.unwrap_or(point.y),
+    }
+}
+
 fn capture_from_text_pattern(
     text_pattern: &IUIAutomationTextPattern,
     point: POINT,
@@ -430,10 +484,14 @@ fn capture_from_text_pattern(
     // be either a stale UIA range or a valid release in line-end whitespace;
     // the caller distinguishes that case and uses the guarded copy fallback.
     let mut point_matches_selection = point_range.as_ref().map(|_| false);
+    let mut selection_rects: Vec<RECT> = Vec::new();
 
     for index in 0..range_count {
         trace_capture_phase("uia-get-selected-range");
         let range = unsafe { ranges.GetElement(index)? };
+        if let Some(mut rects) = selection_bounding_rects(&range) {
+            selection_rects.append(&mut rects);
+        }
         if let Some(point_range) = point_range.as_ref() {
             match range_contains_point(&range, point_range) {
                 Some(true) => point_matches_selection = Some(true),
@@ -454,7 +512,8 @@ fn capture_from_text_pattern(
         }
     }
 
-    let outcome = CapturedSelection::from_text_at_point(text, point);
+    let anchor = selection_anchor(point, &selection_rects);
+    let outcome = CapturedSelection::from_text_at_point(text, anchor);
     if point_matches_selection == Some(false)
         && matches!(
             outcome,
@@ -1208,6 +1267,33 @@ mod tests {
                 text: "selected".into(),
                 anchor: Anchor { x: 25, y: 35 },
             })
+        );
+    }
+
+    #[test]
+    fn selection_anchor_uses_the_top_of_the_selection_bounds() {
+        let rects = [
+            RECT { left: 10, top: 40, right: 60, bottom: 55 },
+            RECT { left: 20, top: 60, right: 50, bottom: 75 },
+        ];
+
+        assert_eq!(
+            selection_anchor(POINT { x: 45, y: 70 }, &rects),
+            POINT { x: 45, y: 40 }
+        );
+    }
+
+    #[test]
+    fn selection_anchor_keeps_the_release_point_without_usable_geometry() {
+        let degenerate = [RECT { left: 5, top: 30, right: 5, bottom: 30 }];
+
+        assert_eq!(
+            selection_anchor(POINT { x: 8, y: 9 }, &degenerate),
+            POINT { x: 8, y: 9 }
+        );
+        assert_eq!(
+            selection_anchor(POINT { x: 8, y: 9 }, &[]),
+            POINT { x: 8, y: 9 }
         );
     }
 
