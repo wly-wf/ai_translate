@@ -21,7 +21,7 @@ use std::{
 };
 use tauri::{
     image::Image as TauriImage,
-    menu::{Menu, MenuItemBuilder},
+    menu::{CheckMenuItemBuilder, Menu, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     window::Color,
     webview::PageLoadEvent,
@@ -2340,6 +2340,7 @@ async fn set_user_preference(
     value: serde_json::Value,
 ) -> Result<UserPreferences, String> {
     let updates_provider_order = preference == "providerOrder";
+    let updates_auto_selection = preference == "autoSelection";
     let update_app = app.clone();
     let preferences = tauri::async_runtime::spawn_blocking(move || {
         let state = update_app.state::<Mutex<UserPreferences>>();
@@ -2435,6 +2436,19 @@ async fn set_user_preference(
     }
     app.emit("preferences-changed", &preferences)
         .map_err(|error| error.to_string())?;
+    if updates_auto_selection {
+        let tray_app = app.clone();
+        let callback_app = tray_app.clone();
+        if let Err(error) = tray_app.run_on_main_thread(move || {
+            if let Err(error) = refresh_tray_auto_selection(&callback_app) {
+                eprintln!(
+                    "Tray menu refresh failed after auto selection preference change: {error}"
+                );
+            }
+        }) {
+            eprintln!("Could not schedule tray menu refresh: {error}");
+        }
+    }
     if updates_provider_order {
         let provider_order = preferences.provider_order.clone();
         if let Ok(providers) = tauri::async_runtime::spawn_blocking(move || {
@@ -2702,17 +2716,63 @@ async fn translate_selection_float(app: AppHandle) -> Result<(), String> {
     }
 }
 
-fn initialize_tray_icon(app: &tauri::App) -> Result<(), String> {
-    let icon = TauriImage::from_bytes(include_bytes!("../icons/tray-icon.png"))
-        .map_err(|error| format!("Could not load the tray icon asset: {error}"))?;
+fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
+    let auto_selection_item = CheckMenuItemBuilder::with_id("toggle-auto-selection", "划词翻译")
+        .checked(is_auto_selection_enabled(app))
+        .build(app)
+        .map_err(|error| error.to_string())?;
     let settings_item = MenuItemBuilder::with_id("settings", "设置")
         .build(app)
         .map_err(|error| error.to_string())?;
     let quit_item = MenuItemBuilder::with_id("quit", "退出")
         .build(app)
         .map_err(|error| error.to_string())?;
-    let menu = Menu::with_items(app, &[&settings_item, &quit_item])
-        .map_err(|error| error.to_string())?;
+    Menu::with_items(app, &[&auto_selection_item, &settings_item, &quit_item])
+        .map_err(|error| error.to_string())
+}
+
+fn refresh_tray_auto_selection(app: &AppHandle) -> Result<(), String> {
+    let tray = app
+        .tray_by_id("ai-translate-tray")
+        .ok_or_else(|| "Tray icon is unavailable.".to_string())?;
+    let menu = build_tray_menu(app)?;
+    tray.set_menu(Some(menu)).map_err(|error| error.to_string())
+}
+
+fn toggle_auto_selection(app: &AppHandle) {
+    let updated = {
+        let state = app.state::<Mutex<UserPreferences>>();
+        let mut preferences = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        preferences.auto_selection = !preferences.auto_selection;
+        preferences.clone()
+    };
+    if let Err(error) = refresh_tray_auto_selection(app) {
+        eprintln!("Tray menu refresh failed after toggling auto selection: {error}");
+    }
+    if !updated.auto_selection {
+        if let Err(error) = hide_float(app) {
+            eprintln!(
+                "Selection float hide failed after disabling auto selection from the tray: {error}"
+            );
+        }
+    }
+    if let Err(error) = app.emit("preferences-changed", &updated) {
+        eprintln!("Preferences change emission failed after tray toggle: {error}");
+    }
+    let persist = updated.clone();
+    thread::spawn(move || {
+        if let Err(error) = save_preferences_sync(&persist) {
+            eprintln!("Auto selection preference save failed: {error}");
+        }
+    });
+}
+
+fn initialize_tray_icon(app: &tauri::App) -> Result<(), String> {
+    let icon = TauriImage::from_bytes(include_bytes!("../icons/tray-icon.png"))
+        .map_err(|error| format!("Could not load the tray icon asset: {error}"))?;
+    let menu = build_tray_menu(app.handle())?;
 
     TrayIconBuilder::with_id("ai-translate-tray")
         .icon(icon)
@@ -2721,6 +2781,7 @@ fn initialize_tray_icon(app: &tauri::App) -> Result<(), String> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| {
             match event.id().as_ref() {
+                "toggle-auto-selection" => toggle_auto_selection(app),
                 "settings" => spawn_settings_window(app),
                 "quit" => app.exit(0),
                 _ => {}
