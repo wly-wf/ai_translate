@@ -167,6 +167,7 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "厂商接口配置" })).toBeInTheDocument();
     expect(screen.getAllByText("DeepSeek").length).toBeGreaterThan(0);
     const settingsNav = screen.getByRole("navigation", { name: "设置分类" });
+    expect(within(settingsNav.parentElement as HTMLElement).queryByRole("heading", { name: "设置" })).not.toBeInTheDocument();
     expect(within(settingsNav).getAllByRole("button").map((button) => button.textContent)).toEqual([
       "偏好设置", "供应商", "网络代理", "关于",
     ]);
@@ -205,15 +206,15 @@ describe("App", () => {
 
     const brand = container.querySelector(".about-brand");
     expect(brand).toHaveTextContent("AI Translate");
-    expect(brand).not.toHaveTextContent("关于");
     expect(screen.getByRole("heading", { level: 1, name: "AI Translate" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "软件介绍" })).toBeInTheDocument();
-    expect(screen.getByText("v0.1.0")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "软件介绍" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "版本与更新" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "开源与反馈" })).not.toBeInTheDocument();
+    expect(screen.getByText(/v0\.1\.0/)).toBeInTheDocument();
+    expect(screen.getByText("Windows")).toBeInTheDocument();
     expect(screen.getByText("GitHub 开源仓库")).toBeInTheDocument();
     expect(screen.getByText("GitHub Issues")).toBeInTheDocument();
-    expect(screen.getByText("https://github.com/<owner>/<repository>")).toBeInTheDocument();
-    expect(screen.getByText("https://github.com/<owner>/<repository>/issues")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "检查更新" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "暂不可用" })).toBeDisabled();
     expect(screen.getAllByText("待配置")).toHaveLength(2);
   });
 
@@ -680,6 +681,13 @@ describe("App", () => {
     render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: "偏好设置" }));
+    expect(screen.queryByText("外观与行为")).not.toBeInTheDocument();
+    expect(screen.queryByText("集中管理默认模型、颜色模式、翻译文字大小和窗口交互方式。")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: "偏好设置" })).toHaveClass("sr-only");
+    expect(screen.getByRole("heading", { level: 2, name: "偏好" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 2, name: "字体" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 2, name: "其他" })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "选中文本自动显示悬浮按钮" })).toBeChecked();
     expect(screen.queryByText("“跟随系统”会在 Windows 外观变化时自动切换")).not.toBeInTheDocument();
     expect(screen.queryByText("翻译结果中原文的显示大小")).not.toBeInTheDocument();
     expect(screen.queryByText("鼠标完成选区后显示翻译入口")).not.toBeInTheDocument();
@@ -743,18 +751,33 @@ describe("App", () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === "get_enabled_providers") return Promise.resolve([]);
       if (command === "get_preferences") return Promise.resolve({ proxyMode: "system", proxyUrl: "" });
+      if (command === "test_proxy_connection") return Promise.resolve("连接成功（HTTP 200）");
       return Promise.resolve(undefined);
     });
     render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: "网络代理" }));
-    fireEvent.click(screen.getByRole("radio", { name: "自定义" }));
-    const proxyInput = screen.getByLabelText("代理地址");
-    expect(proxyInput).toBeEnabled();
-    fireEvent.change(proxyInput, { target: { value: "http://127.0.0.1:7890" } });
+    expect(screen.queryByRole("heading", { level: 1, name: "网络代理" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 2, name: "代理设置" })).toBeInTheDocument();
+    const enabledSwitch = screen.getByRole("checkbox", { name: "启动代理" }) as HTMLInputElement;
+    expect(enabledSwitch).not.toBeChecked();
+    fireEvent.click(enabledSwitch);
+    const proxyHostInput = screen.getByLabelText("服务器地址");
+    expect(proxyHostInput).toBeEnabled();
+    fireEvent.change(proxyHostInput, { target: { value: "proxy.example.com" } });
+    fireEvent.change(screen.getByLabelText("端口"), { target: { value: "8443" } });
+    fireEvent.change(screen.getByLabelText("代理绕过地址"), { target: { value: "localhost,127.0.0.1" } });
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_user_preference", { preference: "proxyMode", value: "custom" }));
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_user_preference", { preference: "proxyUrl", value: "http://127.0.0.1:7890" }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_user_preference", { preference: "proxyHost", value: "proxy.example.com" }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_user_preference", { preference: "proxyPort", value: "8443" }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_user_preference", { preference: "proxyBypass", value: "localhost,127.0.0.1" }));
+    const testButton = screen.getByRole("button", { name: "测试" });
+    if (!enabledSwitch.checked) fireEvent.click(enabledSwitch);
+    await waitFor(() => expect(testButton).toBeEnabled());
+    fireEvent.click(testButton);
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("test_proxy_connection", { url: "https://www.google.com" }));
+    expect(await screen.findByText("连接成功（HTTP 200）")).toBeInTheDocument();
   });
 
   it("disables quick translation when no provider is enabled", async () => {
@@ -973,8 +996,10 @@ describe("App", () => {
 
       const button = await screen.findByRole("button", { name: "展开完整原文" });
       expect(button).toHaveAttribute("aria-expanded", "false");
+      expect(button).not.toHaveAttribute("title");
       fireEvent.click(button);
       expect(button).toHaveAttribute("aria-expanded", "true");
+      expect(button).not.toHaveAttribute("title");
     } finally {
       rectSpy.mockRestore();
     }

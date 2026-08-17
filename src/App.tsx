@@ -22,6 +22,7 @@ type TranslationError = { requestId: number; message: string };
 type ActiveProviderChanged = { providerId: ProviderId; model: string };
 type ThemeMode = "light" | "dark" | "system";
 type ProxyMode = "system" | "disabled" | "custom";
+type ProxyType = "http" | "https" | "socks4" | "socks5";
 type UserPreferences = {
   autoSelection: boolean;
   keepOnTop: boolean;
@@ -31,6 +32,13 @@ type UserPreferences = {
   translationFontSize: number;
   proxyMode: ProxyMode;
   proxyUrl: string;
+  proxyType: ProxyType;
+  proxyHost: string;
+  proxyPort: string;
+  proxyUsername: string;
+  proxyPassword: string;
+  proxyBypass: string;
+  proxyTestUrl: string;
   providerOrder: string[];
 };
 type TitlebarDragState = {
@@ -245,8 +253,15 @@ const DEFAULT_USER_PREFERENCES: UserPreferences = {
   themeMode: "system",
   sourceFontSize: 14,
   translationFontSize: 16,
-  proxyMode: "system",
+  proxyMode: "disabled",
   proxyUrl: "",
+  proxyType: "https",
+  proxyHost: "127.0.0.1",
+  proxyPort: "7890",
+  proxyUsername: "",
+  proxyPassword: "",
+  proxyBypass: "localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1",
+  proxyTestUrl: "https://www.google.com",
   providerOrder: DEFAULT_PROVIDER_ORDER,
 };
 
@@ -538,6 +553,13 @@ function useUserPreferences() {
     translationFontSize: preferences.translationFontSize,
     proxyMode: preferences.proxyMode,
     proxyUrl: preferences.proxyUrl,
+    proxyType: preferences.proxyType,
+    proxyHost: preferences.proxyHost,
+    proxyPort: preferences.proxyPort,
+    proxyUsername: preferences.proxyUsername,
+    proxyPassword: preferences.proxyPassword,
+    proxyBypass: preferences.proxyBypass,
+    proxyTestUrl: preferences.proxyTestUrl,
     providerOrder: preferences.providerOrder,
     setAutoSelection: (value: boolean) => updatePreference("autoSelection", value),
     setKeepOnTop: (value: boolean) => updatePreference("keepOnTop", value),
@@ -547,6 +569,13 @@ function useUserPreferences() {
     setTranslationFontSize: (value: number) => updatePreference("translationFontSize", value),
     setProxyMode: (value: ProxyMode) => updatePreference("proxyMode", value),
     setProxyUrl: (value: string) => updatePreference("proxyUrl", value),
+    setProxyType: (value: ProxyType) => updatePreference("proxyType", value),
+    setProxyHost: (value: string) => updatePreference("proxyHost", value),
+    setProxyPort: (value: string) => updatePreference("proxyPort", value),
+    setProxyUsername: (value: string) => updatePreference("proxyUsername", value),
+    setProxyPassword: (value: string) => updatePreference("proxyPassword", value),
+    setProxyBypass: (value: string) => updatePreference("proxyBypass", value),
+    setProxyTestUrl: (value: string) => updatePreference("proxyTestUrl", value),
     setProviderOrder: (value: string[]) => updatePreference("providerOrder", value),
     preferencesError,
   };
@@ -617,7 +646,6 @@ export function ExpandableText({ text, kind, textClassName = "" }: { text: strin
       className={`text-expand-button ${kind}-expand-button`}
       aria-label={expanded ? `收起完整${textLabel}` : `展开完整${textLabel}`}
       aria-expanded={expanded}
-      title={expanded ? `收起${textLabel}` : `展开完整${textLabel}`}
       onClick={toggleExpanded}
     >
       <Icon name="chevron" />
@@ -710,13 +738,13 @@ function SettingsNavIcon({ name }: { name: "preferences" | "providers" | "proxy"
   return <svg className="settings-nav-icon" viewBox="0 0 24 24" aria-hidden="true">{paths[name]}</svg>;
 }
 
-function AboutIcon({ name }: { name: "intro" | "version" | "github" | "issues" | "external" | "refresh" }) {
+function AboutIcon({ name }: { name: "version" | "system" | "github" | "issues" | "external" | "refresh" }) {
   if (name === "github") {
-    return <svg className="about-icon" viewBox="0 0 24 24" aria-hidden="true"><path d={siGithub.path} /></svg>;
+    return <svg className="about-icon about-icon-github" viewBox="0 0 24 24" aria-hidden="true"><path d={siGithub.path} /></svg>;
   }
   const paths: Record<Exclude<typeof name, "github">, React.ReactNode> = {
-    intro: <><path d="M6 4.5h9a3 3 0 0 1 3 3v9a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3v-9a3 3 0 0 1 3-3Z" /><path d="M7.5 9h6M7.5 12h7.5M7.5 15h4.5" /></>,
     version: <><path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5" /><path d="M20.5 5v7h-7" /></>,
+    system: <><rect x="3.5" y="4.5" width="17" height="12" rx="2" /><path d="M8 20h8M12 16.5V20" /></>,
     issues: <><circle cx="12" cy="12" r="8.5" /><path d="M12 7.5v5.5M12 16.5v.01" /></>,
     external: <><path d="M9 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4" /><path d="M14 3h7v7M21 3l-9 9" /></>,
     refresh: <><path d="M20 11a8 8 0 1 0 1 4" /><path d="M20 5v6h-6" /></>,
@@ -1111,12 +1139,15 @@ function SettingsWindow() {
   const [connectionState, setConnectionState] = useState<ConnectionState>({ providerId: null, status: "idle", message: "" });
   const {
     autoSelection, keepOnTop, quickTranslateProvider,
-    themeMode, sourceFontSize, translationFontSize, proxyMode, proxyUrl, providerOrder,
+    themeMode, sourceFontSize, translationFontSize, proxyMode, proxyType, proxyHost, proxyPort,
+    proxyUsername, proxyPassword, proxyBypass, proxyTestUrl, providerOrder,
     setAutoSelection, setKeepOnTop, setQuickTranslateProvider,
-    setThemeMode, setSourceFontSize, setTranslationFontSize, setProxyMode, setProxyUrl, setProviderOrder,
+    setThemeMode, setSourceFontSize, setTranslationFontSize, setProxyMode, setProxyType, setProxyHost,
+    setProxyPort, setProxyUsername, setProxyPassword, setProxyBypass, setProxyTestUrl, setProviderOrder,
     preferencesError,
   } = useUserPreferences();
   const [notice, setNotice] = useState("");
+  const [proxyTestState, setProxyTestState] = useState<{ status: "idle" | "testing" | "success" | "error"; message: string }>({ status: "idle", message: "" });
   const [showApiKey, setShowApiKey] = useState(false);
   const [providerSearch, setProviderSearch] = useState("");
   const [providerOrderPreview, setProviderOrderPreview] = useState<ProviderId[] | null>(null);
@@ -1825,71 +1856,74 @@ function SettingsWindow() {
       const provider = providerCollection.find((item) => item.id === providerId);
       return provider ? { providerId, model: settingsEnabledProviderModels[providerId] ?? provider.model, vendor: provider.vendor } : null;
     }).filter((choice): choice is ModelChoice => choice !== null);
-    return <div className="settings-page-view preferences-settings-page"><div className="settings-page-heading"><div><p className="settings-page-eyebrow">外观与行为</p><h1>偏好设置</h1></div></div><p className="settings-description">集中管理默认模型、颜色模式、翻译文字大小和窗口交互方式。</p>
-      <section className="default-quick-model-card"><div className="default-quick-model-copy"><span className="default-quick-model-mark" aria-hidden="true"><QuickTranslateIcon /></span><div><strong>默认快速翻译模型</strong></div></div><ModelPicker value={quickTranslateProvider} choices={defaultModelChoices} onChange={setQuickTranslateProvider} ariaLabel="设置默认快速翻译模型" disabled={!defaultModelChoices.length} />{!defaultModelChoices.length && <p className="default-quick-model-empty">请先在“供应商”页面启用至少一个翻译模型。</p>}</section>
-      <section className="interface-settings-card">
-      <div className="appearance-setting-row"><div><strong>颜色模式</strong></div><SegmentedControl ariaLabel="颜色模式" value={themeMode} options={[{ value: "light", label: "浅色" }, { value: "dark", label: "深色" }, { value: "system", label: "跟随系统" }]} onChange={(value) => setThemeMode(value as ThemeMode)} /></div>
-      <div className="font-size-setting-row"><div><strong>原文字号</strong></div><label><span>{sourceFontSize}px</span><input aria-label="原文字号" type="range" min="12" max="24" step="1" value={sourceFontSize} onChange={(event) => setSourceFontSize(Number(event.target.value))} /></label></div>
-      <div className="font-size-setting-row"><div><strong>译文字号</strong></div><label><span>{translationFontSize}px</span><input aria-label="译文字号" type="range" min="12" max="28" step="1" value={translationFontSize} onChange={(event) => setTranslationFontSize(Number(event.target.value))} /></label></div>
-      <label className="preference-row"><span><strong>选中文本自动显示悬浮按钮</strong></span><input type="checkbox" checked={autoSelection} onChange={(event) => setAutoSelection(event.target.checked)} /></label>
-      <label className="preference-row"><span><strong>翻译窗口保持置顶</strong></span><input type="checkbox" checked={keepOnTop} onChange={(event) => setKeepOnTop(event.target.checked)} /></label>
+    return <div className="settings-page-view preferences-settings-page"><h1 className="sr-only">偏好设置</h1>
+      <section className="preferences-section" aria-labelledby="preferences-general-title">
+        <header className="preferences-section-heading"><h2 id="preferences-general-title">偏好</h2></header>
+        <div className="preferences-section-rows">
+          <div className="default-quick-model-card"><div className="default-quick-model-copy"><strong>默认快速翻译模型</strong></div><div className="default-quick-model-control"><ModelPicker value={quickTranslateProvider} choices={defaultModelChoices} onChange={setQuickTranslateProvider} ariaLabel="设置默认快速翻译模型" disabled={!defaultModelChoices.length} />{!defaultModelChoices.length && <p className="default-quick-model-empty">请先在“供应商”页面启用至少一个翻译模型。</p>}</div></div>
+          <div className="appearance-setting-row"><div><strong>颜色模式</strong></div><SegmentedControl ariaLabel="颜色模式" value={themeMode} options={[{ value: "light", label: "浅色" }, { value: "dark", label: "深色" }, { value: "system", label: "跟随系统" }]} onChange={(value) => setThemeMode(value as ThemeMode)} /></div>
+          <div className="preference-setting-row"><div><strong>选中文本自动显示悬浮按钮</strong></div><label className="settings-switch"><input aria-label="选中文本自动显示悬浮按钮" type="checkbox" checked={autoSelection} onChange={(event) => setAutoSelection(event.target.checked)} /><span aria-hidden="true" /></label></div>
+          <div className="preference-setting-row"><div><strong>翻译窗口保持置顶</strong></div><label className="settings-switch"><input aria-label="翻译窗口保持置顶" type="checkbox" checked={keepOnTop} onChange={(event) => setKeepOnTop(event.target.checked)} /><span aria-hidden="true" /></label></div>
+        </div>
       </section>
-      <section className="placeholder-settings-card preferences-secondary-card"><div className="placeholder-setting-row"><div><strong>启动时自动运行</strong></div><span className="placeholder-badge">即将支持</span></div><div className="placeholder-setting-row"><div><strong>默认目标语言</strong></div><span className="placeholder-value">自动识别</span></div><div className="placeholder-setting-row"><div><strong>配置同步</strong></div><span className="placeholder-badge">即将支持</span></div></section>
+      <section className="preferences-section" aria-labelledby="preferences-font-title">
+        <header className="preferences-section-heading"><h2 id="preferences-font-title">字体</h2></header>
+        <div className="preferences-section-rows">
+          <div className="font-size-setting-row"><div><strong>原文字号</strong></div><label><span>{sourceFontSize}px</span><input aria-label="原文字号" type="range" min="12" max="24" step="1" value={sourceFontSize} onChange={(event) => setSourceFontSize(Number(event.target.value))} /></label></div>
+          <div className="font-size-setting-row"><div><strong>译文字号</strong></div><label><span>{translationFontSize}px</span><input aria-label="译文字号" type="range" min="12" max="28" step="1" value={translationFontSize} onChange={(event) => setTranslationFontSize(Number(event.target.value))} /></label></div>
+        </div>
+      </section>
+      <section className="preferences-section preferences-secondary-section" aria-labelledby="preferences-other-title">
+        <header className="preferences-section-heading"><h2 id="preferences-other-title">其他</h2></header>
+        <div className="preferences-section-rows"><div className="placeholder-setting-row"><div><strong>启动时自动运行</strong></div><span className="placeholder-badge">即将支持</span></div><div className="placeholder-setting-row"><div><strong>默认目标语言</strong></div><span className="placeholder-value">自动识别</span></div><div className="placeholder-setting-row"><div><strong>配置同步</strong></div><span className="placeholder-badge">即将支持</span></div></div>
+      </section>
     </div>;
   }
 
   function renderProxyPage() {
-    return <div className="settings-page-view proxy-settings-page"><div className="settings-page-heading"><div><p className="settings-page-eyebrow">网络连接</p><h1>网络代理</h1></div></div><p className="settings-description">为翻译、模型获取和连接测试统一设置代理。修改后会立即用于下一次网络请求。</p>
-      <section className="proxy-settings-card">
-        <div className="proxy-mode-heading"><div><strong>代理模式</strong></div><SegmentedControl ariaLabel="代理模式" value={proxyMode} options={[{ value: "system", label: "跟随系统" }, { value: "custom", label: "自定义" }, { value: "disabled", label: "不使用代理" }]} onChange={(value) => setProxyMode(value as ProxyMode)} /></div>
-        <label className={`proxy-url-field${proxyMode === "custom" ? " is-active" : ""}`}><span><strong>代理地址</strong></span><input aria-label="代理地址" value={proxyUrl} disabled={proxyMode !== "custom"} onChange={(event) => setProxyUrl(event.target.value)} placeholder="例如 http://127.0.0.1:7890" spellCheck={false} /></label>
-        <div className="proxy-note"><span aria-hidden="true">i</span><p>{proxyMode === "system" ? "将读取 Windows 系统代理及 HTTP_PROXY、HTTPS_PROXY、ALL_PROXY 环境变量。" : proxyMode === "custom" ? "本机地址会保持直连；其他模型请求通过此代理发送。" : "所有模型请求均直接连接，不读取系统或环境变量代理。"}</p></div>
+    const proxyEnabled = proxyMode === "custom";
+    const testProxy = async () => {
+      if (!proxyEnabled || !proxyTestUrl.trim()) return;
+      setProxyTestState({ status: "testing", message: "正在测试代理连接…" });
+      try {
+        const message = await nativeInvoke<string>("test_proxy_connection", { url: proxyTestUrl.trim() });
+        setProxyTestState({ status: "success", message });
+      } catch (error) {
+        setProxyTestState({ status: "error", message: String(error) });
+      }
+    };
+    return <div className="settings-page-view proxy-settings-page">
+      <section className="proxy-settings-card" aria-labelledby="proxy-settings-title">
+        <h2 id="proxy-settings-title">代理设置</h2>
+        <div className="proxy-settings-rows">
+          <div className="proxy-form-row"><span>启动代理</span><label className="settings-switch"><input aria-label="启动代理" type="checkbox" checked={proxyEnabled} onChange={(event) => setProxyMode(event.target.checked ? "custom" : "disabled")} /><span aria-hidden="true" /></label></div>
+          <label className="proxy-form-row"><span>代理类型</span><select aria-label="代理类型" value={proxyType} disabled={!proxyEnabled} onChange={(event) => setProxyType(event.target.value as ProxyType)}><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks4">SOCKS4</option><option value="socks5">SOCKS5</option></select></label>
+          <label className="proxy-form-row"><span>服务器地址</span><input aria-label="服务器地址" value={proxyHost} disabled={!proxyEnabled} onChange={(event) => setProxyHost(event.target.value)} placeholder="127.0.0.1" spellCheck={false} /></label>
+          <label className="proxy-form-row"><span>端口</span><input aria-label="端口" inputMode="numeric" value={proxyPort} disabled={!proxyEnabled} onChange={(event) => setProxyPort(event.target.value.replace(/\D/g, ""))} placeholder="7890" /></label>
+          <label className="proxy-form-row"><span>用户名</span><input aria-label="代理用户名" value={proxyUsername} disabled={!proxyEnabled} onChange={(event) => setProxyUsername(event.target.value)} placeholder="可选" autoComplete="off" /></label>
+          <label className="proxy-form-row"><span>密码</span><input aria-label="代理密码" type="password" value={proxyPassword} disabled={!proxyEnabled} onChange={(event) => setProxyPassword(event.target.value)} placeholder="可选" autoComplete="new-password" /></label>
+          <label className="proxy-form-row proxy-bypass-row"><span>代理绕过</span><textarea aria-label="代理绕过地址" value={proxyBypass} disabled={!proxyEnabled} onChange={(event) => setProxyBypass(event.target.value)} spellCheck={false} /></label>
+          <p className="proxy-priority-note">同时配置全局代理与供应商代理时，将优先使用供应商代理。</p>
+        </div>
+      </section>
+      <section className="proxy-test-panel" aria-label="代理连接测试">
+        <label className="proxy-test-url"><span>连接测试</span><input aria-label="代理测试地址" value={proxyTestUrl} disabled={!proxyEnabled} onChange={(event) => setProxyTestUrl(event.target.value)} spellCheck={false} /></label>
+        <button type="button" onClick={() => void testProxy()} disabled={!proxyEnabled || proxyTestState.status === "testing"}>{proxyTestState.status === "testing" ? "测试中…" : "测试"}</button>
+        {proxyTestState.status !== "idle" && <p className={`proxy-test-result ${proxyTestState.status}`} role="status">{proxyTestState.message}</p>}
       </section>
     </div>;
   }
 
   function renderAboutPage() {
     return <div className="settings-page-view about-page">
-      <header className="about-brand">
-        <img src={appIcon} alt="" />
-        <h1>AI Translate</h1>
-      </header>
-
-      <div className="about-content">
-        <section className="about-section-card about-intro-card" aria-labelledby="about-intro-title">
-          <span className="about-section-icon" aria-hidden="true"><AboutIcon name="intro" /></span>
-          <div>
-            <h2 id="about-intro-title">软件介绍</h2>
-            <p>AI Translate 是一款轻量、快速的 Windows 桌面翻译工具，支持划词翻译、快速输入翻译和多模型供应商配置。</p>
-            <div className="about-tags" aria-label="软件特性"><span>Windows</span><span>桌面端</span><span>开源计划</span></div>
-          </div>
-        </section>
-
-        <section className="about-section-card" aria-labelledby="about-version-title">
-          <div className="about-section-heading">
-            <span className="about-section-icon" aria-hidden="true"><AboutIcon name="version" /></span>
-            <div><h2 id="about-version-title">版本与更新</h2><p>后续将通过 GitHub Releases 提供版本检查与更新说明。</p></div>
-          </div>
-          <div className="about-version-row">
-            <div className="about-version-copy"><span>当前版本</span><strong>v{APP_VERSION}</strong><small>开发预览版</small></div>
-            <button type="button" className="about-update-button" disabled aria-describedby="about-update-status"><AboutIcon name="refresh" />检查更新</button>
-          </div>
-          <p className="about-update-status" id="about-update-status" role="status"><span aria-hidden="true" />更新服务将在 GitHub 仓库和发布流程创建后接入。</p>
-        </section>
-
-        <section className="about-section-card about-links-card" aria-labelledby="about-links-title">
-          <div className="about-section-heading about-links-heading"><div><h2 id="about-links-title">开源与反馈</h2><p>仓库创建后，只需在页面常量中填入正式地址即可启用入口。</p></div></div>
-          <div className="about-link-list">
-            {PROJECT_LINKS.map((link) => <div className="about-link-row" key={link.id}>
-              <span className="about-link-icon" aria-hidden="true"><AboutIcon name={link.id === "repository" ? "github" : "issues"} /></span>
-              <div className="about-link-copy"><strong>{link.title}</strong><span>{link.description}</span><code className={link.url ? "" : "is-placeholder"}>{link.url || link.placeholder}</code></div>
-              {link.url
-                ? <a className="about-link-action" href={link.url} target="_blank" rel="noreferrer">打开<AboutIcon name="external" /></a>
-                : <span className="about-pending-badge">待配置</span>}
-            </div>)}
-          </div>
-        </section>
+      <header className="about-brand"><img src={appIcon} alt="" /><div><h1>AI Translate</h1><p>轻量、快速的 Windows 桌面翻译工具</p></div></header>
+      <div className="about-info-list" aria-label="软件信息">
+        <div className="about-info-row"><span className="about-link-icon" aria-hidden="true"><AboutIcon name="version" /></span><strong>版本</strong><span className="about-info-value">v{APP_VERSION} · 开发预览版</span></div>
+        <div className="about-info-row"><span className="about-link-icon" aria-hidden="true"><AboutIcon name="system" /></span><strong>系统</strong><span className="about-info-value">Windows</span></div>
+        <div className="about-info-row"><span className="about-link-icon" aria-hidden="true"><AboutIcon name="refresh" /></span><strong>检查更新</strong><button type="button" className="about-update-button" disabled aria-describedby="about-update-status">暂不可用</button></div>
+        {PROJECT_LINKS.map((link) => <div className="about-info-row" key={link.id}><span className="about-link-icon" aria-hidden="true"><AboutIcon name={link.id === "repository" ? "github" : "issues"} /></span><strong>{link.title}</strong>{link.url ? <a className="about-link-action" href={link.url} target="_blank" rel="noreferrer">打开<AboutIcon name="external" /></a> : <span className="about-pending-badge">待配置</span>}</div>)}
       </div>
+      <p className="about-update-status" id="about-update-status" role="status"><span aria-hidden="true" />更新与项目链接将在正式发布后开放。</p>
     </div>;
   }
 

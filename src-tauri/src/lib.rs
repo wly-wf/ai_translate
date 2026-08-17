@@ -38,8 +38,8 @@ const PROVIDER_KEYRING_PREFIX: &str = "provider-config:";
 const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 const DEEPSEEK_MODEL: &str = "deepseek-v4-flash";
 const THINKING_DISABLED: &str = "disabled";
-const USER_PREFERENCES_VERSION: u8 = 1;
-const LOOPBACK_PROXY_BYPASS: &str = "localhost,127.0.0.1,::1";
+const USER_PREFERENCES_VERSION: u8 = 2;
+const DEFAULT_PROXY_BYPASS: &str = "localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1";
 const FLOAT_BUTTON_SIZE: i32 = 28;
 const FLOAT_SIZE: i32 = FLOAT_BUTTON_SIZE + 4;
 pub(crate) const FLOAT_PADDING: i32 = (FLOAT_SIZE - FLOAT_BUTTON_SIZE) / 2;
@@ -184,13 +184,14 @@ mod selection_float_tests {
             x: 100,
             y: 200,
             width: 28,
+            scale_factor: 1.0,
             work_x: 0,
             work_y: 0,
             work_width: 1200,
             work_height: 800,
         };
 
-        assert_eq!(translation_window_position(placement, 420, 330), Anchor { x: 136, y: 200 });
+        assert_eq!(translation_window_position(placement, 420, 330), Anchor { x: 140, y: 200 });
     }
 
     #[test]
@@ -199,13 +200,14 @@ mod selection_float_tests {
             x: 1100,
             y: 200,
             width: 28,
+            scale_factor: 1.0,
             work_x: 0,
             work_y: 0,
             work_width: 1200,
             work_height: 800,
         };
 
-        assert_eq!(translation_window_position(placement, 420, 330), Anchor { x: 672, y: 200 });
+        assert_eq!(translation_window_position(placement, 420, 330), Anchor { x: 668, y: 200 });
     }
 
     #[test]
@@ -556,6 +558,10 @@ mod selection_float_tests {
 
         assert_eq!(preferences.proxy_mode, ProxyMode::System);
         assert!(preferences.proxy_url.is_empty());
+        assert_eq!(preferences.proxy_type, ProxyType::Https);
+        assert_eq!(preferences.proxy_host, "127.0.0.1");
+        assert_eq!(preferences.proxy_port, "7890");
+        assert_eq!(preferences.proxy_bypass, DEFAULT_PROXY_BYPASS);
         assert_eq!(preferences.theme_mode, ThemeMode::System);
         assert_eq!(preferences.source_font_size, 14);
         assert_eq!(preferences.translation_font_size, 16);
@@ -573,6 +579,8 @@ mod selection_float_tests {
 
         assert_eq!(value["proxyMode"], "custom");
         assert_eq!(value["proxyUrl"], "http://127.0.0.1:7890");
+        assert_eq!(value["proxyType"], "https");
+        assert_eq!(value["proxyHost"], "127.0.0.1");
     }
 
     #[test]
@@ -598,11 +606,29 @@ mod selection_float_tests {
         assert!(build_http_client(&preferences, Duration::from_secs(1)).is_ok());
 
         preferences.proxy_mode = ProxyMode::Custom;
-        preferences.proxy_url = "http://127.0.0.1:7890".into();
+        preferences.proxy_type = ProxyType::Http;
+        preferences.proxy_host = "127.0.0.1".into();
+        preferences.proxy_port = "7890".into();
         assert!(build_http_client(&preferences, Duration::from_secs(1)).is_ok());
 
+        preferences.proxy_host.clear();
         preferences.proxy_url.clear();
         assert!(build_http_client(&preferences, Duration::from_secs(1)).is_err());
+    }
+
+    #[test]
+    fn detailed_proxy_preferences_build_an_authenticated_url() {
+        let preferences = UserPreferences {
+            proxy_mode: ProxyMode::Custom,
+            proxy_type: ProxyType::Socks5,
+            proxy_host: "proxy.example.com".into(),
+            proxy_port: "1080".into(),
+            proxy_username: "user".into(),
+            proxy_password: "secret".into(),
+            ..UserPreferences::default()
+        };
+        let url = custom_proxy_url(&preferences).unwrap();
+        assert_eq!(url, "socks5h://user:secret@proxy.example.com:1080");
     }
 
     #[test]
@@ -684,6 +710,16 @@ enum ProxyMode {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ProxyType {
+    Http,
+    #[default]
+    Https,
+    Socks4,
+    Socks5,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 enum ThemeMode {
     Light,
@@ -694,6 +730,10 @@ enum ThemeMode {
 
 fn default_source_font_size() -> u8 { 14 }
 fn default_translation_font_size() -> u8 { 16 }
+fn default_proxy_host() -> String { "127.0.0.1".to_string() }
+fn default_proxy_port() -> String { "7890".to_string() }
+fn default_proxy_bypass() -> String { DEFAULT_PROXY_BYPASS.to_string() }
+fn default_proxy_test_url() -> String { "https://www.google.com".to_string() }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -713,6 +753,20 @@ struct UserPreferences {
     #[serde(default)]
     proxy_url: String,
     #[serde(default)]
+    proxy_type: ProxyType,
+    #[serde(default = "default_proxy_host")]
+    proxy_host: String,
+    #[serde(default = "default_proxy_port")]
+    proxy_port: String,
+    #[serde(default)]
+    proxy_username: String,
+    #[serde(default)]
+    proxy_password: String,
+    #[serde(default = "default_proxy_bypass")]
+    proxy_bypass: String,
+    #[serde(default = "default_proxy_test_url")]
+    proxy_test_url: String,
+    #[serde(default)]
     provider_order: Vec<String>,
     #[serde(default)]
     preference_version: u8,
@@ -727,8 +781,15 @@ impl Default for UserPreferences {
             theme_mode: ThemeMode::System,
             source_font_size: default_source_font_size(),
             translation_font_size: default_translation_font_size(),
-            proxy_mode: ProxyMode::System,
+            proxy_mode: ProxyMode::Disabled,
             proxy_url: String::new(),
+            proxy_type: ProxyType::Https,
+            proxy_host: default_proxy_host(),
+            proxy_port: default_proxy_port(),
+            proxy_username: String::new(),
+            proxy_password: String::new(),
+            proxy_bypass: default_proxy_bypass(),
+            proxy_test_url: default_proxy_test_url(),
             provider_order: Vec::new(),
             preference_version: USER_PREFERENCES_VERSION,
         }
@@ -795,13 +856,14 @@ fn clamp_float_position(
     }
 }
 
-const TRANSLATION_WINDOW_GAP: i32 = 8;
+const TRANSLATION_WINDOW_GAP: i32 = 12;
 
 #[derive(Clone, Copy, Debug)]
 struct FloatPlacement {
     x: i32,
     y: i32,
     width: u32,
+    scale_factor: f64,
     work_x: i32,
     work_y: i32,
     work_width: u32,
@@ -1164,13 +1226,28 @@ fn load_preferences_sync() -> Result<UserPreferences, String> {
         Ok(password) => {
             let mut preferences: UserPreferences = serde_json::from_str(&password)
                 .map_err(|error| format!("无法读取界面偏好：{error}"))?;
-            if preferences.preference_version < USER_PREFERENCES_VERSION {
+            if preferences.preference_version < 1 {
                 // The previous version defaulted to always-on-top. Start the
                 // new click-away behavior unpinned, while preserving future
                 // pin choices across restarts.
                 preferences.keep_on_top = false;
-                preferences.preference_version = USER_PREFERENCES_VERSION;
             }
+            if preferences.preference_version < 2 {
+                if preferences.proxy_mode == ProxyMode::Custom {
+                    if let Some((proxy_type, host, port, username, password)) = proxy_details_from_url(&preferences.proxy_url) {
+                        preferences.proxy_type = proxy_type;
+                        preferences.proxy_host = host;
+                        preferences.proxy_port = port;
+                        preferences.proxy_username = username;
+                        preferences.proxy_password = password;
+                    }
+                } else if preferences.proxy_mode == ProxyMode::System {
+                    preferences.proxy_mode = ProxyMode::Disabled;
+                }
+                preferences.proxy_bypass = default_proxy_bypass();
+                preferences.proxy_test_url = default_proxy_test_url();
+            }
+            preferences.preference_version = USER_PREFERENCES_VERSION;
             Ok(preferences)
         }
         Err(_) => Ok(UserPreferences::default()),
@@ -1242,6 +1319,57 @@ fn normalized_proxy_url(proxy_url: &str) -> Result<String, String> {
     Ok(proxy_url)
 }
 
+fn proxy_details_from_url(proxy_url: &str) -> Option<(ProxyType, String, String, String, String)> {
+    let normalized = normalized_proxy_url(proxy_url).ok()?;
+    let parsed = reqwest::Url::parse(&normalized).ok()?;
+    let proxy_type = match parsed.scheme() {
+        "http" => ProxyType::Http,
+        "https" => ProxyType::Https,
+        "socks4" | "socks4a" => ProxyType::Socks4,
+        "socks5" | "socks5h" => ProxyType::Socks5,
+        _ => return None,
+    };
+    Some((
+        proxy_type,
+        parsed.host_str()?.to_string(),
+        parsed.port_or_known_default()?.to_string(),
+        parsed.username().to_string(),
+        parsed.password().unwrap_or_default().to_string(),
+    ))
+}
+
+fn custom_proxy_url(preferences: &UserPreferences) -> Result<String, String> {
+    let host = preferences.proxy_host.trim();
+    if host.is_empty() {
+        return normalized_proxy_url(&preferences.proxy_url);
+    }
+    let port = preferences.proxy_port.trim().parse::<u16>()
+        .map_err(|_| "代理端口必须是 1 到 65535 之间的数字。".to_string())?;
+    if port == 0 {
+        return Err("代理端口必须是 1 到 65535 之间的数字。".to_string());
+    }
+    let scheme = match preferences.proxy_type {
+        ProxyType::Http => "http",
+        ProxyType::Https => "https",
+        ProxyType::Socks4 => "socks4",
+        ProxyType::Socks5 => "socks5h",
+    };
+    let formatted_host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    let mut url = reqwest::Url::parse(&format!("{scheme}://{formatted_host}:{port}"))
+        .map_err(|_| "代理服务器地址格式无效。".to_string())?;
+    if !preferences.proxy_username.is_empty() {
+        url.set_username(&preferences.proxy_username)
+            .map_err(|_| "代理用户名格式无效。".to_string())?;
+        url.set_password(Some(&preferences.proxy_password))
+            .map_err(|_| "代理密码格式无效。".to_string())?;
+    }
+    Ok(url.to_string())
+}
+
 fn build_http_client(
     preferences: &UserPreferences,
     timeout: Duration,
@@ -1251,10 +1379,12 @@ fn build_http_client(
         ProxyMode::System => builder,
         ProxyMode::Disabled => builder.no_proxy(),
         ProxyMode::Custom => {
-            let proxy_url = normalized_proxy_url(&preferences.proxy_url)?;
-            let proxy = reqwest::Proxy::all(&proxy_url)
-                .map_err(|_| "无法使用该代理地址，请检查协议、主机和端口。".to_string())?
-                .no_proxy(reqwest::NoProxy::from_string(LOOPBACK_PROXY_BYPASS));
+            let proxy_url = custom_proxy_url(preferences)?;
+            let mut proxy = reqwest::Proxy::all(&proxy_url)
+                .map_err(|_| "无法使用该代理地址，请检查协议、主机和端口。".to_string())?;
+            if !preferences.proxy_bypass.trim().is_empty() {
+                proxy = proxy.no_proxy(reqwest::NoProxy::from_string(&preferences.proxy_bypass));
+            }
             builder.proxy(proxy)
         }
     };
@@ -1862,6 +1992,7 @@ fn capture_float_placement(app: &AppHandle) -> Result<FloatPlacement, String> {
         .ok_or_else(|| "Selection float window is unavailable.".to_string())?;
     let position = window.outer_position().map_err(|error| error.to_string())?;
     let size = window.outer_size().map_err(|error| error.to_string())?;
+    let scale_factor = window.scale_factor().map_err(|error| error.to_string())?;
     let monitor = monitor_for_anchor(&window, &Anchor { x: position.x, y: position.y })?;
     let work_area = monitor.work_area();
 
@@ -1869,6 +2000,7 @@ fn capture_float_placement(app: &AppHandle) -> Result<FloatPlacement, String> {
         x: position.x,
         y: position.y,
         width: size.width,
+        scale_factor,
         work_x: work_area.position.x,
         work_y: work_area.position.y,
         work_width: work_area.size.width,
@@ -1876,9 +2008,14 @@ fn capture_float_placement(app: &AppHandle) -> Result<FloatPlacement, String> {
     })
 }
 
+/// Computes the translation window position from the float placement and
+/// applies it. The size used for the left/right decision is derived from the
+/// locked logical window size and the float monitor's scale factor, so a
+/// stale or hidden window state cannot skew the result.
 fn position_translation_window(window: &WebviewWindow, placement: FloatPlacement) -> Result<(), String> {
-    let size = window.outer_size().map_err(|error| error.to_string())?;
-    let position = translation_window_position(placement, size.width, size.height);
+    let width = (TRANSLATION_WINDOW_WIDTH * placement.scale_factor).round().max(1.0) as u32;
+    let height = (TRANSLATION_WINDOW_HEIGHT * placement.scale_factor).round().max(1.0) as u32;
+    let position = translation_window_position(placement, width, height);
     window.set_position(Position::Physical(PhysicalPosition::new(position.x, position.y)))
         .map_err(|error| error.to_string())
 }
@@ -1984,6 +2121,13 @@ async fn translate_and_display(
     window
         .set_always_on_top(request_preferences.keep_on_top)
         .map_err(|error| error.to_string())?;
+    // Re-apply after showing: some Windows/WebView2 combinations adjust the
+    // frame when the window becomes visible, which can move it away from the
+    // float. Keeping the second application makes the side-of-button position
+    // deterministic.
+    if let Some(placement) = float_placement {
+        position_translation_window(&window, placement)?;
+    }
     app.emit("translation-started", &pending_result).map_err(|error| error.to_string())?;
 
     let mut pending = Vec::with_capacity(targets.len());
@@ -2335,6 +2479,24 @@ fn get_preferences(app: AppHandle) -> UserPreferences {
 }
 
 #[tauri::command]
+async fn test_proxy_connection(app: AppHandle, url: String) -> Result<String, String> {
+    let target = url.trim();
+    let parsed = reqwest::Url::parse(target)
+        .map_err(|_| "测试地址格式无效。".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err("测试地址必须是有效的 HTTP 或 HTTPS 地址。".to_string());
+    }
+    let preferences = current_preferences(&app);
+    if preferences.proxy_mode != ProxyMode::Custom {
+        return Err("请先启动代理。".to_string());
+    }
+    let client = build_http_client(&preferences, Duration::from_secs(15))?;
+    let response = client.get(parsed).send().await
+        .map_err(|error| format!("代理连接失败：{error}"))?;
+    Ok(format!("连接成功（HTTP {}）", response.status().as_u16()))
+}
+
+#[tauri::command]
 async fn set_user_preference(
     app: AppHandle,
     preference: String,
@@ -2409,6 +2571,45 @@ async fn set_user_preference(
                     .as_str()
                     .ok_or_else(|| "proxyUrl must be a string".to_string())?
                     .to_string();
+            }
+            "proxyType" => {
+                updated.proxy_type = match value.as_str() {
+                    Some("http") => ProxyType::Http,
+                    Some("https") => ProxyType::Https,
+                    Some("socks4") => ProxyType::Socks4,
+                    Some("socks5") => ProxyType::Socks5,
+                    _ => return Err("proxyType must be http, https, socks4, or socks5".to_string()),
+                };
+            }
+            "proxyHost" => {
+                updated.proxy_host = value.as_str()
+                    .ok_or_else(|| "proxyHost must be a string".to_string())?
+                    .trim().to_string();
+            }
+            "proxyPort" => {
+                updated.proxy_port = value.as_str()
+                    .ok_or_else(|| "proxyPort must be a string".to_string())?
+                    .trim().to_string();
+            }
+            "proxyUsername" => {
+                updated.proxy_username = value.as_str()
+                    .ok_or_else(|| "proxyUsername must be a string".to_string())?
+                    .to_string();
+            }
+            "proxyPassword" => {
+                updated.proxy_password = value.as_str()
+                    .ok_or_else(|| "proxyPassword must be a string".to_string())?
+                    .to_string();
+            }
+            "proxyBypass" => {
+                updated.proxy_bypass = value.as_str()
+                    .ok_or_else(|| "proxyBypass must be a string".to_string())?
+                    .trim().to_string();
+            }
+            "proxyTestUrl" => {
+                updated.proxy_test_url = value.as_str()
+                    .ok_or_else(|| "proxyTestUrl must be a string".to_string())?
+                    .trim().to_string();
             }
             "providerOrder" => {
                 updated.provider_order = normalize_provider_order(&value)?;
@@ -2694,7 +2895,13 @@ async fn translate_selection_float(app: AppHandle) -> Result<(), String> {
     };
 
     let text = selection.text.clone();
-    let float_placement = capture_float_placement(&app).ok();
+    let float_placement = match capture_float_placement(&app) {
+        Ok(placement) => Some(placement),
+        Err(error) => {
+            eprintln!("Selection float placement capture failed: {error}");
+            None
+        }
+    };
     if let Err(error) = hide_float(&app) {
         eprintln!("Selection float hide failed before translation: {error}");
     }
@@ -2709,6 +2916,15 @@ async fn translate_selection_float(app: AppHandle) -> Result<(), String> {
             if restored {
                 if let Err(show_error) = show_float(&app, selection.anchor, selection.generation) {
                     eprintln!("Selection float restore failed after translation error: {show_error}");
+                }
+            }
+            // The error window is shown without a translation request, so it
+            // never reaches translate_and_display; position it next to the
+            // float here so every float-initiated window opens beside the
+            // button, including failures.
+            if let (Some(placement), Some(window)) = (float_placement, app.get_webview_window("main")) {
+                if let Err(position_error) = position_translation_window(&window, placement) {
+                    eprintln!("Translation error window positioning failed: {position_error}");
                 }
             }
             report_translation_error(&app, request_id, &error);
@@ -2921,6 +3137,7 @@ pub fn run() {
             set_provider_enabled,
             has_api_key,
             get_preferences,
+            test_proxy_connection,
             set_user_preference,
             hide_window,
             minimize_window,
