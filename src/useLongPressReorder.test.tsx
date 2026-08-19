@@ -219,6 +219,60 @@ describe("useLongPressReorder", () => {
     });
   });
 
+  it("keeps the drag overlay inside the first and last list rows", () => {
+    const onReorder = vi.fn();
+    render(<Harness onReorder={onReorder} />);
+    const alpha = screen.getByRole("button", { name: "alpha" });
+    const beta = screen.getByRole("button", { name: "beta" });
+    const gamma = screen.getByRole("button", { name: "gamma" });
+    const rect = (top: number) => ({
+      top,
+      bottom: top + 40,
+      left: 0,
+      right: 200,
+      width: 200,
+      height: 40,
+      x: 0,
+      y: top,
+      toJSON: () => ({}),
+    } as DOMRect);
+    const itemTop = (element: HTMLElement) => Array.from(
+      document.querySelectorAll<HTMLElement>("[data-long-press-reorder-item]"),
+    ).indexOf(element) * 50;
+    vi.spyOn(alpha, "getBoundingClientRect").mockImplementation(() => rect(itemTop(alpha)));
+    vi.spyOn(beta, "getBoundingClientRect").mockImplementation(() => rect(itemTop(beta)));
+    vi.spyOn(gamma, "getBoundingClientRect").mockImplementation(() => rect(itemTop(gamma)));
+
+    fireEvent.pointerDown(alpha, {
+      pointerId: 12,
+      pointerType: "mouse",
+      isPrimary: true,
+      button: 0,
+      clientX: 20,
+      clientY: 20,
+    });
+    act(() => vi.advanceTimersByTime(180));
+    fireEvent.pointerMove(alpha, { pointerId: 12, clientX: 20, clientY: 2_000 });
+    expect(screen.getByTestId("drag-overlay-top").textContent).toBe("100");
+
+    fireEvent.pointerMove(alpha, { pointerId: 12, clientX: 20, clientY: 3_000 });
+    expect(screen.getByTestId("drag-overlay-top").textContent).toBe("100");
+    expect(onReorder).toHaveBeenCalledTimes(1);
+
+    fireEvent.pointerUp(alpha, { pointerId: 12, clientX: 20, clientY: 3_000 });
+    fireEvent.pointerDown(alpha, {
+      pointerId: 13,
+      pointerType: "mouse",
+      isPrimary: true,
+      button: 0,
+      clientX: 20,
+      clientY: 120,
+    });
+    act(() => vi.advanceTimersByTime(180));
+    fireEvent.pointerMove(alpha, { pointerId: 13, clientX: 20, clientY: -2_000 });
+    expect(screen.getByTestId("drag-overlay-top").textContent).toBe("0");
+  });
+
   it("keeps the dragged row at the same screen position while crossing a slot", () => {
     render(<Harness />);
     const alpha = screen.getByRole("button", { name: "alpha" });

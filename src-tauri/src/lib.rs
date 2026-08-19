@@ -743,6 +743,8 @@ struct UserPreferences {
     #[serde(default)]
     quick_translate_provider: Option<String>,
     #[serde(default)]
+    quick_translate_model: Option<String>,
+    #[serde(default)]
     theme_mode: ThemeMode,
     #[serde(default = "default_source_font_size")]
     source_font_size: u8,
@@ -778,6 +780,7 @@ impl Default for UserPreferences {
             auto_selection: true,
             keep_on_top: false,
             quick_translate_provider: None,
+            quick_translate_model: None,
             theme_mode: ThemeMode::System,
             source_font_size: default_source_font_size(),
             translation_font_size: default_translation_font_size(),
@@ -1204,24 +1207,12 @@ fn report_translation_error(app: &AppHandle, request_id: u64, error: &str) {
     }
 }
 
-fn keyring_entry() -> Result<Entry, String> {
-    Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(|error| error.to_string())
-}
-
-fn preferences_entry() -> Result<Entry, String> {
-    Entry::new(KEYRING_SERVICE, PREFERENCES_ACCOUNT).map_err(|error| error.to_string())
-}
-
-fn active_provider_entry() -> Result<Entry, String> {
-    Entry::new(KEYRING_SERVICE, ACTIVE_PROVIDER_ACCOUNT).map_err(|error| error.to_string())
-}
-
-fn enabled_providers_entry() -> Result<Entry, String> {
-    Entry::new(KEYRING_SERVICE, ENABLED_PROVIDERS_ACCOUNT).map_err(|error| error.to_string())
+fn account_entry(account: &str) -> Result<Entry, String> {
+    Entry::new(KEYRING_SERVICE, account).map_err(|error| error.to_string())
 }
 
 fn load_preferences_sync() -> Result<UserPreferences, String> {
-    let entry = preferences_entry()?;
+    let entry = account_entry(PREFERENCES_ACCOUNT)?;
     match entry.get_password() {
         Ok(password) => {
             let mut preferences: UserPreferences = serde_json::from_str(&password)
@@ -1257,7 +1248,7 @@ fn load_preferences_sync() -> Result<UserPreferences, String> {
 fn save_preferences_sync(preferences: &UserPreferences) -> Result<(), String> {
     let serialized = serde_json::to_string(preferences)
         .map_err(|error| format!("无法序列化界面偏好：{error}"))?;
-    preferences_entry()?
+    account_entry(PREFERENCES_ACCOUNT)?
         .set_password(&serialized)
         .map_err(|error| format!("无法保存界面偏好：{error}"))
 }
@@ -1412,8 +1403,7 @@ fn provider_keyring_entry(provider: &str) -> Result<Entry, String> {
     if !supported_provider(provider) {
         return Err(format!("不支持的 AI 提供商：{provider}"));
     }
-    Entry::new(KEYRING_SERVICE, &format!("{PROVIDER_KEYRING_PREFIX}{provider}"))
-        .map_err(|error| error.to_string())
+    account_entry(&format!("{PROVIDER_KEYRING_PREFIX}{provider}"))
 }
 
 fn stored_provider_config(provider: &str) -> Result<StoredProviderConfig, String> {
@@ -1438,11 +1428,13 @@ fn provider_api_key(provider: &str, api_key: &str) -> String {
 }
 
 fn legacy_api_key() -> Result<String, String> {
-    keyring_entry()?.get_password().map_err(|_| "请先在设置中保存 DeepSeek API Key。".to_string())
+    account_entry(KEYRING_ACCOUNT)?
+        .get_password()
+        .map_err(|_| "请先在设置中保存 DeepSeek API Key。".to_string())
 }
 
 fn active_provider_sync() -> String {
-    active_provider_entry()
+    account_entry(ACTIVE_PROVIDER_ACCOUNT)
         .and_then(|entry| entry.get_password().map_err(|error| error.to_string()))
         .ok()
         .filter(|provider| supported_provider(provider))
@@ -1450,7 +1442,7 @@ fn active_provider_sync() -> String {
 }
 
 fn enabled_providers_sync() -> Vec<String> {
-    enabled_providers_entry()
+    account_entry(ENABLED_PROVIDERS_ACCOUNT)
         .and_then(|entry| entry.get_password().map_err(|error| error.to_string()))
         .ok()
         .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
@@ -1477,7 +1469,7 @@ fn enabled_providers_sync() -> Vec<String> {
 fn save_enabled_providers_sync(providers: &[String]) -> Result<(), String> {
     let serialized = serde_json::to_string(providers)
         .map_err(|error| format!("无法序列化启用模型列表：{error}"))?;
-    enabled_providers_entry()?
+    account_entry(ENABLED_PROVIDERS_ACCOUNT)?
         .set_password(&serialized)
         .map_err(|error| format!("无法保存启用模型列表：{error}"))
 }
@@ -2061,6 +2053,7 @@ async fn translate_and_display(
     text: String,
     float_placement: Option<FloatPlacement>,
     requested_provider: Option<String>,
+    requested_model: Option<String>,
     request_id: u64,
 ) -> Result<TranslationBatch, String> {
     let source = text.trim().to_string();
@@ -2076,20 +2069,27 @@ async fn translate_and_display(
     if enabled_providers.is_empty() {
         return Err("请先在设置中启用至少一个翻译模型。".to_string());
     }
-    let providers = if let Some(provider) = requested_provider {
-        if !enabled_providers.contains(&provider) {
+    let providers = if let Some(provider) = requested_provider.as_ref() {
+        if !enabled_providers.contains(provider) {
             return Err("所选模型未启用，请重新选择。".to_string());
         }
-        vec![provider]
+        vec![provider.clone()]
     } else {
         enabled_providers
     };
     let mut targets = Vec::new();
     for provider in providers {
         let config = configured_provider(&provider)?;
+        let models = if let Some(model) = requested_model.as_ref() {
+            if !config.models.iter().any(|configured| configured == model) {
+                return Err(format!("所选模型 {model} 未配置，请重新选择。"));
+            }
+            vec![model.clone()]
+        } else {
+            config.models
+        };
         targets.extend(
-            config
-                .models
+            models
                 .into_iter()
                 .map(|model| (provider.clone(), model)),
         );
@@ -2192,8 +2192,8 @@ async fn translate_and_display(
 }
 
 #[tauri::command]
-async fn translate_text(app: AppHandle, text: String, provider: Option<String>) -> Result<TranslationBatch, String> {
-    translate_and_display(app, text, None, provider, next_translation_request_id()).await
+async fn translate_text(app: AppHandle, text: String, provider: Option<String>, model: Option<String>) -> Result<TranslationBatch, String> {
+    translate_and_display(app, text, None, provider, model, next_translation_request_id()).await
 }
 
 #[tauri::command]
@@ -2208,7 +2208,9 @@ fn get_latest_translation(app: AppHandle) -> Option<TranslationBatch> {
 fn save_api_key(api_key: String) -> Result<(), String> {
     let value = api_key.trim();
     if value.is_empty() { return Err("API Key 不能为空。".to_string()); }
-    keyring_entry()?.set_password(value).map_err(|error| format!("无法保存 API Key：{error}"))
+    account_entry(KEYRING_ACCOUNT)?
+        .set_password(value)
+        .map_err(|error| format!("无法保存 API Key：{error}"))
 }
 
 fn save_provider_config_sync(
@@ -2239,7 +2241,7 @@ fn save_provider_config_sync(
     provider_keyring_entry(&provider)?.set_password(&serialized)
         .map_err(|error| format!("无法保存 {provider} 配置：{error}"))?;
     if provider == "deepseek" {
-        keyring_entry()?.set_password(&key)
+        account_entry(KEYRING_ACCOUNT)?.set_password(&key)
             .map_err(|error| format!("无法同步保存 DeepSeek API Key：{error}"))?;
     }
     Ok(())
@@ -2327,7 +2329,7 @@ async fn delete_custom_provider(app: AppHandle, provider: String) -> Result<Vec<
         save_enabled_providers_sync(&providers)?;
         let reset_active_provider = active_provider_sync() == provider;
         if reset_active_provider {
-            active_provider_entry()?
+            account_entry(ACTIVE_PROVIDER_ACCOUNT)?
                 .set_password("deepseek")
                 .map_err(|error| format!("无法重置当前翻译模型：{error}"))?;
         }
@@ -2400,7 +2402,7 @@ async fn set_active_provider(app: AppHandle, provider: String) -> Result<String,
             return Err(format!("不支持的 AI 提供商：{provider}"));
         }
         let config = configured_provider(&provider)?;
-        active_provider_entry()?
+        account_entry(ACTIVE_PROVIDER_ACCOUNT)?
             .set_password(&provider)
             .map_err(|error| format!("无法保存当前翻译模型：{error}"))?;
         Ok(config.model)
@@ -2528,6 +2530,19 @@ async fn set_user_preference(
                         return Err(format!("Unsupported AI provider: {provider}"));
                     }
                     Some(provider.to_string())
+                };
+            }
+            "quickTranslateModel" => {
+                updated.quick_translate_model = if value.is_null() {
+                    None
+                } else {
+                    let model = value.as_str()
+                        .ok_or_else(|| "quickTranslateModel must be a model name or null".to_string())?
+                        .trim();
+                    if model.is_empty() {
+                        return Err("quickTranslateModel must not be empty".to_string());
+                    }
+                    Some(model.to_string())
                 };
             }
             "themeMode" => {
@@ -2905,7 +2920,7 @@ async fn translate_selection_float(app: AppHandle) -> Result<(), String> {
     if let Err(error) = hide_float(&app) {
         eprintln!("Selection float hide failed before translation: {error}");
     }
-    match translate_and_display(app.clone(), text, float_placement, None, request_id).await {
+    match translate_and_display(app.clone(), text, float_placement, None, None, request_id).await {
         Ok(_) => Ok(()),
         Err(error) => {
             let restored = {

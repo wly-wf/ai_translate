@@ -603,17 +603,17 @@ describe("App", () => {
   it("uses the model selected from the quick translation picker", async () => {
     invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
       if (command === "get_enabled_providers") return Promise.resolve(["deepseek", "xiaomi"]);
-      if (command === "get_preferences") return Promise.resolve({ autoSelection: true, keepOnTop: false, quickTranslateProvider: "deepseek" });
+      if (command === "get_preferences") return Promise.resolve({ autoSelection: true, keepOnTop: false, quickTranslateProvider: "deepseek", quickTranslateModel: "deepseek-v4-flash" });
       if (command === "get_provider_config") {
         return Promise.resolve(args?.provider === "xiaomi"
-          ? { apiKey: "saved", baseUrl: "https://api.xiaomimimo.com/v1", model: "mimo-v2.5-pro" }
+          ? { apiKey: "saved", baseUrl: "https://api.xiaomimimo.com/v1", model: "mimo-v2.5-pro", models: ["mimo-v2.5-pro", "mimo-v3"] }
           : { apiKey: "saved", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash" });
       }
       if (command === "translate_text") return Promise.resolve({
         source: "hello",
         requestId: 7,
         results: [
-          { providerId: "xiaomi", model: "mimo-v2.5-pro", translation: "您好" },
+          { providerId: "xiaomi", model: "mimo-v3", translation: "您好" },
         ],
       });
       return Promise.resolve(undefined);
@@ -624,19 +624,19 @@ describe("App", () => {
     const modelPicker = screen.getByRole("button", { name: "选择翻译模型" });
     await waitFor(() => expect(modelPicker).toHaveTextContent("deepseek-v4-flash"));
     fireEvent.click(modelPicker);
-    fireEvent.click(await screen.findByRole("option", { name: /mimo-v2.5-pro.*Xiaomi MiMo/ }));
+    fireEvent.click(await screen.findByRole("option", { name: /mimo-v3.*Xiaomi MiMo/ }));
     expect(screen.queryByText("设为默认快速翻译模型")).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("输入文本"), { target: { value: "hello" } });
     expect(screen.getByLabelText("输入文本")).toHaveClass("is-mixed-language");
     fireEvent.click(screen.getByRole("button", { name: "翻译" }));
 
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("translate_text", { text: "hello", provider: "xiaomi" }));
-    expect(screen.getByText("mimo-v2.5-pro/Xiaomi MiMo")).toBeInTheDocument();
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("translate_text", { text: "hello", provider: "xiaomi", model: "mimo-v3" }));
+    expect(screen.getByText("mimo-v3/Xiaomi MiMo")).toBeInTheDocument();
     expect(screen.getAllByText("您好")[0]).toBeInTheDocument();
     expect(container.querySelector(".translation:not(.text-measure)")).toHaveClass("translation-chinese");
   });
 
-  it("sets the default quick translation model from general settings", async () => {
+  it("sets the default quick translation model from its floating selection panel", async () => {
     mockWindowLabel("settings");
     invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
       if (command === "get_enabled_providers") return Promise.resolve(["deepseek", "xiaomi"]);
@@ -644,22 +644,29 @@ describe("App", () => {
       if (command === "get_provider_config") {
         return Promise.resolve(args?.provider === "xiaomi"
           ? { apiKey: "saved", baseUrl: "https://api.xiaomimimo.com/v1", model: "mimo-v2.5-pro" }
-          : { apiKey: "saved", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash" });
+          : { apiKey: "saved", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash", models: ["deepseek-v4-flash", "deepseek-reasoner"] });
       }
       return Promise.resolve(undefined);
     });
     render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: "偏好设置" }));
-    const defaultPicker = screen.getByRole("button", { name: "设置默认快速翻译模型" });
-    await waitFor(() => expect(defaultPicker).toHaveTextContent("deepseek-v4-flash"));
-    fireEvent.click(defaultPicker);
-    fireEvent.click(await screen.findByRole("option", { name: /mimo-v2.5-pro.*Xiaomi MiMo/ }));
+    const defaultModelEntry = screen.getByRole("button", { name: "设置默认快速翻译模型" });
+    await waitFor(() => expect(defaultModelEntry).toHaveTextContent("deepseek-v4-flash"));
+    fireEvent.click(defaultModelEntry);
+    expect(screen.getByRole("heading", { name: "偏好" })).toBeInTheDocument();
+    const modelDialog = screen.getByRole("dialog", { name: "选择默认模型" });
+    expect(screen.queryByRole("listbox", { name: "设置默认快速翻译模型" })).not.toBeInTheDocument();
+    const configuredModels = within(modelDialog).getByRole("list", { name: "已配置模型" });
+    expect(within(configuredModels).getByRole("button", { name: /deepseek-v4-flash.*DeepSeek/ })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(within(configuredModels).getByRole("button", { name: /deepseek-reasoner.*DeepSeek/ }));
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_user_preference", {
-      preference: "quickTranslateProvider",
-      value: "xiaomi",
+      preference: "quickTranslateModel",
+      value: "deepseek-reasoner",
     }));
+    expect(screen.queryByRole("dialog", { name: "选择默认模型" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "设置默认快速翻译模型" })).toHaveTextContent("deepseek-reasoner");
   });
 
   it("updates color mode and translation font sizes from interface settings", async () => {

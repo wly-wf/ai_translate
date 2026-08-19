@@ -18,7 +18,7 @@ pub enum StateChange {
     Unchanged,
 }
 
-const MAX_SELECTION_CHARACTERS: usize = 12_000;
+pub(crate) const MAX_SELECTION_CHARACTERS: usize = 12_000;
 
 #[derive(Default)]
 pub struct SelectionController {

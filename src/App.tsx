@@ -27,6 +27,7 @@ type UserPreferences = {
   autoSelection: boolean;
   keepOnTop: boolean;
   quickTranslateProvider: ProviderId | null;
+  quickTranslateModel: string | null;
   themeMode: ThemeMode;
   sourceFontSize: number;
   translationFontSize: number;
@@ -92,6 +93,7 @@ type ConnectionState = {
 };
 
 type ModelChoice = {
+  id: string;
   providerId: ProviderId;
   model: string;
   vendor: string;
@@ -238,6 +240,10 @@ function translationResultKey(result: Pick<ProviderTranslationResult, "providerI
   return `${result.providerId}\u0000${result.model}`;
 }
 
+function modelChoiceKey(providerId: ProviderId, model: string) {
+  return `${providerId}\u0000${model}`;
+}
+
 const TRANSLATION_PROVIDERS: TranslationProvider[] = ALL_SETTINGS_PROVIDERS.map((provider) => ({
   ...provider,
   enabled: true,
@@ -250,6 +256,7 @@ const DEFAULT_USER_PREFERENCES: UserPreferences = {
   autoSelection: true,
   keepOnTop: false,
   quickTranslateProvider: null,
+  quickTranslateModel: null,
   themeMode: "system",
   sourceFontSize: 14,
   translationFontSize: 16,
@@ -354,10 +361,14 @@ function ProviderIcon({ provider }: { provider: { id: string; mark: string; acce
   </span>;
 }
 
-function ModelPicker({ value, choices, onChange, ariaLabel, disabled = false }: { value: ProviderId | null; choices: ModelChoice[]; onChange: (providerId: ProviderId) => void; ariaLabel: string; disabled?: boolean }) {
+function CheckIcon() {
+  return <svg className="quick-model-check-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5.5 12.5 4.1 4.1 8.9-9" /></svg>;
+}
+
+function ModelPicker({ value, choices, onChange, ariaLabel, disabled = false }: { value: string | null; choices: ModelChoice[]; onChange: (choice: ModelChoice) => void; ariaLabel: string; disabled?: boolean }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
-  const selectedChoice = choices.find((choice) => choice.providerId === value) ?? null;
+  const selectedChoice = choices.find((choice) => choice.id === value) ?? null;
   const providerForChoice = (choice: ModelChoice) => {
     const provider = AVAILABLE_TRANSLATION_PROVIDERS.find((item) => item.id === choice.providerId);
     return provider ? withCustomProviderIdentity(provider, choice.vendor) : provider;
@@ -386,7 +397,7 @@ function ModelPicker({ value, choices, onChange, ariaLabel, disabled = false }: 
       <span className="model-picker-value">{selectedChoice && selectedProvider ? <><strong>{selectedChoice.model}</strong><small>{selectedProvider.vendor}</small></> : <strong>未设置默认模型</strong>}</span>
       <svg className="model-picker-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
     </button>
-    {open && <div className="model-picker-menu" role="listbox" aria-label={ariaLabel}>{choices.map((choice) => { const provider = providerForChoice(choice); if (!provider) return null; const selected = choice.providerId === value; return <button className={`model-picker-option${selected ? " is-selected" : ""}`} type="button" role="option" aria-selected={selected} key={choice.providerId} onClick={() => { onChange(choice.providerId); setOpen(false); }}><ProviderIcon provider={provider} /><span><strong>{choice.model}</strong><small>{provider.vendor}</small></span>{selected && <span className="model-picker-selected-dot" aria-hidden="true" />}</button>; })}</div>}
+    {open && <div className="model-picker-menu" role="listbox" aria-label={ariaLabel}>{choices.map((choice) => { const provider = providerForChoice(choice); if (!provider) return null; const selected = choice.id === value; return <button className={`model-picker-option${selected ? " is-selected" : ""}`} type="button" role="option" aria-selected={selected} key={choice.id} onClick={() => { onChange(choice); setOpen(false); }}><ProviderIcon provider={provider} /><span><strong>{choice.model}</strong><small>{provider.vendor}</small></span>{selected && <span className="model-picker-selected-dot" aria-hidden="true" />}</button>; })}</div>}
   </div>;
 }
 
@@ -548,6 +559,7 @@ function useUserPreferences() {
     autoSelection: preferences.autoSelection,
     keepOnTop: preferences.keepOnTop,
     quickTranslateProvider: preferences.quickTranslateProvider,
+    quickTranslateModel: preferences.quickTranslateModel,
     themeMode: preferences.themeMode,
     sourceFontSize: preferences.sourceFontSize,
     translationFontSize: preferences.translationFontSize,
@@ -564,6 +576,7 @@ function useUserPreferences() {
     setAutoSelection: (value: boolean) => updatePreference("autoSelection", value),
     setKeepOnTop: (value: boolean) => updatePreference("keepOnTop", value),
     setQuickTranslateProvider: (value: ProviderId | null) => updatePreference("quickTranslateProvider", value),
+    setQuickTranslateModel: (value: string | null) => updatePreference("quickTranslateModel", value),
     setThemeMode: (value: ThemeMode) => updatePreference("themeMode", value),
     setSourceFontSize: (value: number) => updatePreference("sourceFontSize", value),
     setTranslationFontSize: (value: number) => updatePreference("translationFontSize", value),
@@ -755,14 +768,15 @@ function AboutIcon({ name }: { name: "version" | "system" | "github" | "issues" 
 function MainWindow() {
   const [result, setResult] = useState<Translation | null>(null);
   const [text, setText] = useState("");
-  const { keepOnTop, quickTranslateProvider, providerOrder, setKeepOnTop, preferencesError } = useUserPreferences();
+  const { keepOnTop, quickTranslateProvider, quickTranslateModel, providerOrder, setKeepOnTop, preferencesError } = useUserPreferences();
   const [hasApiKey, setHasApiKey] = useState(false);
   const [activeProviderId, setActiveProviderId] = useState<ProviderId>(DEFAULT_PROVIDER_ID);
   const [activeProviderModel, setActiveProviderModel] = useState(SETTINGS_PROVIDERS[0].model);
   const [enabledProviderIds, setEnabledProviderIds] = useState<ProviderId[]>([DEFAULT_PROVIDER_ID]);
-  const [enabledProviderModels, setEnabledProviderModels] = useState<Partial<Record<ProviderId, string>>>({ deepseek: SETTINGS_PROVIDERS[0].model });
+  const [enabledProviderModels, setEnabledProviderModels] = useState<Partial<Record<ProviderId, string[]>>>({ deepseek: [SETTINGS_PROVIDERS[0].model] });
   const [enabledProviderNames, setEnabledProviderNames] = useState<Partial<Record<ProviderId, string>>>({});
   const [quickTranslateProviderId, setQuickTranslateProviderId] = useState<ProviderId>(DEFAULT_PROVIDER_ID);
+  const [quickTranslateModelName, setQuickTranslateModelName] = useState(SETTINGS_PROVIDERS[0].model);
   const [loading, setLoading] = useState(false);
   const [expandedProviderIds, setExpandedProviderIds] = useState<string[]>([DEFAULT_PROVIDER_ID]);
   const [showQuickTranslate, setShowQuickTranslate] = useState(false);
@@ -868,9 +882,9 @@ function MainWindow() {
     setEnabledProviderIds(orderedIds);
     const entries = await Promise.all(orderedIds.map(async (providerId) => {
       const config = await nativeInvoke<ProviderConfigResponse | null>("get_provider_config", { provider: providerId });
-      return [providerId, config?.model, config?.vendorName?.trim()] as const;
+      return [providerId, config ? modelsFromConfig(config) : [], config?.vendorName?.trim()] as const;
     }));
-    setEnabledProviderModels(Object.fromEntries(entries.flatMap(([providerId, model]) => model ? [[providerId, model]] : [])));
+    setEnabledProviderModels(Object.fromEntries(entries.flatMap(([providerId, models]) => models.length ? [[providerId, models]] : [])));
     setEnabledProviderNames(Object.fromEntries(entries.flatMap(([providerId, , vendorName]) => vendorName ? [[providerId, vendorName]] : [])));
     setHasApiKey(providerIds.length > 0);
   }
@@ -994,12 +1008,17 @@ function MainWindow() {
   }, [preferencesError]);
 
   useEffect(() => {
-    if (quickTranslateProvider && enabledProviderIds.includes(quickTranslateProvider)) {
+    const preferredModels = quickTranslateProvider ? enabledProviderModels[quickTranslateProvider] ?? [] : [];
+    if (quickTranslateProvider && preferredModels.length) {
       setQuickTranslateProviderId(quickTranslateProvider);
+      setQuickTranslateModelName(quickTranslateModel && preferredModels.includes(quickTranslateModel) ? quickTranslateModel : preferredModels[0]);
       return;
     }
-    setQuickTranslateProviderId((current) => enabledProviderIds.includes(current) ? current : (enabledProviderIds[0] ?? current));
-  }, [enabledProviderIds, quickTranslateProvider]);
+    const fallbackProvider = enabledProviderIds.find((providerId) => (enabledProviderModels[providerId]?.length ?? 0) > 0);
+    if (!fallbackProvider) return;
+    setQuickTranslateProviderId(fallbackProvider);
+    setQuickTranslateModelName((current) => enabledProviderModels[fallbackProvider]?.includes(current) ? current : enabledProviderModels[fallbackProvider]![0]);
+  }, [enabledProviderIds, enabledProviderModels, quickTranslateModel, quickTranslateProvider]);
 
   useEffect(() => {
     setEnabledProviderIds((current) => orderedProviderIds(providerOrder, current));
@@ -1014,7 +1033,7 @@ function MainWindow() {
     setNotice("");
     setExpandedProviderIds(enabledProviderIds);
     try {
-      const translated = await nativeInvoke<Translation>("translate_text", { text, provider: quickTranslateProviderId });
+      const translated = await nativeInvoke<Translation>("translate_text", { text, provider: quickTranslateProviderId, model: quickTranslateModelName });
       if (attempt !== latestTranslationAttempt.current || !acceptRequest(translated.requestId)) return;
       const orderedTranslation = { ...translated, results: orderProviderResults(translated.results, providerOrder) };
       const providerId = orderedTranslation.results[0]?.providerId ?? activeProviderId;
@@ -1054,11 +1073,11 @@ function MainWindow() {
     return provider && vendorName ? withCustomProviderIdentity(provider, vendorName) : provider;
   };
   const activeProviderDefinition = runtimeProvider(activeProviderId) ?? AVAILABLE_TRANSLATION_PROVIDERS[0];
-  const activeProvider = { ...activeProviderDefinition, model: enabledProviderModels[activeProviderId] ?? activeProviderModel ?? activeProviderDefinition.model };
-  const quickTranslateChoices = enabledProviderIds.map((providerId) => {
+  const activeProvider = { ...activeProviderDefinition, model: enabledProviderModels[activeProviderId]?.[0] ?? activeProviderModel ?? activeProviderDefinition.model };
+  const quickTranslateChoices = enabledProviderIds.flatMap((providerId) => {
     const provider = runtimeProvider(providerId);
-    return provider ? { providerId, model: enabledProviderModels[providerId] ?? provider.model, vendor: provider.vendor } : null;
-  }).filter((choice): choice is ModelChoice => choice !== null);
+    return provider ? (enabledProviderModels[providerId] ?? [provider.model]).map((model) => ({ id: modelChoiceKey(providerId, model), providerId, model, vendor: provider.vendor })) : [];
+  });
   return <main className="app-shell">
     <header className="titlebar" onMouseDown={beginTitlebarDrag} onMouseUp={finishTitlebarDrag}>
       <div className="titlebar-start">
@@ -1088,7 +1107,7 @@ function MainWindow() {
       {showQuickTranslate ? <div className="quick-translate-page">
         <div className="quick-translate-heading"><p className="eyebrow">快速翻译</p></div>
         {!hasApiKey && <div className="warning"><span className="warning-icon" aria-hidden="true">!</span><p>请先在设置中配置并选择一个翻译模型。</p></div>}
-        <div className="quick-model-picker"><ModelPicker value={quickTranslateProviderId} choices={quickTranslateChoices} onChange={setQuickTranslateProviderId} ariaLabel="选择翻译模型" disabled={!enabledProviderIds.length} /></div>
+        <div className="quick-model-picker"><ModelPicker value={modelChoiceKey(quickTranslateProviderId, quickTranslateModelName)} choices={quickTranslateChoices} onChange={(choice) => { setQuickTranslateProviderId(choice.providerId); setQuickTranslateModelName(choice.model); }} ariaLabel="选择翻译模型" disabled={!quickTranslateChoices.length} /></div>
         <div className="input-card"><div className="input-head"><label className="field-label" htmlFor="translation-input">输入文本</label><span className="character-count">{text.length} 字符</span></div>
           <textarea ref={inputRef} id="translation-input" className={/[A-Za-z]/.test(text) ? "is-mixed-language" : undefined} value={text} onChange={(event) => setText(event.target.value)} placeholder="输入要翻译的文字…" />
         </div>
@@ -1138,10 +1157,10 @@ function SettingsWindow() {
   const [providerDrafts, setProviderDrafts] = useState<Record<SettingsProviderId, ProviderDraft>>(createProviderDrafts);
   const [connectionState, setConnectionState] = useState<ConnectionState>({ providerId: null, status: "idle", message: "" });
   const {
-    autoSelection, keepOnTop, quickTranslateProvider,
+    autoSelection, keepOnTop, quickTranslateProvider, quickTranslateModel,
     themeMode, sourceFontSize, translationFontSize, proxyMode, proxyType, proxyHost, proxyPort,
     proxyUsername, proxyPassword, proxyBypass, proxyTestUrl, providerOrder,
-    setAutoSelection, setKeepOnTop, setQuickTranslateProvider,
+    setAutoSelection, setKeepOnTop, setQuickTranslateProvider, setQuickTranslateModel,
     setThemeMode, setSourceFontSize, setTranslationFontSize, setProxyMode, setProxyType, setProxyHost,
     setProxyPort, setProxyUsername, setProxyPassword, setProxyBypass, setProxyTestUrl, setProviderOrder,
     preferencesError,
@@ -1154,7 +1173,7 @@ function SettingsWindow() {
   const [providerContextMenu, setProviderContextMenu] = useState<{ providerId: GenericProviderId; x: number; y: number } | null>(null);
   const [deletingProviderId, setDeletingProviderId] = useState<GenericProviderId | null>(null);
   const [enabledProviderIds, setEnabledProviderIds] = useState<SettingsProviderId[]>([]);
-  const [settingsEnabledProviderModels, setSettingsEnabledProviderModels] = useState<Partial<Record<ProviderId, string>>>({});
+  const [settingsEnabledProviderModels, setSettingsEnabledProviderModels] = useState<Partial<Record<ProviderId, string[]>>>({});
   const [addedGenericProviders, setAddedGenericProviders] = useState<GenericProviderId[]>([]);
   const [fetchedModels, setFetchedModels] = useState<Partial<Record<SettingsProviderId, string[]>>>({});
   const [fetchingProviderId, setFetchingProviderId] = useState<SettingsProviderId | null>(null);
@@ -1165,6 +1184,7 @@ function SettingsWindow() {
   const [testModels, setTestModels] = useState<Partial<Record<SettingsProviderId, string>>>({});
   const [testModelDialogProviderId, setTestModelDialogProviderId] = useState<SettingsProviderId | null>(null);
   const [testModelDialogSelection, setTestModelDialogSelection] = useState("");
+  const [quickModelDialogOpen, setQuickModelDialogOpen] = useState(false);
   const connectionRequestId = useRef(0);
   const modelFetchRequestId = useRef(0);
   const providerAutoSaveTimers = useRef<Partial<Record<SettingsProviderId, number>>>({});
@@ -1173,6 +1193,8 @@ function SettingsWindow() {
   const modelFetchButtonRef = useRef<HTMLButtonElement>(null);
   const modelDialogCloseRef = useRef<HTMLButtonElement>(null);
   const testModelDialogCloseRef = useRef<HTMLButtonElement>(null);
+  const quickModelTriggerRef = useRef<HTMLButtonElement>(null);
+  const quickModelDialogCloseRef = useRef<HTMLButtonElement>(null);
   const providerContextMenuRef = useRef<HTMLDivElement>(null);
   const providerContextMenuActionRef = useRef<HTMLButtonElement>(null);
   const providerOrderPreviewRef = useRef<ProviderId[] | null>(null);
@@ -1216,6 +1238,19 @@ function SettingsWindow() {
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [testModelDialogProviderId]);
+
+  useEffect(() => {
+    if (!quickModelDialogOpen) return;
+    const frame = window.requestAnimationFrame(() => quickModelDialogCloseRef.current?.focus());
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeQuickModelDialog();
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [quickModelDialogOpen]);
 
   useEffect(() => {
     if (!providerContextMenu) return;
@@ -1272,9 +1307,9 @@ function SettingsWindow() {
     let cancelled = false;
     void Promise.all(enabledProviderIds.map(async (providerId) => {
       const config = await nativeInvoke<ProviderConfigResponse | null>("get_provider_config", { provider: providerId });
-      return config?.model ? [providerId, config.model] as const : null;
+      return config ? [providerId, modelsFromConfig(config)] as const : null;
     })).then((entries) => {
-      if (!cancelled) setSettingsEnabledProviderModels(Object.fromEntries(entries.filter((entry): entry is readonly [ProviderId, string] => entry !== null)));
+      if (!cancelled) setSettingsEnabledProviderModels(Object.fromEntries(entries.filter((entry): entry is readonly [ProviderId, string[]] => entry !== null && entry[1].length > 0)));
     }).catch((error) => {
       if (!cancelled) setNotice(String(error));
     });
@@ -1503,6 +1538,11 @@ function SettingsWindow() {
     setNotice("");
   }
 
+  function closeQuickModelDialog() {
+    setQuickModelDialogOpen(false);
+    window.requestAnimationFrame(() => quickModelTriggerRef.current?.focus());
+  }
+
   function openAddProvider() {
     setModelDialogProviderId(null);
     setProviderContextMenu(null);
@@ -1652,7 +1692,7 @@ function SettingsWindow() {
         [providerId]: { ...drafts[providerId], saved: true },
       }));
       if (enabledProviderIds.includes(providerId)) {
-        setSettingsEnabledProviderModels((current) => ({ ...current, [providerId]: models[0] }));
+        setSettingsEnabledProviderModels((current) => ({ ...current, [providerId]: models }));
       }
     } catch (error) {
       if (providerAutoSaveRequestIds.current[providerId] === requestId) setNotice(String(error));
@@ -1852,15 +1892,15 @@ function SettingsWindow() {
   }
 
   function renderPreferencesPage() {
-    const defaultModelChoices = enabledProviderIds.map((providerId) => {
+    const defaultModelChoices = enabledProviderIds.flatMap((providerId) => {
       const provider = providerCollection.find((item) => item.id === providerId);
-      return provider ? { providerId, model: settingsEnabledProviderModels[providerId] ?? provider.model, vendor: provider.vendor } : null;
-    }).filter((choice): choice is ModelChoice => choice !== null);
+      return provider ? (settingsEnabledProviderModels[providerId] ?? [provider.model]).map((model) => ({ id: modelChoiceKey(providerId, model), providerId, model, vendor: provider.vendor })) : [];
+    });
     return <div className="settings-page-view preferences-settings-page"><h1 className="sr-only">偏好设置</h1>
       <section className="preferences-section" aria-labelledby="preferences-general-title">
         <header className="preferences-section-heading"><h2 id="preferences-general-title">偏好</h2></header>
         <div className="preferences-section-rows">
-          <div className="default-quick-model-card"><div className="default-quick-model-copy"><strong>默认快速翻译模型</strong></div><div className="default-quick-model-control"><ModelPicker value={quickTranslateProvider} choices={defaultModelChoices} onChange={setQuickTranslateProvider} ariaLabel="设置默认快速翻译模型" disabled={!defaultModelChoices.length} />{!defaultModelChoices.length && <p className="default-quick-model-empty">请先在“供应商”页面启用至少一个翻译模型。</p>}</div></div>
+          <div className="default-quick-model-card"><div className="default-quick-model-copy"><strong>默认快速翻译模型</strong></div><div className="default-quick-model-control">{renderQuickModelTrigger(defaultModelChoices)}</div></div>
           <div className="appearance-setting-row"><div><strong>颜色模式</strong></div><SegmentedControl ariaLabel="颜色模式" value={themeMode} options={[{ value: "light", label: "浅色" }, { value: "dark", label: "深色" }, { value: "system", label: "跟随系统" }]} onChange={(value) => setThemeMode(value as ThemeMode)} /></div>
           <div className="preference-setting-row"><div><strong>选中文本自动显示悬浮按钮</strong></div><label className="settings-switch"><input aria-label="选中文本自动显示悬浮按钮" type="checkbox" checked={autoSelection} onChange={(event) => setAutoSelection(event.target.checked)} /><span aria-hidden="true" /></label></div>
           <div className="preference-setting-row"><div><strong>翻译窗口保持置顶</strong></div><label className="settings-switch"><input aria-label="翻译窗口保持置顶" type="checkbox" checked={keepOnTop} onChange={(event) => setKeepOnTop(event.target.checked)} /><span aria-hidden="true" /></label></div>
@@ -1877,7 +1917,48 @@ function SettingsWindow() {
         <header className="preferences-section-heading"><h2 id="preferences-other-title">其他</h2></header>
         <div className="preferences-section-rows"><div className="placeholder-setting-row"><div><strong>启动时自动运行</strong></div><span className="placeholder-badge">即将支持</span></div><div className="placeholder-setting-row"><div><strong>默认目标语言</strong></div><span className="placeholder-value">自动识别</span></div><div className="placeholder-setting-row"><div><strong>配置同步</strong></div><span className="placeholder-badge">即将支持</span></div></div>
       </section>
+      {quickModelDialogOpen && renderQuickModelDialog(defaultModelChoices)}
     </div>;
+  }
+
+  function renderQuickModelTrigger(choices: ModelChoice[]) {
+    const selectedChoice = choices.find((choice) => choice.providerId === quickTranslateProvider && (choice.model === quickTranslateModel || quickTranslateModel === null)) ?? null;
+    const selectedProvider = selectedChoice
+      ? providerCollection.find((provider) => provider.id === selectedChoice.providerId)
+      : null;
+    return <button ref={quickModelTriggerRef} className="default-quick-model-trigger" type="button" aria-label="设置默认快速翻译模型" aria-haspopup="dialog" aria-expanded={quickModelDialogOpen} onClick={() => setQuickModelDialogOpen(true)} disabled={!choices.length}>
+      {selectedProvider ? <ProviderIcon provider={selectedProvider} /> : <span className="model-picker-placeholder-icon" aria-hidden="true">◇</span>}
+      <span className="default-quick-model-value">{selectedChoice && selectedProvider ? <><strong>{selectedChoice.model}</strong><small>{selectedProvider.vendor}</small></> : <strong>未配置模型</strong>}</span>
+    </button>;
+  }
+
+  function renderQuickModelDialog(choices: ModelChoice[]) {
+    const selectedChoice = choices.find((choice) => choice.providerId === quickTranslateProvider && (choice.model === quickTranslateModel || quickTranslateModel === null)) ?? null;
+    return <>
+      <button type="button" className="quick-model-dialog-backdrop" aria-label="关闭模型选择" onClick={closeQuickModelDialog} />
+      <section className="quick-model-dialog" role="dialog" aria-modal="true" aria-labelledby="quick-model-dialog-title">
+        <header className="quick-model-dialog-header">
+          <h2 id="quick-model-dialog-title">选择默认模型</h2>
+          <button ref={quickModelDialogCloseRef} type="button" className="quick-model-dialog-close" onClick={closeQuickModelDialog} aria-label="关闭模型选择" title="关闭"><Icon name="close" /></button>
+        </header>
+        <div className="quick-model-choice-list" role="list" aria-label="已配置模型">
+        {choices.map((choice) => {
+          const provider = providerCollection.find((item) => item.id === choice.providerId);
+          if (!provider) return null;
+          const selected = choice.id === selectedChoice?.id;
+          return <div role="listitem" key={choice.providerId}><button className={`quick-model-choice${selected ? " is-selected" : ""}`} type="button" aria-pressed={selected} onClick={() => {
+            setQuickTranslateProvider(choice.providerId);
+            setQuickTranslateModel(choice.model);
+            closeQuickModelDialog();
+          }}>
+            <ProviderIcon provider={provider} />
+            <span><strong>{choice.model}</strong><small>{provider.vendor}</small></span>
+            {selected && <CheckIcon />}
+          </button></div>;
+        })}
+        </div>
+      </section>
+    </>;
   }
 
   function renderProxyPage() {

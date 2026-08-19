@@ -258,6 +258,24 @@ export function useLongPressReorder<ItemId extends string>({
     return itemId && latestRef.current.items.includes(itemId) ? itemId : null;
   }, []);
 
+  const constrainedOverlayTop = useCallback((session: PointerSession<ItemId>) => {
+    const rawTop = session.currentY - session.grabOffsetY;
+    const rows = Array.from(document.querySelectorAll<HTMLElement>(`[${ITEM_ATTRIBUTE}]`))
+      .filter((element) => latestRef.current.items.includes(element.getAttribute(ITEM_ATTRIBUTE) as ItemId))
+      .map((element) => {
+        const visualRect = element.getBoundingClientRect();
+        const height = element.offsetHeight || visualRect.height;
+        return { top: elementLayoutTop(element), height };
+      })
+      .filter((row) => row.height > 0);
+    if (!rows.length) return rawTop;
+
+    const top = Math.min(...rows.map((row) => row.top));
+    const bottom = Math.max(...rows.map((row) => row.top + row.height));
+    const maxTop = Math.max(top, bottom - session.overlayHeight);
+    return Math.min(Math.max(rawTop, top), maxTop);
+  }, []);
+
   const suppressNextClick = useCallback((itemId: ItemId) => {
     suppressedClickRef.current = itemId;
     if (clickResetTimerRef.current) clearTimeout(clickResetTimerRef.current);
@@ -269,9 +287,10 @@ export function useLongPressReorder<ItemId extends string>({
 
   const updateDragOffset = useCallback((session: PointerSession<ItemId>) => {
     if (pointerSessionRef.current !== session || session.phase !== "dragging") return;
-    const dragOffsetY = session.currentY - session.grabOffsetY - elementLayoutTop(session.element);
+    const overlayTop = constrainedOverlayTop(session);
+    const dragOffsetY = overlayTop - elementLayoutTop(session.element);
     const dragOverlay = {
-      top: session.currentY - session.grabOffsetY,
+      top: overlayTop,
       left: session.overlayLeft,
       width: session.overlayWidth,
       height: session.overlayHeight,
@@ -280,14 +299,14 @@ export function useLongPressReorder<ItemId extends string>({
     setState((current) => current.phase === "dragging" && current.activeId === session.activeId
       ? { ...current, dragOffsetY, dragOverlay }
       : current);
-  }, []);
+  }, [constrainedOverlayTop]);
 
   const dragOffsetForTarget = useCallback((session: PointerSession<ItemId>, targetId: ItemId) => {
     const target = reorderItemElement(targetId);
     return target
-      ? session.currentY - session.grabOffsetY - elementLayoutTop(target)
+      ? constrainedOverlayTop(session) - elementLayoutTop(target)
       : session.dragOffsetY;
-  }, []);
+  }, [constrainedOverlayTop]);
 
   const movePointerSession = useCallback((
     pointerId: number,
@@ -332,7 +351,7 @@ export function useLongPressReorder<ItemId extends string>({
       overId,
       dragOffsetY: session.dragOffsetY,
       dragOverlay: {
-        top: session.currentY - session.grabOffsetY,
+        top: constrainedOverlayTop(session),
         left: session.overlayLeft,
         width: session.overlayWidth,
         height: session.overlayHeight,
@@ -340,6 +359,7 @@ export function useLongPressReorder<ItemId extends string>({
     }));
   }, [
     clearPointerSession,
+    constrainedOverlayTop,
     dragOffsetForTarget,
     requestMove,
     targetItemAtPoint,
@@ -458,7 +478,7 @@ export function useLongPressReorder<ItemId extends string>({
             overId,
             dragOffsetY: session.dragOffsetY,
             dragOverlay: {
-              top: session.currentY - session.grabOffsetY,
+              top: constrainedOverlayTop(session),
               left: session.overlayLeft,
               width: session.overlayWidth,
               height: session.overlayHeight,
@@ -573,6 +593,7 @@ export function useLongPressReorder<ItemId extends string>({
     },
     [
       cancelPointerSession,
+      constrainedOverlayTop,
       disabled,
       dragOffsetForTarget,
       finishPointerSession,
