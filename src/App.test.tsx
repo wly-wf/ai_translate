@@ -198,7 +198,7 @@ describe("App", () => {
     expect(screen.getAllByRole("button", { name: "测试连接" })).toHaveLength(1);
   });
 
-  it("renders the about page information and future project links", () => {
+  it("renders the about page information and project links", () => {
     mockWindowLabel("settings");
     const { container } = render(<App />);
 
@@ -211,11 +211,14 @@ describe("App", () => {
     expect(screen.queryByRole("heading", { name: "版本与更新" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "开源与反馈" })).not.toBeInTheDocument();
     expect(screen.getByText(/v0\.1\.0/)).toBeInTheDocument();
-    expect(screen.getByText("Windows")).toBeInTheDocument();
+    expect(screen.queryByText("Windows")).not.toBeInTheDocument();
     expect(screen.getByText("GitHub 开源仓库")).toBeInTheDocument();
     expect(screen.getByText("GitHub Issues")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "暂不可用" })).toBeDisabled();
-    expect(screen.getAllByText("待配置")).toHaveLength(2);
+    const repositoryLink = screen.getByRole("link", { name: /https:\/\/github\.com\/wly-wf\/ai_translate$/ });
+    const issuesLink = screen.getByRole("link", { name: /https:\/\/github\.com\/wly-wf\/ai_translate\/issues$/ });
+    expect(repositoryLink).toHaveAttribute("href", "https://github.com/wly-wf/ai_translate");
+    expect(issuesLink).toHaveAttribute("href", "https://github.com/wly-wf/ai_translate/issues");
   });
 
   it("renders add-provider in its own window with a unified close action", () => {
