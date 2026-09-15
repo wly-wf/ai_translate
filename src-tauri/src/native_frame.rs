@@ -8,7 +8,7 @@ fn is_standard_window(label: &str) -> bool {
 
 pub(crate) fn standard_window_background(dark: bool) -> Color {
     if dark {
-        Color(21, 26, 32, 255)
+        Color(23, 27, 35, 255)
     } else {
         Color(255, 255, 255, 255)
     }
@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn standard_window_background_matches_the_css_canvas() {
-        assert_eq!(standard_window_background(true), Color(21, 26, 32, 255));
+        assert_eq!(standard_window_background(true), Color(23, 27, 35, 255));
         assert_eq!(standard_window_background(false), Color(255, 255, 255, 255));
     }
 }

@@ -11,6 +11,7 @@ import { SelectionFloat } from "./SelectionFloat";
 import { useLongPressReorder } from "./useLongPressReorder";
 import appIcon from "../src-tauri/icons/tray-icon.svg";
 import "./App.css";
+import "./dark-theme.css";
 
 type SettingsProviderId = "deepseek" | "xiaomi" | "qwen" | "zhipu" | "moonshot" | "openai";
 type ProviderId = SettingsProviderId;
@@ -354,7 +355,7 @@ function ProviderIcon({ provider }: { provider: { id: string; mark: string; acce
     return <span className={`provider-mark provider-brand-mark ${imageIcon.className}`} aria-hidden="true"><img className="provider-brand-image" src={imageIcon.src} alt="" /></span>;
   }
   const icon = PROVIDER_ICONS[provider.id as ProviderId] ?? SETTINGS_PROVIDER_ICONS[provider.id as SettingsProviderId];
-  return <span className={`provider-mark${icon ? " provider-brand-mark" : ""}`} style={icon ? { color: `#${icon.hex}` } : { backgroundColor: provider.accent }} aria-hidden="true">
+  return <span className={`provider-mark ${icon ? "provider-brand-mark" : "provider-custom-mark"}`} style={icon ? { color: `#${icon.hex}` } : undefined} aria-hidden="true">
     {icon ? <svg className="provider-icon" viewBox="0 0 24 24"><path d={icon.path} /></svg> : provider.mark}
   </span>;
 }
@@ -1907,8 +1908,8 @@ function SettingsWindow() {
       <section className="preferences-section" aria-labelledby="preferences-font-title">
         <header className="preferences-section-heading"><h2 id="preferences-font-title">字体</h2></header>
         <div className="preferences-section-rows">
-          <div className="font-size-setting-row"><div><strong>原文字号</strong></div><label><span>{sourceFontSize}px</span><input aria-label="原文字号" type="range" min="12" max="24" step="1" value={sourceFontSize} onChange={(event) => setSourceFontSize(Number(event.target.value))} /></label></div>
-          <div className="font-size-setting-row"><div><strong>译文字号</strong></div><label><span>{translationFontSize}px</span><input aria-label="译文字号" type="range" min="12" max="28" step="1" value={translationFontSize} onChange={(event) => setTranslationFontSize(Number(event.target.value))} /></label></div>
+          <div className="font-size-setting-row"><div><strong>原文字号</strong></div><label><span>{sourceFontSize}px</span><input aria-label="原文字号" type="range" min="12" max="24" step="1" value={sourceFontSize} style={{ "--range-progress": `${(sourceFontSize - 12) / 12 * 100}%` } as CSSProperties} onChange={(event) => setSourceFontSize(Number(event.target.value))} /></label></div>
+          <div className="font-size-setting-row"><div><strong>译文字号</strong></div><label><span>{translationFontSize}px</span><input aria-label="译文字号" type="range" min="12" max="28" step="1" value={translationFontSize} style={{ "--range-progress": `${(translationFontSize - 12) / 16 * 100}%` } as CSSProperties} onChange={(event) => setTranslationFontSize(Number(event.target.value))} /></label></div>
         </div>
       </section>
       <section className="preferences-section preferences-secondary-section" aria-labelledby="preferences-other-title">

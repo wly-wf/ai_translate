@@ -256,7 +256,7 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText("供应商名称"), { target: { value: "modelscope" } });
     fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "modelscope-key" } });
     expect(document.querySelector(".add-provider-model-row .provider-mark")).toHaveTextContent("m");
-    expect(document.querySelector(".add-provider-model-row .provider-mark")).toHaveStyle({ backgroundColor: "#5f83bd" });
+    expect(document.querySelector(".add-provider-model-row .provider-mark")).toHaveClass("provider-custom-mark");
 
     fireEvent.click(screen.getByRole("button", { name: "获取模型" }));
 
