@@ -236,7 +236,6 @@ describe("App", () => {
     expect(screen.queryByText("API Key（可选）")).not.toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "Google" })).not.toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "Claude" })).not.toBeInTheDocument();
-    expect(screen.queryByText("Use Responses API")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("API 路径")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("添加后启用")).not.toBeInTheDocument();
     expect(screen.getByLabelText("模型名称")).toBeInTheDocument();

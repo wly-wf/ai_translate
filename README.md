@@ -12,7 +12,7 @@ Windows 11 上的轻量级多模型翻译工具。使用 Tauri 2、Rust 与 Reac
 
 - 鼠标选中文本后显示悬浮翻译按钮；新选区会移动并更新同一个按钮。
 - 托盘图标右键菜单新增“划词翻译”开关，可随时切换；关闭后选中文本不再出现悬浮翻译按钮。
-- 可在设置中同时启用 DeepSeek、Xiaomi MiMo、阿里云百炼、智谱开放平台、Moonshot、OpenAI、Google Gemini 或 Anthropic Claude；翻译时会并发请求所有启用模型，哪个模型先完成就先展示哪个结果。翻译请求统一关闭或不启用深度思考，以缩短取词翻译等待时间。
+- 可在设置中同时启用 DeepSeek、Xiaomi MiMo、阿里云百炼、智谱开放平台、Moonshot、OpenAI、Google Gemini 或 Anthropic Claude；翻译时会并发请求所有启用模型，哪个模型先完成就先展示哪个结果。翻译请求对 DeepSeek、Xiaomi MiMo 和阿里云百炼发送关闭思考参数；其他接口使用供应商默认行为，不保证关闭思考。
 - 无边框、置顶、可隐藏的翻译结果浮窗；可复制译文。
 - 手动输入翻译，便于在未复制文本时使用。
 - API Key 使用 Windows Credential Manager 保存，不写入项目文件或浏览器本地存储。
