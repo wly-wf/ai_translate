@@ -1018,6 +1018,31 @@ describe("App", () => {
     });
   });
 
+  it("preserves English list item line breaks while reflowing wrapped item text", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_enabled_providers") return Promise.resolve(["deepseek"]);
+      if (command === "get_latest_translation") return Promise.resolve({
+        source: "Updates:\r\n• Added Volcengine text-to-speech support.\r\n• Added support for reading AGENTS.md in workspaces.\r\n• Added support for DeepSeek Flash.\r\n• Clarified that regenerating a message clears subsequent messages, and fixed compatibility issues with some\r\nservices.",
+        requestId: 15,
+        results: [{ providerId: "deepseek", model: "deepseek-v4-flash", translation: "更新内容" }],
+      });
+      return Promise.resolve(undefined);
+    });
+
+    const { container } = render(<App />);
+
+    await waitFor(() => {
+      const sourceParagraphs = Array.from(container.querySelectorAll(".source:not(.text-measure) .text-paragraph"));
+      expect(sourceParagraphs.map((paragraph) => paragraph.textContent)).toEqual([
+        "Updates:",
+        "• Added Volcengine text-to-speech support.",
+        "• Added support for reading AGENTS.md in workspaces.",
+        "• Added support for DeepSeek Flash.",
+        "• Clarified that regenerating a message clears subsequent messages, and fixed compatibility issues with some services.",
+      ]);
+    });
+  });
+
   it("reenables selection translation when the native command reports an error", async () => {
     mockWindowLabel("selection-float");
     invokeMock.mockRejectedValue(new Error("network failed"));

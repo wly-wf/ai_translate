@@ -343,7 +343,8 @@ function normalizeSourceText(value: string) {
   return normalized
     .split(/\n[\t ]*\n+/)
     .map((paragraph) => paragraph
-      .replace(/[\t ]*\n[\t ]*/g, " ")
+      .replace(/[\t ]*\n[\t ]*(?=(?:[•●▪◦‣⁃]\s+|[-*+]\s+|\d+[.)]\s+))/g, "\n")
+      .replace(/[\t ]*\n(?![•●▪◦‣⁃]|[-*+]\s|\d+[.)]\s)[\t ]*/g, " ")
       .replace(/[\t ]+/g, " ")
       .trim())
     .filter(Boolean)
