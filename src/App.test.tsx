@@ -122,7 +122,9 @@ describe("App", () => {
   it("opens the floating translation state by default and keeps quick translation behind its entry", () => {
     render(<App />);
 
-    expect(screen.getByRole("heading", { name: "选中文本开始翻译" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "选中文本即可翻译" })).toBeInTheDocument();
+    expect(screen.getByText("点击选区旁的悬浮按钮开始翻译")).toBeInTheDocument();
+    expect(screen.queryByText("悬浮翻译", { exact: true })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "把文字变成另一种语言" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "快速翻译" }));
@@ -137,7 +139,7 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "返回悬浮翻译" }));
 
-    expect(screen.getByRole("heading", { name: "选中文本开始翻译" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "选中文本即可翻译" })).toBeInTheDocument();
     expect(screen.queryByLabelText("输入文本")).not.toBeInTheDocument();
     expect(document.querySelector(".content")).not.toHaveClass("quick-content");
   });
@@ -368,6 +370,27 @@ describe("App", () => {
     });
     expect(screen.queryByText(/与其他启用模型同时返回结果/)).not.toBeInTheDocument();
     expect(screen.queryByText(/已加入翻译/)).not.toBeInTheDocument();
+  });
+
+  it("allows the last enabled provider to be turned off", async () => {
+    mockWindowLabel("settings");
+    invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_enabled_providers") return Promise.resolve(["deepseek"]);
+      if (command === "get_provider_config" && args?.provider === "deepseek") {
+        return Promise.resolve({ apiKey: "saved", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash", models: ["deepseek-v4-flash"] });
+      }
+      if (command === "get_provider_config") return Promise.resolve(null);
+      if (command === "set_provider_enabled") return Promise.resolve([]);
+      return Promise.resolve(undefined);
+    });
+    render(<App />);
+
+    const enabledSwitch = screen.getByRole("checkbox", { name: "启用此翻译模型" });
+    await waitFor(() => expect(enabledSwitch).toBeChecked());
+    fireEvent.click(enabledSwitch);
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_provider_enabled", { provider: "deepseek", enabled: false }));
+    await waitFor(() => expect(enabledSwitch).not.toBeChecked());
   });
 
   it("automatically saves valid provider edits without a save button or success notice", async () => {
@@ -789,7 +812,7 @@ describe("App", () => {
     expect(await screen.findByText("连接成功（HTTP 200）")).toBeInTheDocument();
   });
 
-  it("disables quick translation when no provider is enabled", async () => {
+  it("prompts the user to configure a provider when none is enabled", async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === "get_enabled_providers") return Promise.resolve([]);
       if (command === "get_preferences") return Promise.resolve({ autoSelection: true, keepOnTop: false, quickTranslateProvider: null });
@@ -801,9 +824,32 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText("输入文本"), { target: { value: "hello" } });
     const translateButton = screen.getByRole("button", { name: "翻译" });
 
-    await waitFor(() => expect(translateButton).toBeDisabled());
+    await waitFor(() => expect(translateButton).toBeEnabled());
     fireEvent.click(translateButton);
     expect(invokeMock).not.toHaveBeenCalledWith("translate_text", expect.anything());
+    expect(screen.getByText("需要配置翻译供应商")).toBeInTheDocument();
+    expect(screen.getByText("添加并启用供应商后即可开始翻译")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /前往设置/ }));
+    expect(invokeMock).toHaveBeenCalledWith("open_settings_window", undefined);
+  });
+
+  it("shows an actionable provider setup notice after selection translation fails", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_enabled_providers") return Promise.resolve([]);
+      return Promise.resolve(undefined);
+    });
+    render(<App />);
+    const errorHandler = listenMock.mock.calls.find(([eventName]) => eventName === "translation-error")?.[1];
+
+    act(() => errorHandler({
+      payload: {
+        requestId: 1,
+        message: "尚未配置并启用翻译供应商，请先前往设置完成配置。",
+      },
+    }));
+
+    expect(screen.getByText("需要配置翻译供应商")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /前往设置/ })).toBeInTheDocument();
   });
 
   it("invokes selection translation once while a request is pending", async () => {

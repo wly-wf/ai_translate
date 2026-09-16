@@ -101,6 +101,7 @@ type ModelChoice = {
 };
 
 const APP_VERSION = "0.1.0";
+const NO_ENABLED_PROVIDER_NOTICE = "尚未配置并启用翻译供应商，请先前往设置完成配置。";
 const PROJECT_LINKS = [
   {
     id: "repository",
@@ -605,6 +606,21 @@ function Icon({ name }: { name: "menu" | "close" | "chevron" | "pin" | "minimize
   return <svg className={`ui-icon ui-icon-${name}`} viewBox="0 0 18 18" aria-hidden="true">{paths[name]}</svg>;
 }
 
+function ProviderSetupNotice({ onOpenError }: { onOpenError: (message: string) => void }) {
+  const openSettings = () => {
+    void nativeInvoke("open_settings_window").catch((error) => onOpenError(String(error)));
+  };
+
+  return <div className="provider-setup-notice" role="status">
+    <span className="provider-setup-notice-icon" aria-hidden="true">!</span>
+    <span className="provider-setup-notice-copy">
+      <strong>需要配置翻译供应商</strong>
+      <span>添加并启用供应商后即可开始翻译</span>
+    </span>
+    <button type="button" onClick={openSettings}>前往设置<span aria-hidden="true">→</span></button>
+  </div>;
+}
+
 export function ExpandableText({ text, kind, textClassName = "" }: { text: string; kind: "source" | "translation"; textClassName?: string }) {
   const textRef = useRef<HTMLDivElement>(null);
   const measurementRef = useRef<HTMLDivElement>(null);
@@ -771,8 +787,8 @@ function MainWindow() {
   const [hasApiKey, setHasApiKey] = useState(false);
   const [activeProviderId, setActiveProviderId] = useState<ProviderId>(DEFAULT_PROVIDER_ID);
   const [activeProviderModel, setActiveProviderModel] = useState(SETTINGS_PROVIDERS[0].model);
-  const [enabledProviderIds, setEnabledProviderIds] = useState<ProviderId[]>([DEFAULT_PROVIDER_ID]);
-  const [enabledProviderModels, setEnabledProviderModels] = useState<Partial<Record<ProviderId, string[]>>>({ deepseek: [SETTINGS_PROVIDERS[0].model] });
+  const [enabledProviderIds, setEnabledProviderIds] = useState<ProviderId[]>([]);
+  const [enabledProviderModels, setEnabledProviderModels] = useState<Partial<Record<ProviderId, string[]>>>({});
   const [enabledProviderNames, setEnabledProviderNames] = useState<Partial<Record<ProviderId, string>>>({});
   const [quickTranslateProviderId, setQuickTranslateProviderId] = useState<ProviderId>(DEFAULT_PROVIDER_ID);
   const [quickTranslateModelName, setQuickTranslateModelName] = useState(SETTINGS_PROVIDERS[0].model);
@@ -1025,7 +1041,11 @@ function MainWindow() {
   }, [providerOrder]);
 
   async function translate() {
-    if (!text.trim() || quickTranslateChoices.length === 0) return;
+    if (!text.trim()) return;
+    if (quickTranslateChoices.length === 0) {
+      setNotice(NO_ENABLED_PROVIDER_NOTICE);
+      return;
+    }
     const attempt = latestTranslationAttempt.current + 1;
     latestTranslationAttempt.current = attempt;
     setLoading(true);
@@ -1105,12 +1125,12 @@ function MainWindow() {
     <section className={`content${showQuickTranslate ? " quick-content" : ""}`}>
       {showQuickTranslate ? <div className="quick-translate-page">
         <div className="quick-translate-heading"><p className="eyebrow">快速翻译</p></div>
-        {!hasApiKey && <div className="warning"><span className="warning-icon" aria-hidden="true">!</span><p>请先在设置中配置并选择一个翻译模型。</p></div>}
+        {!hasApiKey && <ProviderSetupNotice onOpenError={setNotice} />}
         <div className="quick-model-picker"><ModelPicker value={modelChoiceKey(quickTranslateProviderId, quickTranslateModelName)} choices={quickTranslateChoices} onChange={(choice) => { setQuickTranslateProviderId(choice.providerId); setQuickTranslateModelName(choice.model); }} ariaLabel="选择翻译模型" disabled={!quickTranslateChoices.length} /></div>
         <div className="input-card"><div className="input-head"><label className="field-label" htmlFor="translation-input">输入文本</label><span className="character-count">{text.length} 字符</span></div>
           <textarea ref={inputRef} id="translation-input" className={/[A-Za-z]/.test(text) ? "is-mixed-language" : undefined} value={text} onChange={(event) => setText(event.target.value)} placeholder="输入要翻译的文字…" />
         </div>
-        <div className="quick-translate-action"><button className="primary" disabled={loading || !text.trim() || quickTranslateChoices.length === 0} onClick={() => void translate()}>{loading ? "翻译中…" : "翻译"}</button></div>
+        <div className="quick-translate-action"><button className="primary" disabled={loading || !text.trim()} onClick={() => void translate()}>{loading ? "翻译中…" : "翻译"}</button></div>
       </div> : result ? <div className="translation-result">
         <div className="provider-list">
           {result.results.map((providerResult) => {
@@ -1141,11 +1161,11 @@ function MainWindow() {
         </div>
       </div> : <div className="floating-empty-state">
         <div className="floating-empty-mark" aria-hidden="true"><QuickTranslateIcon /></div>
-        <p className="eyebrow">悬浮翻译</p>
-        <h1>选中文本开始翻译</h1>
-        <p className="hint">在任意应用中选中文本，翻译入口会出现在选区旁边。</p>
-        <div className="floating-empty-tip"><span>选中文本后，点击悬浮翻译按钮即可开始</span></div>
-      </div>}{notice && <p className="notice" role="status">{notice}</p>}
+        <h1>选中文本即可翻译</h1>
+        <p className="hint">点击选区旁的悬浮按钮开始翻译</p>
+      </div>}{notice && !(showQuickTranslate && !hasApiKey && notice === NO_ENABLED_PROVIDER_NOTICE) && (notice === NO_ENABLED_PROVIDER_NOTICE
+        ? <ProviderSetupNotice onOpenError={setNotice} />
+        : <p className="notice" role="status">{notice}</p>)}
     </section>
   </main>;
 }
