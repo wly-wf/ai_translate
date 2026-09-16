@@ -262,7 +262,7 @@ const DEFAULT_USER_PREFERENCES: UserPreferences = {
   translationFontSize: 16,
   proxyMode: "disabled",
   proxyUrl: "",
-  proxyType: "https",
+  proxyType: "http",
   proxyHost: "127.0.0.1",
   proxyPort: "7890",
   proxyUsername: "",
@@ -402,7 +402,7 @@ function ModelPicker({ value, choices, onChange, ariaLabel, disabled = false }: 
   </div>;
 }
 
-function InlineSelect({ value, options, onChange, ariaLabel }: { value: string; options: string[]; onChange: (value: string) => void; ariaLabel: string }) {
+function InlineSelect({ value, options, onChange, ariaLabel, disabled = false }: { value: string; options: string[]; onChange: (value: string) => void; ariaLabel: string; disabled?: boolean }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -423,7 +423,7 @@ function InlineSelect({ value, options, onChange, ariaLabel }: { value: string; 
   }, [open]);
 
   return <div className={`inline-select${open ? " is-open" : ""}`} ref={rootRef}>
-    <button className="inline-select-trigger" type="button" role="combobox" aria-label={ariaLabel} aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((current) => !current)}>
+    <button className="inline-select-trigger" type="button" role="combobox" aria-label={ariaLabel} aria-haspopup="listbox" aria-expanded={open} disabled={disabled} onClick={() => setOpen((current) => !current)}>
       <span>{value}</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
     </button>
     {open && <div className="inline-select-menu" role="listbox" aria-label={ariaLabel}>{options.map((option) => <button className={`inline-select-option${option === value ? " is-selected" : ""}`} type="button" role="option" aria-selected={option === value} key={option} onClick={() => { onChange(option); setOpen(false); }}><span>{option}</span>{option === value && <span className="inline-select-check" aria-hidden="true">✓</span>}</button>)}</div>}
@@ -591,6 +591,7 @@ function useUserPreferences() {
     setProxyBypass: (value: string) => updatePreference("proxyBypass", value),
     setProxyTestUrl: (value: string) => updatePreference("proxyTestUrl", value),
     setProviderOrder: (value: string[]) => updatePreference("providerOrder", value),
+    flushPreferenceUpdates: () => saveChain.current.then(() => undefined),
     preferencesError,
   };
 }
@@ -1183,6 +1184,7 @@ function SettingsWindow() {
     setAutoSelection, setKeepOnTop, setQuickTranslateProvider, setQuickTranslateModel,
     setThemeMode, setSourceFontSize, setTranslationFontSize, setProxyMode, setProxyType, setProxyHost,
     setProxyPort, setProxyUsername, setProxyPassword, setProxyBypass, setProxyTestUrl, setProviderOrder,
+    flushPreferenceUpdates,
     preferencesError,
   } = useUserPreferences();
   const [notice, setNotice] = useState("");
@@ -1983,10 +1985,14 @@ function SettingsWindow() {
 
   function renderProxyPage() {
     const proxyEnabled = proxyMode === "custom";
+    const proxyActive = proxyMode !== "disabled";
+    const proxyModeLabels: Record<ProxyMode, string> = { disabled: "直连", system: "环境变量代理", custom: "自定义代理" };
+    const proxyTypeLabels: Record<ProxyType, string> = { http: "HTTP", https: "HTTPS", socks4: "SOCKS4", socks5: "SOCKS5" };
     const testProxy = async () => {
-      if (!proxyEnabled || !proxyTestUrl.trim()) return;
+      if (!proxyActive || !proxyTestUrl.trim()) return;
       setProxyTestState({ status: "testing", message: "正在测试代理连接…" });
       try {
+        await flushPreferenceUpdates();
         const message = await nativeInvoke<string>("test_proxy_connection", { url: proxyTestUrl.trim() });
         setProxyTestState({ status: "success", message });
       } catch (error) {
@@ -1997,19 +2003,19 @@ function SettingsWindow() {
       <section className="proxy-settings-card" aria-labelledby="proxy-settings-title">
         <h2 id="proxy-settings-title">代理设置</h2>
         <div className="proxy-settings-rows">
-          <div className="proxy-form-row"><span>启动代理</span><label className="settings-switch"><input aria-label="启动代理" type="checkbox" checked={proxyEnabled} onChange={(event) => setProxyMode(event.target.checked ? "custom" : "disabled")} /><span aria-hidden="true" /></label></div>
-          <label className="proxy-form-row"><span>代理类型</span><select aria-label="代理类型" value={proxyType} disabled={!proxyEnabled} onChange={(event) => setProxyType(event.target.value as ProxyType)}><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks4">SOCKS4</option><option value="socks5">SOCKS5</option></select></label>
+          <div className="proxy-form-row"><span>连接方式</span><InlineSelect ariaLabel="代理模式" value={proxyModeLabels[proxyMode]} options={Object.values(proxyModeLabels)} onChange={(label) => setProxyMode((Object.keys(proxyModeLabels) as ProxyMode[]).find((mode) => proxyModeLabels[mode] === label) ?? "disabled")} /></div>
+          <div className="proxy-form-row"><span>代理类型</span><InlineSelect ariaLabel="代理类型" value={proxyTypeLabels[proxyType]} options={Object.values(proxyTypeLabels)} disabled={!proxyEnabled} onChange={(label) => setProxyType((Object.keys(proxyTypeLabels) as ProxyType[]).find((type) => proxyTypeLabels[type] === label) ?? "http")} /></div>
           <label className="proxy-form-row"><span>服务器地址</span><input aria-label="服务器地址" value={proxyHost} disabled={!proxyEnabled} onChange={(event) => setProxyHost(event.target.value)} placeholder="127.0.0.1" spellCheck={false} /></label>
           <label className="proxy-form-row"><span>端口</span><input aria-label="端口" inputMode="numeric" value={proxyPort} disabled={!proxyEnabled} onChange={(event) => setProxyPort(event.target.value.replace(/\D/g, ""))} placeholder="7890" /></label>
           <label className="proxy-form-row"><span>用户名</span><input aria-label="代理用户名" value={proxyUsername} disabled={!proxyEnabled} onChange={(event) => setProxyUsername(event.target.value)} placeholder="可选" autoComplete="off" /></label>
           <label className="proxy-form-row"><span>密码</span><input aria-label="代理密码" type="password" value={proxyPassword} disabled={!proxyEnabled} onChange={(event) => setProxyPassword(event.target.value)} placeholder="可选" autoComplete="new-password" /></label>
           <label className="proxy-form-row proxy-bypass-row"><span>代理绕过</span><textarea aria-label="代理绕过地址" value={proxyBypass} disabled={!proxyEnabled} onChange={(event) => setProxyBypass(event.target.value)} spellCheck={false} /></label>
-          <p className="proxy-priority-note">同时配置全局代理与供应商代理时，将优先使用供应商代理。</p>
+          <p className="proxy-priority-note">{proxyMode === "custom" ? "适用于 Clash、Mihomo 等本地代理；常见配置为 HTTP、127.0.0.1、7890。" : proxyMode === "system" ? "使用 HTTP_PROXY、HTTPS_PROXY、ALL_PROXY 等系统环境代理设置。" : "所有模型请求直接连接，不使用 HTTP 代理。"}</p>
         </div>
       </section>
       <section className="proxy-test-panel" aria-label="代理连接测试">
-        <label className="proxy-test-url"><span>连接测试</span><input aria-label="代理测试地址" value={proxyTestUrl} disabled={!proxyEnabled} onChange={(event) => setProxyTestUrl(event.target.value)} spellCheck={false} /></label>
-        <button type="button" onClick={() => void testProxy()} disabled={!proxyEnabled || proxyTestState.status === "testing"}>{proxyTestState.status === "testing" ? "测试中…" : "测试"}</button>
+        <label className="proxy-test-url"><span>连接测试</span><input aria-label="代理测试地址" value={proxyTestUrl} disabled={!proxyActive} onChange={(event) => setProxyTestUrl(event.target.value)} spellCheck={false} /></label>
+        <button type="button" onClick={() => void testProxy()} disabled={!proxyActive || proxyTestState.status === "testing"}>{proxyTestState.status === "testing" ? "测试中…" : "测试"}</button>
         {proxyTestState.status !== "idle" && <p className={`proxy-test-result ${proxyTestState.status}`} role="status">{proxyTestState.message}</p>}
       </section>
     </div>;

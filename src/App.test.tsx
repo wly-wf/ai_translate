@@ -791,9 +791,14 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "网络代理" }));
     expect(screen.queryByRole("heading", { level: 1, name: "网络代理" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 2, name: "代理设置" })).toBeInTheDocument();
-    const enabledSwitch = screen.getByRole("checkbox", { name: "启动代理" }) as HTMLInputElement;
-    expect(enabledSwitch).not.toBeChecked();
-    fireEvent.click(enabledSwitch);
+    const proxyModeSelect = screen.getByRole("combobox", { name: "代理模式" });
+    await waitFor(() => expect(proxyModeSelect).toHaveTextContent("环境变量代理"));
+    fireEvent.click(proxyModeSelect);
+    fireEvent.click(screen.getByRole("option", { name: "自定义代理" }));
+    const proxyTypeSelect = screen.getByRole("combobox", { name: "代理类型" });
+    expect(proxyTypeSelect).toHaveTextContent("HTTP");
+    fireEvent.click(proxyTypeSelect);
+    fireEvent.click(screen.getByRole("option", { name: "SOCKS5" }));
     const proxyHostInput = screen.getByLabelText("服务器地址");
     expect(proxyHostInput).toBeEnabled();
     fireEvent.change(proxyHostInput, { target: { value: "proxy.example.com" } });
@@ -801,11 +806,11 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText("代理绕过地址"), { target: { value: "localhost,127.0.0.1" } });
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_user_preference", { preference: "proxyMode", value: "custom" }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_user_preference", { preference: "proxyType", value: "socks5" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_user_preference", { preference: "proxyHost", value: "proxy.example.com" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_user_preference", { preference: "proxyPort", value: "8443" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_user_preference", { preference: "proxyBypass", value: "localhost,127.0.0.1" }));
     const testButton = screen.getByRole("button", { name: "测试" });
-    if (!enabledSwitch.checked) fireEvent.click(enabledSwitch);
     await waitFor(() => expect(testButton).toBeEnabled());
     fireEvent.click(testButton);
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("test_proxy_connection", { url: "https://www.google.com" }));

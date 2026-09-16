@@ -549,6 +549,9 @@ textarea:focus, input:focus { outline: 2px solid rgba(242, 117, 50, .28); outlin
 .proxy-form-row > span:first-child { min-width: 0; }
 .proxy-form-row input, .proxy-form-row select, .proxy-form-row textarea, .proxy-test-url input { width: 100%; min-height: 42px; margin: 0; padding: 0 13px; color: #33414e; background: #f2f4f6; border: 1px solid transparent; border-radius: 10px; font-size: 13px; font-weight: 400; outline: 0; }
 .proxy-form-row select { padding-right: 40px; }
+.proxy-form-row .inline-select-trigger { min-height: 42px; padding: 0 13px; color: #33414e; background: #f2f4f6; border-color: transparent; border-radius: 10px; font-size: 13px; font-weight: 400; }
+.proxy-form-row .inline-select-trigger:hover, .proxy-form-row .inline-select.is-open .inline-select-trigger { background: #fff; border-color: #cbd9e7; }
+.proxy-form-row .inline-select-trigger:disabled { cursor: not-allowed; color: #98a2ab; background: #f0f2f4; border-color: transparent; opacity: .72; }
 .proxy-form-row textarea { min-height: 64px; padding-block: 10px; resize: vertical; line-height: 1.45; }
 .proxy-form-row input:focus, .proxy-form-row select:focus, .proxy-form-row textarea:focus, .proxy-test-url input:focus { background: #fff; border-color: #cbd9e7; box-shadow: 0 0 0 3px rgba(78, 127, 176, .1); }
 .proxy-form-row input:disabled, .proxy-form-row select:disabled, .proxy-form-row textarea:disabled, .proxy-test-url input:disabled { cursor: not-allowed; color: #98a2ab; background: #f0f2f4; opacity: .72; }

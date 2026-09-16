@@ -266,6 +266,7 @@
 :root[data-theme="dark"] .about-brand h1 { color: var(--ink); }
 :root[data-theme="dark"] .proxy-form-row input,
 :root[data-theme="dark"] .proxy-form-row select,
+:root[data-theme="dark"] .proxy-form-row .inline-select-trigger,
 :root[data-theme="dark"] .proxy-form-row textarea,
 :root[data-theme="dark"] .proxy-test-url input { color: var(--ink); background: var(--dark-field); border-color: #465568; }
 :root[data-theme="dark"] .proxy-form-row input:focus,
@@ -274,6 +275,7 @@
 :root[data-theme="dark"] .proxy-test-url input:focus { background: #263340; border-color: #8db7e4; box-shadow: 0 0 0 3px rgba(141, 183, 228, .14); }
 :root[data-theme="dark"] .proxy-form-row input:disabled,
 :root[data-theme="dark"] .proxy-form-row select:disabled,
+:root[data-theme="dark"] .proxy-form-row .inline-select-trigger:disabled,
 :root[data-theme="dark"] .proxy-form-row textarea:disabled,
 :root[data-theme="dark"] .proxy-test-url input:disabled { color: #a2afbd; background: #252b34; border-color: #333e49; opacity: 1; }
 :root[data-theme="dark"] .proxy-test-panel > button { color: var(--dark-blue); background: #2b3846; border-color: #536577; }

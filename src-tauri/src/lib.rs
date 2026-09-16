@@ -38,7 +38,7 @@ const PROVIDER_KEYRING_PREFIX: &str = "provider-config:";
 const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 const DEEPSEEK_MODEL: &str = "deepseek-v4-flash";
 const THINKING_DISABLED: &str = "disabled";
-const USER_PREFERENCES_VERSION: u8 = 2;
+const USER_PREFERENCES_VERSION: u8 = 3;
 const DEFAULT_PROXY_BYPASS: &str = "localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1";
 const FLOAT_BUTTON_SIZE: i32 = 28;
 const FLOAT_SIZE: i32 = FLOAT_BUTTON_SIZE + 4;
@@ -581,7 +581,7 @@ mod selection_float_tests {
 
         assert_eq!(preferences.proxy_mode, ProxyMode::System);
         assert!(preferences.proxy_url.is_empty());
-        assert_eq!(preferences.proxy_type, ProxyType::Https);
+        assert_eq!(preferences.proxy_type, ProxyType::Http);
         assert_eq!(preferences.proxy_host, "127.0.0.1");
         assert_eq!(preferences.proxy_port, "7890");
         assert_eq!(preferences.proxy_bypass, DEFAULT_PROXY_BYPASS);
@@ -602,7 +602,7 @@ mod selection_float_tests {
 
         assert_eq!(value["proxyMode"], "custom");
         assert_eq!(value["proxyUrl"], "http://127.0.0.1:7890");
-        assert_eq!(value["proxyType"], "https");
+        assert_eq!(value["proxyType"], "http");
         assert_eq!(value["proxyHost"], "127.0.0.1");
     }
 
@@ -735,8 +735,8 @@ enum ProxyMode {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum ProxyType {
-    Http,
     #[default]
+    Http,
     Https,
     Socks4,
     Socks5,
@@ -809,7 +809,7 @@ impl Default for UserPreferences {
             translation_font_size: default_translation_font_size(),
             proxy_mode: ProxyMode::Disabled,
             proxy_url: String::new(),
-            proxy_type: ProxyType::Https,
+            proxy_type: ProxyType::Http,
             proxy_host: default_proxy_host(),
             proxy_port: default_proxy_port(),
             proxy_username: String::new(),
@@ -1260,6 +1260,18 @@ fn load_preferences_sync() -> Result<UserPreferences, String> {
                 }
                 preferences.proxy_bypass = default_proxy_bypass();
                 preferences.proxy_test_url = default_proxy_test_url();
+            }
+            if preferences.preference_version < 3
+                && preferences.proxy_type == ProxyType::Https
+                && preferences.proxy_host == default_proxy_host()
+                && preferences.proxy_port == default_proxy_port()
+                && preferences.proxy_username.is_empty()
+                && preferences.proxy_password.is_empty()
+            {
+                // Version 2 accidentally used HTTPS for the common Clash/Mihomo
+                // local mixed port. The proxy protocol is HTTP even when the
+                // destination API uses HTTPS.
+                preferences.proxy_type = ProxyType::Http;
             }
             preferences.preference_version = USER_PREFERENCES_VERSION;
             Ok(preferences)
@@ -2461,13 +2473,26 @@ async fn test_proxy_connection(app: AppHandle, url: String) -> Result<String, St
         return Err("测试地址必须是有效的 HTTP 或 HTTPS 地址。".to_string());
     }
     let preferences = current_preferences(&app);
-    if preferences.proxy_mode != ProxyMode::Custom {
-        return Err("请先启动代理。".to_string());
+    if preferences.proxy_mode == ProxyMode::Disabled {
+        return Err("请先选择系统或自定义代理。".to_string());
     }
     let client = build_http_client(&preferences, Duration::from_secs(15))?;
     let response = client.get(parsed).send().await
         .map_err(|error| format!("代理连接失败：{error}"))?;
-    Ok(format!("连接成功（HTTP {}）", response.status().as_u16()))
+    let status = response.status();
+    match status.as_u16() {
+        407 => Err("代理服务器要求身份验证，请检查用户名和密码。".to_string()),
+        502..=504 => Err(format!("代理未能连接目标地址（HTTP {}）。", status.as_u16())),
+        400..=499 => Ok(format!(
+            "代理连接成功，目标地址返回 HTTP {}（目标可能需要身份验证）。",
+            status.as_u16()
+        )),
+        _ if status.is_server_error() => Err(format!(
+            "已连接代理，但目标地址返回 HTTP {}。",
+            status.as_u16()
+        )),
+        _ => Ok(format!("代理连接成功（HTTP {}）", status.as_u16())),
+    }
 }
 
 #[tauri::command]
