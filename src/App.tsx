@@ -432,7 +432,7 @@ function InlineSelect({ value, options, onChange, ariaLabel, disabled = false }:
 
 function SegmentedControl({ value, options, onChange, ariaLabel }: {
   value: string;
-  options: { value: string; label: string }[];
+  options: { value: string; label: string; icon?: ThemeMode }[];
   onChange: (value: string) => void;
   ariaLabel: string;
 }) {
@@ -444,8 +444,17 @@ function SegmentedControl({ value, options, onChange, ariaLabel }: {
       className={value === option.value ? "is-selected" : ""}
       key={option.value}
       onClick={() => onChange(option.value)}
-    >{option.label}</button>)}
+    >{option.icon && <ThemeModeIcon mode={option.icon} />}{option.label}</button>)}
   </div>;
+}
+
+function ThemeModeIcon({ mode }: { mode: ThemeMode }) {
+  const paths: Record<ThemeMode, React.ReactNode> = {
+    light: <><circle cx="8" cy="8" r="2.5" /><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6 13 13M13 3l-1.4 1.4M4.4 11.6 3 13" /></>,
+    dark: <path d="M8 2a4 4 0 0 0 6 6 6 6 0 1 1-6-6Z" />,
+    system: <><rect x="1.5" y="2.5" width="13" height="9" rx="1.5" /><path d="M5.5 14h5M8 11.5V14" /></>,
+  };
+  return <svg className="theme-mode-icon" viewBox="0 0 16 16" aria-hidden="true">{paths[mode]}</svg>;
 }
 
 async function nativeInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -1923,7 +1932,7 @@ function SettingsWindow() {
         <header className="preferences-section-heading"><h2 id="preferences-general-title">偏好</h2></header>
         <div className="preferences-section-rows">
           <div className="default-quick-model-card"><div className="default-quick-model-copy"><strong>默认快速翻译模型</strong></div><div className="default-quick-model-control">{renderQuickModelTrigger(defaultModelChoices)}</div></div>
-          <div className="appearance-setting-row"><div><strong>颜色模式</strong></div><SegmentedControl ariaLabel="颜色模式" value={themeMode} options={[{ value: "light", label: "浅色" }, { value: "dark", label: "深色" }, { value: "system", label: "跟随系统" }]} onChange={(value) => setThemeMode(value as ThemeMode)} /></div>
+          <div className="appearance-setting-row"><div><strong>颜色模式</strong></div><SegmentedControl ariaLabel="颜色模式" value={themeMode} options={[{ value: "light", label: "浅色", icon: "light" }, { value: "dark", label: "深色", icon: "dark" }, { value: "system", label: "跟随系统", icon: "system" }]} onChange={(value) => setThemeMode(value as ThemeMode)} /></div>
           <div className="preference-setting-row"><div><strong>选中文本自动显示悬浮按钮</strong></div><label className="settings-switch"><input aria-label="选中文本自动显示悬浮按钮" type="checkbox" checked={autoSelection} onChange={(event) => setAutoSelection(event.target.checked)} /><span aria-hidden="true" /></label></div>
           <div className="preference-setting-row"><div><strong>翻译窗口保持置顶</strong></div><label className="settings-switch"><input aria-label="翻译窗口保持置顶" type="checkbox" checked={keepOnTop} onChange={(event) => setKeepOnTop(event.target.checked)} /><span aria-hidden="true" /></label></div>
         </div>

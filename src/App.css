@@ -489,7 +489,7 @@ textarea:focus, input:focus { outline: 2px solid rgba(242, 117, 50, .28); outlin
 .settings-page-heading h1 { margin: 0; color: #202a34; font-size: 29px; font-weight: 800; letter-spacing: -.7px; }
 .settings-page-meta { padding-bottom: 3px; color: #98a3ad; font-size: 12px; }
 .settings-description { max-width: 650px; margin-bottom: 28px; color: #8995a0; font-size: 14px; line-height: 1.65; }
-.preferences-section { width: 100%; max-width: 760px; margin-bottom: 15px; }
+.preferences-section { width: 100%; max-width: 860px; margin-bottom: 15px; }
 .preferences-section-heading { padding: 0 4px 5px; border: 0; }
 .preferences-section-heading h2 { margin: 0; color: #26323d; font-size: 19px; font-weight: 800; letter-spacing: -.3px; }
 .preferences-section-rows { display: grid; gap: 0; padding: 0 4px; }
@@ -531,7 +531,8 @@ textarea:focus, input:focus { outline: 2px solid rgba(242, 117, 50, .28); outlin
 .appearance-setting-row > div:first-child, .font-size-setting-row > div:first-child { display: grid; min-width: 0; gap: 4px; }
 .appearance-setting-row strong, .font-size-setting-row strong { color: #4b5966; font-size: 14px; font-weight: 520; }
 .segmented-control { flex: 0 0 auto; display: flex; align-items: center; gap: 3px; padding: 3px; background: #eef2f5; border: 1px solid #e1e7ec; border-radius: 10px; }
-.segmented-control button { min-height: 32px; padding: 0 12px; color: #75818c; white-space: nowrap; background: transparent; border: 0; border-radius: 7px; font-size: 12px; font-weight: 700; transition: color .16s ease, background-color .16s ease, box-shadow .16s ease; }
+.segmented-control button { min-height: 32px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 12px; color: #75818c; white-space: nowrap; background: transparent; border: 0; border-radius: 7px; font-size: 12px; font-weight: 700; transition: color .16s ease, background-color .16s ease, box-shadow .16s ease; }
+.theme-mode-icon { width: 15px; height: 15px; flex: 0 0 15px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.3; }
 .segmented-control button:hover { color: #456b94; }
 .segmented-control button.is-selected { color: #315f8f; background: #fff; box-shadow: 0 1px 4px rgba(35, 55, 75, .12); }
 .segmented-control button:focus-visible { outline: 2px solid rgba(78, 127, 176, .32); outline-offset: 1px; }
@@ -542,7 +543,7 @@ textarea:focus, input:focus { outline: 2px solid rgba(242, 117, 50, .28); outlin
 .preferences-section .settings-switch span::after { width: 20px; height: 20px; }
 .preferences-section .settings-switch input:checked + span::after { transform: translateX(20px); }
 .proxy-settings-page { width: 100%; max-width: 860px; padding-top: 2px; }
-.proxy-settings-card, .proxy-test-panel { width: 100%; max-width: 760px; padding: 10px 18px; background: transparent; border: 0; border-radius: 0; box-shadow: none; }
+.proxy-settings-card, .proxy-test-panel { width: 100%; max-width: 860px; padding: 10px 18px; background: transparent; border: 0; border-radius: 0; box-shadow: none; }
 .proxy-settings-card > h2 { margin: 0 0 8px; color: #26323d; font-size: 18px; font-weight: 800; letter-spacing: -.25px; }
 .proxy-settings-rows { display: grid; gap: 4px; }
 .proxy-form-row { min-height: 48px; display: grid; grid-template-columns: minmax(150px, .8fr) minmax(310px, 1.2fr); align-items: center; gap: 20px; color: #4b5966; font-size: 14px; font-weight: 500; }
@@ -569,12 +570,12 @@ textarea:focus, input:focus { outline: 2px solid rgba(242, 117, 50, .28); outlin
 .proxy-test-result.success { color: #277b6f; }
 .proxy-test-result.error { color: #aa573f; }
 .about-page { width: 100%; max-width: 860px; padding-top: 2px; }
-.about-brand { max-width: 760px; display: flex; align-items: center; gap: 14px; margin: 0 0 14px; padding: 15px 18px; background: #fafbfc; border-radius: 16px; }
+.about-brand { max-width: 860px; display: flex; align-items: center; gap: 14px; margin: 0 0 14px; padding: 15px 18px; background: #fafbfc; border-radius: 16px; }
 .about-brand img { width: 52px; height: 52px; flex: 0 0 52px; border-radius: 14px; }
 .about-brand > div { display: grid; gap: 3px; }
 .about-brand h1 { margin: 0; color: #26323d; font-size: 21px; font-weight: 800; letter-spacing: -.35px; }
 .about-brand p { margin: 0; color: #8996a2; font-size: 12px; }
-.about-info-list { max-width: 760px; display: grid; padding: 8px 18px; background: #fafbfc; border-radius: 16px; }
+.about-info-list { max-width: 860px; display: grid; padding: 8px 18px; background: #fafbfc; border-radius: 16px; }
 .about-info-row { min-height: 54px; display: grid; grid-template-columns: 34px minmax(140px, 1fr) auto; align-items: center; gap: 12px; }
 .about-info-row > strong { color: #4b5966; font-size: 14px; font-weight: 520; }
 .about-info-value { color: #7e8a95; font-size: 12px; }
@@ -585,7 +586,7 @@ textarea:focus, input:focus { outline: 2px solid rgba(242, 117, 50, .28); outlin
 .about-info-row:first-child .about-link-icon .about-icon { fill: none; stroke: currentColor; }
 .about-update-button { min-height: 32px; padding: 0 11px; color: #84919c; background: #eef1f4; border: 1px solid #e1e6ea; border-radius: 8px; font-size: 11px; font-weight: 700; }
 .about-update-button:disabled { cursor: not-allowed; opacity: .78; }
-.about-update-status { display: flex; align-items: center; gap: 7px; max-width: 760px; margin: 10px 2px 0 !important; color: #929da7 !important; font-size: 10px !important; }
+.about-update-status { display: flex; align-items: center; gap: 7px; max-width: 860px; margin: 10px 2px 0 !important; color: #929da7 !important; font-size: 10px !important; }
 .about-update-status > span { width: 6px; height: 6px; flex: 0 0 6px; background: #b6c0c9; border-radius: 50%; }
 .about-pending-badge { flex: 0 0 auto; padding: 5px 8px; color: #8b97a1; background: #f0f2f4; border-radius: 999px; font-size: 10px; font-weight: 750; }
 .about-link-action { min-width: 0; max-width: 360px; display: inline-flex; align-items: center; justify-self: end; gap: 5px; color: #456f9f; font-size: 11px; font-weight: 650; overflow-wrap: anywhere; text-align: right; text-decoration: none; }
