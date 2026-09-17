@@ -50,6 +50,7 @@ describe("App", () => {
     window.localStorage.removeItem("ai-translate-appearance");
     delete document.documentElement.dataset.theme;
     delete document.documentElement.dataset.themeMode;
+    delete document.documentElement.dataset.accent;
     document.documentElement.style.removeProperty("--source-font-size");
     document.documentElement.style.removeProperty("--translation-font-size");
     invokeMock.mockReset().mockResolvedValue(undefined);
@@ -677,13 +678,13 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "偏好设置" }));
     const defaultModelEntry = screen.getByRole("button", { name: "设置默认快速翻译模型" });
-    await waitFor(() => expect(defaultModelEntry).toHaveTextContent("deepseek-v4-flash"));
+    await waitFor(() => expect(defaultModelEntry).toHaveTextContent("deepseek-v4-flash/DeepSeek"));
     fireEvent.click(defaultModelEntry);
     expect(screen.getByRole("heading", { name: "偏好" })).toBeInTheDocument();
     const modelDialog = screen.getByRole("dialog", { name: "选择默认模型" });
     expect(screen.queryByRole("listbox", { name: "设置默认快速翻译模型" })).not.toBeInTheDocument();
     const configuredModels = within(modelDialog).getByRole("list", { name: "已配置模型" });
-    expect(within(configuredModels).getByRole("button", { name: /deepseek-v4-flash.*DeepSeek/ })).toHaveAttribute("aria-pressed", "true");
+    expect(within(configuredModels).getByRole("button", { name: "deepseek-v4-flash/DeepSeek" })).toHaveAttribute("aria-pressed", "true");
     fireEvent.click(within(configuredModels).getByRole("button", { name: /deepseek-reasoner.*DeepSeek/ }));
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_user_preference", {
@@ -703,6 +704,7 @@ describe("App", () => {
         keepOnTop: false,
         quickTranslateProvider: null,
         themeMode: "system",
+        accentColor: "blue",
         sourceFontSize: 14,
         translationFontSize: 16,
         proxyMode: "system",
@@ -724,13 +726,15 @@ describe("App", () => {
     expect(screen.queryByText("翻译结果中原文的显示大小")).not.toBeInTheDocument();
     expect(screen.queryByText("鼠标完成选区后显示翻译入口")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("radio", { name: "深色" }));
-    fireEvent.change(screen.getByLabelText("原文字号"), { target: { value: "18" } });
-    fireEvent.change(screen.getByLabelText("译文字号"), { target: { value: "20" } });
-
+    fireEvent.click(screen.getByRole("radio", { name: "紫色" }));
     await waitFor(() => expect(document.documentElement).toHaveAttribute("data-theme", "dark"));
-    expect(document.documentElement.style.getPropertyValue("--source-font-size")).toBe("18px");
-    expect(document.documentElement.style.getPropertyValue("--translation-font-size")).toBe("20px");
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_user_preference", { preference: "translationFontSize", value: 20 }));
+    await waitFor(() => expect(document.documentElement).toHaveAttribute("data-accent", "purple"));
+    fireEvent.change(screen.getByLabelText("原文字号"), { target: { value: "3" } });
+    fireEvent.change(screen.getByLabelText("译文字号"), { target: { value: "4" } });
+
+    await waitFor(() => expect(document.documentElement.style.getPropertyValue("--translation-font-size")).toBe("20px"));
+    expect(document.documentElement.style.getPropertyValue("--source-font-size")).toBe("16px");
+    expect(invokeMock).toHaveBeenCalledWith("set_user_preference", { preference: "accentColor", value: "purple" });
   });
 
   it("keeps system color mode synchronized with operating-system changes", async () => {

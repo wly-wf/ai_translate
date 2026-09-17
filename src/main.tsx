@@ -10,6 +10,7 @@ document.documentElement.dataset.window = "__TAURI_INTERNALS__" in window
 try {
   const stored = JSON.parse(window.localStorage.getItem("ai-translate-appearance") ?? "null") as {
     themeMode?: "light" | "dark" | "system";
+    accentColor?: "blue" | "purple" | "green" | "orange" | "rose";
     sourceFontSize?: number;
     translationFontSize?: number;
   } | null;
@@ -19,6 +20,7 @@ try {
     const resolved = mode === "system" ? (systemDark ? "dark" : "light") : mode;
     document.documentElement.dataset.theme = resolved;
     document.documentElement.dataset.themeMode = mode;
+    document.documentElement.dataset.accent = stored.accentColor ?? "blue";
     document.documentElement.style.colorScheme = resolved;
     if (stored.sourceFontSize) document.documentElement.style.setProperty("--source-font-size", `${stored.sourceFontSize}px`);
     if (stored.translationFontSize) document.documentElement.style.setProperty("--translation-font-size", `${stored.translationFontSize}px`);

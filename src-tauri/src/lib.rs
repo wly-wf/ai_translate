@@ -586,6 +586,7 @@ mod selection_float_tests {
         assert_eq!(preferences.proxy_port, "7890");
         assert_eq!(preferences.proxy_bypass, DEFAULT_PROXY_BYPASS);
         assert_eq!(preferences.theme_mode, ThemeMode::System);
+        assert_eq!(preferences.accent_color, AccentColor::Blue);
         assert_eq!(preferences.source_font_size, 14);
         assert_eq!(preferences.translation_font_size, 16);
         assert!(preferences.provider_order.is_empty());
@@ -604,6 +605,7 @@ mod selection_float_tests {
         assert_eq!(value["proxyUrl"], "http://127.0.0.1:7890");
         assert_eq!(value["proxyType"], "http");
         assert_eq!(value["proxyHost"], "127.0.0.1");
+        assert_eq!(value["accentColor"], "blue");
     }
 
     #[test]
@@ -751,6 +753,17 @@ enum ThemeMode {
     System,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum AccentColor {
+    #[default]
+    Blue,
+    Purple,
+    Green,
+    Orange,
+    Rose,
+}
+
 fn default_source_font_size() -> u8 { 14 }
 fn default_translation_font_size() -> u8 { 16 }
 fn default_proxy_host() -> String { "127.0.0.1".to_string() }
@@ -769,6 +782,8 @@ struct UserPreferences {
     quick_translate_model: Option<String>,
     #[serde(default)]
     theme_mode: ThemeMode,
+    #[serde(default)]
+    accent_color: AccentColor,
     #[serde(default = "default_source_font_size")]
     source_font_size: u8,
     #[serde(default = "default_translation_font_size")]
@@ -805,6 +820,7 @@ impl Default for UserPreferences {
             quick_translate_provider: None,
             quick_translate_model: None,
             theme_mode: ThemeMode::System,
+            accent_color: AccentColor::Blue,
             source_font_size: default_source_font_size(),
             translation_font_size: default_translation_font_size(),
             proxy_mode: ProxyMode::Disabled,
@@ -2548,6 +2564,20 @@ async fn set_user_preference(
                     Some("dark") => ThemeMode::Dark,
                     Some("system") => ThemeMode::System,
                     _ => return Err("themeMode must be light, dark, or system".to_string()),
+                };
+            }
+            "accentColor" => {
+                updated.accent_color = match value.as_str() {
+                    Some("blue") => AccentColor::Blue,
+                    Some("purple") => AccentColor::Purple,
+                    Some("green") => AccentColor::Green,
+                    Some("orange") => AccentColor::Orange,
+                    Some("rose") => AccentColor::Rose,
+                    _ => {
+                        return Err(
+                            "accentColor must be blue, purple, green, orange, or rose".to_string(),
+                        )
+                    }
                 };
             }
             "sourceFontSize" => {

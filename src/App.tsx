@@ -22,6 +22,7 @@ type Translation = { source: string; results: ProviderTranslationResult[]; reque
 type TranslationError = { requestId: number; message: string };
 type ActiveProviderChanged = { providerId: ProviderId; model: string };
 type ThemeMode = "light" | "dark" | "system";
+type AccentColor = "blue" | "purple" | "green" | "orange" | "rose";
 type ProxyMode = "system" | "disabled" | "custom";
 type ProxyType = "http" | "https" | "socks4" | "socks5";
 type UserPreferences = {
@@ -30,6 +31,7 @@ type UserPreferences = {
   quickTranslateProvider: ProviderId | null;
   quickTranslateModel: string | null;
   themeMode: ThemeMode;
+  accentColor: AccentColor;
   sourceFontSize: number;
   translationFontSize: number;
   proxyMode: ProxyMode;
@@ -252,12 +254,41 @@ const AVAILABLE_TRANSLATION_PROVIDERS = TRANSLATION_PROVIDERS.filter((provider) 
 
 const DEFAULT_PROVIDER_ID: ProviderId = "deepseek";
 const DEFAULT_PROVIDER_ORDER = ALL_SETTINGS_PROVIDERS.map((provider) => provider.id);
+const ACCENT_COLOR_OPTIONS: { value: AccentColor; label: string }[] = [
+  { value: "blue", label: "蓝色" },
+  { value: "purple", label: "紫色" },
+  { value: "green", label: "绿色" },
+  { value: "orange", label: "橙色" },
+  { value: "rose", label: "玫红" },
+];
+const SOURCE_FONT_SIZE_OPTIONS = [
+  { label: "较小", size: 12 },
+  { label: "小", size: 13 },
+  { label: "标准", size: 14 },
+  { label: "大", size: 16 },
+  { label: "超大", size: 18 },
+];
+const TRANSLATION_FONT_SIZE_OPTIONS = [
+  { label: "较小", size: 14 },
+  { label: "小", size: 15 },
+  { label: "标准", size: 16 },
+  { label: "大", size: 18 },
+  { label: "超大", size: 20 },
+];
+
+function closestFontSizeLabel(size: number, options: { label: string; size: number }[]) {
+  return options.reduce((closest, option) => (
+    Math.abs(option.size - size) < Math.abs(closest.size - size) ? option : closest
+  )).label;
+}
+
 const DEFAULT_USER_PREFERENCES: UserPreferences = {
   autoSelection: true,
   keepOnTop: false,
   quickTranslateProvider: null,
   quickTranslateModel: null,
   themeMode: "system",
+  accentColor: "blue",
   sourceFontSize: 14,
   translationFontSize: 16,
   proxyMode: "disabled",
@@ -305,6 +336,7 @@ function initialUserPreferences() {
     return {
       ...DEFAULT_USER_PREFERENCES,
       themeMode: stored.themeMode ?? DEFAULT_USER_PREFERENCES.themeMode,
+      accentColor: stored.accentColor ?? DEFAULT_USER_PREFERENCES.accentColor,
       sourceFontSize: stored.sourceFontSize ?? DEFAULT_USER_PREFERENCES.sourceFontSize,
       translationFontSize: stored.translationFontSize ?? DEFAULT_USER_PREFERENCES.translationFontSize,
     };
@@ -315,6 +347,7 @@ function initialUserPreferences() {
 
 function appearanceMatches(a: UserPreferences, b: UserPreferences) {
   return a.themeMode === b.themeMode
+    && a.accentColor === b.accentColor
     && a.sourceFontSize === b.sourceFontSize
     && a.translationFontSize === b.translationFontSize;
 }
@@ -457,6 +490,47 @@ function ThemeModeIcon({ mode }: { mode: ThemeMode }) {
   return <svg className="theme-mode-icon" viewBox="0 0 16 16" aria-hidden="true">{paths[mode]}</svg>;
 }
 
+function AccentColorPicker({ value, onChange }: { value: AccentColor; onChange: (value: AccentColor) => void }) {
+  return <div className="accent-color-picker" role="radiogroup" aria-label="主题色">
+    {ACCENT_COLOR_OPTIONS.map((option) => <button
+      className={value === option.value ? "is-selected" : ""}
+      data-accent-value={option.value}
+      key={option.value}
+      type="button"
+      role="radio"
+      aria-checked={value === option.value}
+      aria-label={option.label}
+      title={option.label}
+      onClick={() => onChange(option.value)}
+    ><span aria-hidden="true" /></button>)}
+  </div>;
+}
+
+function FontSizeScale({ value, options, onChange, ariaLabel }: {
+  value: string;
+  options: { label: string; size: number }[];
+  onChange: (size: number) => void;
+  ariaLabel: string;
+}) {
+  const selectedIndex = Math.max(0, options.findIndex((option) => option.label === value));
+  return <div className="font-size-scale">
+    <input
+      type="range"
+      min="0"
+      max={options.length - 1}
+      step="1"
+      value={selectedIndex}
+      aria-label={ariaLabel}
+      aria-valuetext={options[selectedIndex].label}
+      style={{ "--range-progress": `${selectedIndex / (options.length - 1) * 100}%` } as CSSProperties}
+      onChange={(event) => onChange(options[Number(event.target.value)].size)}
+    />
+    <div className="font-size-scale-labels" aria-hidden="true">
+      {options.map((option, index) => <span className={index === selectedIndex ? "is-selected" : ""} key={option.label}>{option.label}</span>)}
+    </div>
+  </div>;
+}
+
 async function nativeInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (!isTauriDesktop()) {
     throw new Error("当前页面运行在普通浏览器中。请关闭此页面，并使用 `npm.cmd run tauri dev` 打开的 AI Translate 桌面窗口。");
@@ -519,6 +593,7 @@ function useUserPreferences() {
         : preferences.themeMode;
       root.dataset.theme = resolvedTheme;
       root.dataset.themeMode = preferences.themeMode;
+      root.dataset.accent = preferences.accentColor;
       root.style.setProperty("--source-font-size", `${preferences.sourceFontSize}px`);
       root.style.setProperty("--translation-font-size", `${preferences.translationFontSize}px`);
       root.style.colorScheme = resolvedTheme;
@@ -531,6 +606,7 @@ function useUserPreferences() {
       try {
         window.localStorage.setItem("ai-translate-appearance", JSON.stringify({
           themeMode: preferences.themeMode,
+          accentColor: preferences.accentColor,
           sourceFontSize: preferences.sourceFontSize,
           translationFontSize: preferences.translationFontSize,
         }));
@@ -542,7 +618,7 @@ function useUserPreferences() {
     applyAppearance();
     if (preferences.themeMode === "system") systemTheme?.addEventListener("change", applyAppearance);
     return () => systemTheme?.removeEventListener("change", applyAppearance);
-  }, [preferences.themeMode, preferences.sourceFontSize, preferences.translationFontSize]);
+  }, [preferences.themeMode, preferences.accentColor, preferences.sourceFontSize, preferences.translationFontSize]);
 
   function updatePreference<K extends keyof UserPreferences>(preference: K, value: UserPreferences[K]) {
     pendingPreferences.current[preference] = value;
@@ -571,6 +647,7 @@ function useUserPreferences() {
     quickTranslateProvider: preferences.quickTranslateProvider,
     quickTranslateModel: preferences.quickTranslateModel,
     themeMode: preferences.themeMode,
+    accentColor: preferences.accentColor,
     sourceFontSize: preferences.sourceFontSize,
     translationFontSize: preferences.translationFontSize,
     proxyMode: preferences.proxyMode,
@@ -588,6 +665,7 @@ function useUserPreferences() {
     setQuickTranslateProvider: (value: ProviderId | null) => updatePreference("quickTranslateProvider", value),
     setQuickTranslateModel: (value: string | null) => updatePreference("quickTranslateModel", value),
     setThemeMode: (value: ThemeMode) => updatePreference("themeMode", value),
+    setAccentColor: (value: AccentColor) => updatePreference("accentColor", value),
     setSourceFontSize: (value: number) => updatePreference("sourceFontSize", value),
     setTranslationFontSize: (value: number) => updatePreference("translationFontSize", value),
     setProxyMode: (value: ProxyMode) => updatePreference("proxyMode", value),
@@ -1188,10 +1266,10 @@ function SettingsWindow() {
   const [connectionState, setConnectionState] = useState<ConnectionState>({ providerId: null, status: "idle", message: "" });
   const {
     autoSelection, keepOnTop, quickTranslateProvider, quickTranslateModel,
-    themeMode, sourceFontSize, translationFontSize, proxyMode, proxyType, proxyHost, proxyPort,
+    themeMode, accentColor, sourceFontSize, translationFontSize, proxyMode, proxyType, proxyHost, proxyPort,
     proxyUsername, proxyPassword, proxyBypass, proxyTestUrl, providerOrder,
     setAutoSelection, setKeepOnTop, setQuickTranslateProvider, setQuickTranslateModel,
-    setThemeMode, setSourceFontSize, setTranslationFontSize, setProxyMode, setProxyType, setProxyHost,
+    setThemeMode, setAccentColor, setSourceFontSize, setTranslationFontSize, setProxyMode, setProxyType, setProxyHost,
     setProxyPort, setProxyUsername, setProxyPassword, setProxyBypass, setProxyTestUrl, setProviderOrder,
     flushPreferenceUpdates,
     preferencesError,
@@ -1927,12 +2005,15 @@ function SettingsWindow() {
       const provider = providerCollection.find((item) => item.id === providerId);
       return provider ? (settingsEnabledProviderModels[providerId] ?? [provider.model]).map((model) => ({ id: modelChoiceKey(providerId, model), providerId, model, vendor: provider.vendor })) : [];
     });
+    const sourceFontSizeLabel = closestFontSizeLabel(sourceFontSize, SOURCE_FONT_SIZE_OPTIONS);
+    const translationFontSizeLabel = closestFontSizeLabel(translationFontSize, TRANSLATION_FONT_SIZE_OPTIONS);
     return <div className="settings-page-view preferences-settings-page"><h1 className="sr-only">偏好设置</h1>
       <section className="preferences-section" aria-labelledby="preferences-general-title">
         <header className="preferences-section-heading"><h2 id="preferences-general-title">偏好</h2></header>
         <div className="preferences-section-rows">
           <div className="default-quick-model-card"><div className="default-quick-model-copy"><strong>默认快速翻译模型</strong></div><div className="default-quick-model-control">{renderQuickModelTrigger(defaultModelChoices)}</div></div>
           <div className="appearance-setting-row"><div><strong>颜色模式</strong></div><SegmentedControl ariaLabel="颜色模式" value={themeMode} options={[{ value: "light", label: "浅色", icon: "light" }, { value: "dark", label: "深色", icon: "dark" }, { value: "system", label: "跟随系统", icon: "system" }]} onChange={(value) => setThemeMode(value as ThemeMode)} /></div>
+          <div className="accent-color-setting-row"><div><strong>主题色</strong></div><AccentColorPicker value={accentColor} onChange={setAccentColor} /></div>
           <div className="preference-setting-row"><div><strong>选中文本自动显示悬浮按钮</strong></div><label className="settings-switch"><input aria-label="选中文本自动显示悬浮按钮" type="checkbox" checked={autoSelection} onChange={(event) => setAutoSelection(event.target.checked)} /><span aria-hidden="true" /></label></div>
           <div className="preference-setting-row"><div><strong>翻译窗口保持置顶</strong></div><label className="settings-switch"><input aria-label="翻译窗口保持置顶" type="checkbox" checked={keepOnTop} onChange={(event) => setKeepOnTop(event.target.checked)} /><span aria-hidden="true" /></label></div>
         </div>
@@ -1940,8 +2021,8 @@ function SettingsWindow() {
       <section className="preferences-section" aria-labelledby="preferences-font-title">
         <header className="preferences-section-heading"><h2 id="preferences-font-title">字体</h2></header>
         <div className="preferences-section-rows">
-          <div className="font-size-setting-row"><div><strong>原文字号</strong></div><label><span>{sourceFontSize}px</span><input aria-label="原文字号" type="range" min="12" max="24" step="1" value={sourceFontSize} style={{ "--range-progress": `${(sourceFontSize - 12) / 12 * 100}%` } as CSSProperties} onChange={(event) => setSourceFontSize(Number(event.target.value))} /></label></div>
-          <div className="font-size-setting-row"><div><strong>译文字号</strong></div><label><span>{translationFontSize}px</span><input aria-label="译文字号" type="range" min="12" max="28" step="1" value={translationFontSize} style={{ "--range-progress": `${(translationFontSize - 12) / 16 * 100}%` } as CSSProperties} onChange={(event) => setTranslationFontSize(Number(event.target.value))} /></label></div>
+          <div className="font-size-setting-row"><div><strong>原文字号</strong></div><FontSizeScale ariaLabel="原文字号" value={sourceFontSizeLabel} options={SOURCE_FONT_SIZE_OPTIONS} onChange={setSourceFontSize} /></div>
+          <div className="font-size-setting-row"><div><strong>译文字号</strong></div><FontSizeScale ariaLabel="译文字号" value={translationFontSizeLabel} options={TRANSLATION_FONT_SIZE_OPTIONS} onChange={setTranslationFontSize} /></div>
         </div>
       </section>
       <section className="preferences-section preferences-secondary-section" aria-labelledby="preferences-other-title">
@@ -1959,7 +2040,7 @@ function SettingsWindow() {
       : null;
     return <button ref={quickModelTriggerRef} className="default-quick-model-trigger" type="button" aria-label="设置默认快速翻译模型" aria-haspopup="dialog" aria-expanded={quickModelDialogOpen} onClick={() => setQuickModelDialogOpen(true)} disabled={!choices.length}>
       {selectedProvider ? <ProviderIcon provider={selectedProvider} /> : <span className="model-picker-placeholder-icon" aria-hidden="true">◇</span>}
-      <span className="default-quick-model-value">{selectedChoice && selectedProvider ? <><strong>{selectedChoice.model}</strong><small>{selectedProvider.vendor}</small></> : <strong>未配置模型</strong>}</span>
+      <span className="default-quick-model-value">{selectedChoice && selectedProvider ? <strong>{selectedChoice.model}/{selectedProvider.vendor}</strong> : <strong>未配置模型</strong>}</span>
     </button>;
   }
 
@@ -1983,7 +2064,7 @@ function SettingsWindow() {
             closeQuickModelDialog();
           }}>
             <ProviderIcon provider={provider} />
-            <span><strong>{choice.model}</strong><small>{provider.vendor}</small></span>
+            <span><strong>{choice.model}/{provider.vendor}</strong></span>
             {selected && <CheckIcon />}
           </button></div>;
         })}
