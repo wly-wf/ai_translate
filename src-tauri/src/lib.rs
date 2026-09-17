@@ -1,4 +1,5 @@
 mod selection_state;
+mod autostart;
 mod native_frame;
 pub mod mouse_hook;
 pub mod windows_selection;
@@ -3168,6 +3169,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            autostart::get_autostart,
+            autostart::set_autostart,
             translate_text,
             get_latest_translation,
             translate_selection_float,

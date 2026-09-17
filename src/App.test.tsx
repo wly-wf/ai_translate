@@ -130,7 +130,7 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "快速翻译" }));
 
-    expect(screen.getByText("快速翻译", { exact: true })).toBeInTheDocument();
+    expect(screen.queryByText("快速翻译", { exact: true })).not.toBeInTheDocument();
     expect(screen.queryByText("把文字变成另一种语言")).not.toBeInTheDocument();
     expect(screen.queryByText("直接输入文本即可开始翻译。")).not.toBeInTheDocument();
     expect(screen.queryByText("支持中英文自动识别")).not.toBeInTheDocument();
@@ -217,7 +217,8 @@ describe("App", () => {
     expect(screen.queryByText("Windows")).not.toBeInTheDocument();
     expect(screen.getByText("GitHub 开源仓库")).toBeInTheDocument();
     expect(screen.getByText("GitHub Issues")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "暂不可用" })).toBeDisabled();
+    expect(screen.queryByText("检查更新")).not.toBeInTheDocument();
+    expect(screen.queryByText("自动更新暂不可用；源代码与问题反馈可通过上方入口访问。")).not.toBeInTheDocument();
     const repositoryLink = screen.getByRole("link", { name: /https:\/\/github\.com\/wly-wf\/ai_translate$/ });
     const issuesLink = screen.getByRole("link", { name: /https:\/\/github\.com\/wly-wf\/ai_translate\/issues$/ });
     expect(repositoryLink).toHaveAttribute("href", "https://github.com/wly-wf/ai_translate");
@@ -695,6 +696,51 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "设置默认快速翻译模型" })).toHaveTextContent("deepseek-reasoner");
   });
 
+  it("loads and toggles native autostart, retaining the saved state on failure", async () => {
+    mockWindowLabel("settings");
+    const save = deferred<boolean>();
+    invokeMock.mockImplementation((command: string, args?: { enabled: boolean }) => {
+      if (command === "get_enabled_providers") return Promise.resolve([]);
+      if (command === "get_autostart") return Promise.resolve(true);
+      if (command === "set_autostart") {
+        return args?.enabled ? Promise.reject("保存开机自启动设置失败") : save.promise;
+      }
+      return Promise.resolve(undefined);
+    });
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "偏好设置" }));
+    const toggle = screen.getByRole("checkbox", { name: "启动时自动运行" });
+    await waitFor(() => expect(toggle).toBeEnabled());
+    expect(toggle).toBeChecked();
+    expect(screen.queryByText("默认目标语言")).not.toBeInTheDocument();
+    expect(screen.queryByText("配置同步")).not.toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(toggle).toBeDisabled();
+    expect(invokeMock).toHaveBeenCalledWith("set_autostart", { enabled: false });
+    await act(async () => save.resolve(false));
+    expect(toggle).not.toBeChecked();
+    fireEvent.click(toggle);
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("保存开机自启动设置失败"));
+    expect(toggle).not.toBeChecked();
+    expect(toggle).toBeEnabled();
+  });
+
+  it("shows autostart read errors and allows retrying through the toggle", async () => {
+    mockWindowLabel("settings");
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_enabled_providers") return Promise.resolve([]);
+      if (command === "get_autostart") return Promise.reject("读取开机自启动设置失败");
+      if (command === "set_autostart") return Promise.resolve(true);
+      return Promise.resolve(undefined);
+    });
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "偏好设置" }));
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("读取开机自启动设置失败"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "启动时自动运行" }));
+    await waitFor(() => expect(screen.getByRole("checkbox", { name: "启动时自动运行" })).toBeChecked());
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("updates color mode and translation font sizes from interface settings", async () => {
     mockWindowLabel("settings");
     invokeMock.mockImplementation((command: string) => {
@@ -721,7 +767,8 @@ describe("App", () => {
     expect(screen.getByRole("heading", { level: 2, name: "偏好" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 2, name: "字体" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 2, name: "其他" })).toBeInTheDocument();
-    expect(screen.getByRole("checkbox", { name: "选中文本自动显示悬浮按钮" })).toBeChecked();
+    expect(screen.queryByRole("checkbox", { name: "选中文本自动显示悬浮按钮" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "翻译窗口保持置顶" })).not.toBeInTheDocument();
     expect(screen.queryByText("“跟随系统”会在 Windows 外观变化时自动切换")).not.toBeInTheDocument();
     expect(screen.queryByText("翻译结果中原文的显示大小")).not.toBeInTheDocument();
     expect(screen.queryByText("鼠标完成选区后显示翻译入口")).not.toBeInTheDocument();

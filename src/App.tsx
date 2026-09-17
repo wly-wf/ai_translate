@@ -1254,13 +1254,12 @@ function MainWindow() {
 
     <section className={`content${showQuickTranslate ? " quick-content" : ""}`}>
       {showQuickTranslate ? <div className="quick-translate-page">
-        <div className="quick-translate-heading"><p className="eyebrow">快速翻译</p></div>
         {!hasApiKey && <ProviderSetupNotice onOpenError={setNotice} />}
         <div className="quick-model-picker"><ModelPicker value={modelChoiceKey(quickTranslateProviderId, quickTranslateModelName)} choices={quickTranslateChoices} onChange={(choice) => { setQuickTranslateProviderId(choice.providerId); setQuickTranslateModelName(choice.model); }} ariaLabel="选择翻译模型" disabled={!quickTranslateChoices.length} /></div>
-        <div className="input-card"><div className="input-head"><label className="field-label" htmlFor="translation-input">输入文本</label><span className="character-count">{text.length} 字符</span></div>
-          <textarea ref={inputRef} id="translation-input" className={/[A-Za-z]/.test(text) ? "is-mixed-language" : undefined} value={text} onChange={(event) => setText(event.target.value)} placeholder="输入要翻译的文字…" />
+        <div className="input-card">
+          <textarea ref={inputRef} id="translation-input" aria-label="输入文本" className={/[A-Za-z]/.test(text) ? "is-mixed-language" : undefined} value={text} onChange={(event) => setText(event.target.value)} placeholder="输入要翻译的内容…" />
         </div>
-        <div className="quick-translate-action"><button className="primary" disabled={loading || !text.trim()} onClick={() => void translate()}>{loading ? "翻译中…" : "翻译"}</button></div>
+        <div className="quick-translate-action"><span className="character-count">{text.length} 字符</span><button className="primary" disabled={loading || !text.trim()} onClick={() => void translate()}>{loading ? "翻译中…" : "翻译"}</button></div>
       </div> : result ? <div className="translation-result">
         <div className="provider-list">
           {result.results.map((providerResult) => {
@@ -1301,15 +1300,18 @@ function MainWindow() {
 }
 
 function SettingsWindow() {
+  const [autostart, setAutostart] = useState(false);
+  const [autostartBusy, setAutostartBusy] = useState(true);
+  const [autostartError, setAutostartError] = useState("");
   const [settingsPage, setSettingsPage] = useState<SettingsPage>("providers");
   const [selectedSettingsProviderId, setSelectedSettingsProviderId] = useState<SettingsProviderId>("deepseek");
   const [providerDrafts, setProviderDrafts] = useState<Record<SettingsProviderId, ProviderDraft>>(createProviderDrafts);
   const [connectionState, setConnectionState] = useState<ConnectionState>({ providerId: null, status: "idle", message: "" });
   const {
-    autoSelection, keepOnTop, quickTranslateProvider, quickTranslateModel,
+    quickTranslateProvider, quickTranslateModel,
     themeMode, accentColor, sourceFontSize, translationFontSize, proxyMode, proxyType, proxyHost, proxyPort,
     proxyUsername, proxyPassword, proxyBypass, proxyTestUrl, providerOrder,
-    setAutoSelection, setKeepOnTop, setQuickTranslateProvider, setQuickTranslateModel,
+    setQuickTranslateProvider, setQuickTranslateModel,
     setThemeMode, setAccentColor, setSourceFontSize, setTranslationFontSize, setProxyMode, setProxyType, setProxyHost,
     setProxyPort, setProxyUsername, setProxyPassword, setProxyBypass, setProxyTestUrl, setProviderOrder,
     flushPreferenceUpdates,
@@ -1357,6 +1359,30 @@ function SettingsWindow() {
     const message = preferenceNoticeMessage(preferencesError);
     if (message) setNotice(message);
   }, [preferencesError]);
+
+  useEffect(() => {
+    if (settingsPage !== "preferences") return;
+    let cancelled = false;
+    setAutostartBusy(true);
+    setAutostartError("");
+    void nativeInvoke<boolean>("get_autostart")
+      .then((enabled) => { if (!cancelled) setAutostart(Boolean(enabled)); })
+      .catch((error) => { if (!cancelled) setAutostartError(String(error)); })
+      .finally(() => { if (!cancelled) setAutostartBusy(false); });
+    return () => { cancelled = true; };
+  }, [settingsPage]);
+
+  async function updateAutostart(enabled: boolean) {
+    setAutostartBusy(true);
+    setAutostartError("");
+    try {
+      setAutostart(await nativeInvoke<boolean>("set_autostart", { enabled }));
+    } catch (error) {
+      setAutostartError(String(error));
+    } finally {
+      setAutostartBusy(false);
+    }
+  }
 
   useEffect(() => () => {
     Object.values(providerAutoSaveTimers.current).forEach((timer) => {
@@ -2054,8 +2080,6 @@ function SettingsWindow() {
           <div className="default-quick-model-card"><div className="default-quick-model-copy"><strong>默认快速翻译模型</strong></div><div className="default-quick-model-control">{renderQuickModelTrigger(defaultModelChoices)}</div></div>
           <div className="appearance-setting-row"><div><strong>颜色模式</strong></div><SegmentedControl ariaLabel="颜色模式" value={themeMode} options={[{ value: "light", label: "浅色", icon: "light" }, { value: "dark", label: "深色", icon: "dark" }, { value: "system", label: "跟随系统", icon: "system" }]} onChange={(value) => setThemeMode(value as ThemeMode)} /></div>
           <div className="accent-color-setting-row"><div><strong>主题色</strong></div><AccentColorPicker value={accentColor} onChange={setAccentColor} /></div>
-          <div className="preference-setting-row"><div><strong>选中文本自动显示悬浮按钮</strong></div><label className="settings-switch"><input aria-label="选中文本自动显示悬浮按钮" type="checkbox" checked={autoSelection} onChange={(event) => setAutoSelection(event.target.checked)} /><span aria-hidden="true" /></label></div>
-          <div className="preference-setting-row"><div><strong>翻译窗口保持置顶</strong></div><label className="settings-switch"><input aria-label="翻译窗口保持置顶" type="checkbox" checked={keepOnTop} onChange={(event) => setKeepOnTop(event.target.checked)} /><span aria-hidden="true" /></label></div>
         </div>
       </section>
       <section className="preferences-section" aria-labelledby="preferences-font-title">
@@ -2067,7 +2091,8 @@ function SettingsWindow() {
       </section>
       <section className="preferences-section preferences-secondary-section" aria-labelledby="preferences-other-title">
         <header className="preferences-section-heading"><h2 id="preferences-other-title">其他</h2></header>
-        <div className="preferences-section-rows"><div className="placeholder-setting-row"><div><strong>启动时自动运行</strong></div><span className="placeholder-badge">即将支持</span></div><div className="placeholder-setting-row"><div><strong>默认目标语言</strong></div><span className="placeholder-value">自动识别</span></div><div className="placeholder-setting-row"><div><strong>配置同步</strong></div><span className="placeholder-badge">即将支持</span></div></div>
+        <div className="preferences-section-rows"><div className="preference-setting-row"><div><strong>启动时自动运行</strong></div><label className="settings-switch"><input aria-label="启动时自动运行" type="checkbox" checked={autostart} disabled={autostartBusy} onChange={(event) => void updateAutostart(event.target.checked)} /><span aria-hidden="true" /></label></div></div>
+        {autostartError && <p className="notice" role="alert">{autostartError}</p>}
       </section>
       {quickModelDialogOpen && renderQuickModelDialog(defaultModelChoices)}
     </div>;
@@ -2156,10 +2181,8 @@ function SettingsWindow() {
       <header className="about-brand"><img src={appIcon} alt="" /><div><h1>AI Translate</h1><p>轻量、快速的 Windows 桌面翻译工具</p></div></header>
       <div className="about-info-list" aria-label="软件信息">
         <div className="about-info-row"><span className="about-link-icon" aria-hidden="true"><AboutIcon name="version" /></span><strong>版本</strong><span className="about-info-value">v{APP_VERSION} · 开发预览版</span></div>
-        <div className="about-info-row"><span className="about-link-icon" aria-hidden="true"><AboutIcon name="refresh" /></span><strong>检查更新</strong><button type="button" className="about-update-button" disabled aria-describedby="about-update-status">暂不可用</button></div>
         {PROJECT_LINKS.map((link) => <div className="about-info-row" key={link.id}><span className="about-link-icon" aria-hidden="true"><AboutIcon name={link.id === "repository" ? "github" : "issues"} /></span><strong>{link.title}</strong>{link.url ? <a className="about-link-action" href={link.url} target="_blank" rel="noreferrer">{link.url}<AboutIcon name="external" /></a> : <span className="about-pending-badge">待配置</span>}</div>)}
       </div>
-      <p className="about-update-status" id="about-update-status" role="status"><span aria-hidden="true" />自动更新暂不可用；源代码与问题反馈可通过上方入口访问。</p>
     </div>;
   }
 
