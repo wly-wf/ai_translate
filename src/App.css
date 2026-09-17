@@ -560,16 +560,17 @@ textarea:focus, input:focus { outline: 2px solid var(--theme-primary-focus); out
 .accent-color-picker button[data-accent-value="green"] { --swatch: #3f8068; }
 .accent-color-picker button[data-accent-value="orange"] { --swatch: #b96332; }
 .accent-color-picker button[data-accent-value="rose"] { --swatch: #b55478; }
-.font-size-scale { width: min(320px, 48%); display: grid; gap: 5px; padding: 6px 2px 0; }
-.font-size-scale input[type="range"] { appearance: none; -webkit-appearance: none; width: 100%; min-height: 0; height: 5px; margin: 0; padding: 0; cursor: pointer; background: linear-gradient(to right, var(--theme-primary) 0 var(--range-progress), #d8dee5 var(--range-progress) 100%); border: 0; border-radius: 999px; outline: 0; }
-.font-size-scale input[type="range"]::-webkit-slider-thumb { appearance: none; -webkit-appearance: none; width: 17px; height: 17px; background: var(--theme-primary); border: 3px solid #fff; border-radius: 50%; box-shadow: 0 0 0 1px var(--theme-primary-border), 0 2px 5px var(--theme-primary-shadow); }
-.font-size-scale input[type="range"]::-moz-range-thumb { width: 11px; height: 11px; background: var(--theme-primary); border: 3px solid #fff; border-radius: 50%; box-shadow: 0 0 0 1px var(--theme-primary-border), 0 2px 5px var(--theme-primary-shadow); }
-.font-size-scale input[type="range"]:focus-visible { outline: 2px solid var(--theme-primary-focus); outline-offset: 5px; }
-.font-size-scale-labels { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); color: #8b96a1; font-size: 10px; line-height: 1.2; }
-.font-size-scale-labels span { text-align: center; transition: color .16s ease; }
-.font-size-scale-labels span:first-child { text-align: left; }
-.font-size-scale-labels span:last-child { text-align: right; }
-.font-size-scale-labels span.is-selected { color: var(--theme-primary-strong); font-weight: 750; }
+.font-size-stepper { display: flex; align-items: center; gap: 2px; padding: 1px; border-radius: 8px; }
+.font-size-stepper:focus-visible { outline: 2px solid var(--theme-primary-focus); outline-offset: 3px; }
+.font-size-stepper-value { min-width: 42px; color: #33414e; font-family: "Segoe UI Variable Display", "Aptos Display", "Segoe UI Variable Text", "Aptos", "Inter", "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; font-size: 15px; font-weight: 400; letter-spacing: -.01em; line-height: 1.1; text-align: center; }
+.font-size-stepper-value small { margin-left: 2px; color: #68737f; font-family: "Segoe UI Variable Text", "Aptos", "Inter", "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; font-size: 10px; font-weight: 500; }
+.font-size-stepper-buttons { display: grid; gap: 1px; }
+.font-size-stepper-buttons button { width: 22px; height: 15px; display: grid; place-items: center; padding: 0; color: #6f7c89; background: transparent; border: 0; border-radius: 5px; transition: color .14s ease, background-color .14s ease; }
+.font-size-stepper-buttons button:hover:not(:disabled) { color: var(--theme-primary-strong); background: var(--theme-primary-soft-hover); }
+.font-size-stepper-buttons button:active:not(:disabled) { background: var(--theme-primary-soft); }
+.font-size-stepper-buttons button:focus-visible { outline: 2px solid var(--theme-primary-focus); outline-offset: 0; }
+.font-size-stepper-buttons button:disabled { cursor: not-allowed; color: #c3ccd5; }
+.font-size-stepper-buttons button svg { width: 11px; height: 7px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.6; }
 .preferences-section .settings-switch { width: 44px; height: 26px; flex-basis: 44px; }
 .preferences-section .settings-switch span::after { width: 18px; height: 18px; }
 .preferences-section .settings-switch input:checked + span::after { transform: translateX(18px); }
@@ -698,6 +699,6 @@ textarea:focus, input:focus { outline: 2px solid var(--theme-primary-focus); out
   .segmented-control { align-self: stretch; }
   .segmented-control button { flex: 1; }
   .accent-color-picker { align-self: flex-start; }
-  .font-size-scale { width: 100%; }
+  .font-size-stepper { align-self: flex-start; }
   .proxy-form-row, .proxy-test-url { grid-template-columns: 1fr; gap: 6px; }
 }

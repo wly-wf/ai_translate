@@ -261,26 +261,6 @@ const ACCENT_COLOR_OPTIONS: { value: AccentColor; label: string }[] = [
   { value: "orange", label: "橙色" },
   { value: "rose", label: "玫红" },
 ];
-const SOURCE_FONT_SIZE_OPTIONS = [
-  { label: "较小", size: 12 },
-  { label: "小", size: 13 },
-  { label: "标准", size: 14 },
-  { label: "大", size: 16 },
-  { label: "超大", size: 18 },
-];
-const TRANSLATION_FONT_SIZE_OPTIONS = [
-  { label: "较小", size: 14 },
-  { label: "小", size: 15 },
-  { label: "标准", size: 16 },
-  { label: "大", size: 18 },
-  { label: "超大", size: 20 },
-];
-
-function closestFontSizeLabel(size: number, options: { label: string; size: number }[]) {
-  return options.reduce((closest, option) => (
-    Math.abs(option.size - size) < Math.abs(closest.size - size) ? option : closest
-  )).label;
-}
 
 const DEFAULT_USER_PREFERENCES: UserPreferences = {
   autoSelection: true,
@@ -506,29 +486,81 @@ function AccentColorPicker({ value, onChange }: { value: AccentColor; onChange: 
   </div>;
 }
 
-function FontSizeScale({ value, options, onChange, ariaLabel }: {
-  value: string;
-  options: { label: string; size: number }[];
+// Stays inside the native store's accepted ranges (12–24 and 12–28 in
+// src-tauri/src/lib.rs) so the UI can never submit a value the backend rejects.
+const FONT_SIZE_LIMITS = { min: 12, max: 20 };
+
+function clampFontSize(size: number, limits: { min: number; max: number }) {
+  if (!Number.isFinite(size)) return limits.min;
+  return Math.min(limits.max, Math.max(limits.min, Math.round(size)));
+}
+
+// Keeps a preference merged from the native store only when its value is usable;
+// a missing or malformed field must never overwrite a valid in-memory value.
+function isUsablePreferenceValue(value: unknown) {
+  if (value === undefined) return false;
+  if (typeof value === "string") return value.trim().length > 0;
+  return value !== null;
+}
+
+function FontSizeStepper({ value, limits, onChange, ariaLabel }: {
+  value: number;
+  limits: { min: number; max: number };
   onChange: (size: number) => void;
   ariaLabel: string;
 }) {
-  const selectedIndex = Math.max(0, options.findIndex((option) => option.label === value));
-  return <div className="font-size-scale">
-    <input
-      type="range"
-      min="0"
-      max={options.length - 1}
-      step="1"
-      value={selectedIndex}
-      aria-label={ariaLabel}
-      aria-valuetext={options[selectedIndex].label}
-      style={{ "--range-progress": `${selectedIndex / (options.length - 1) * 100}%` } as CSSProperties}
-      onChange={(event) => onChange(options[Number(event.target.value)].size)}
-    />
-    <div className="font-size-scale-labels" aria-hidden="true">
-      {options.map((option, index) => <span className={index === selectedIndex ? "is-selected" : ""} key={option.label}>{option.label}</span>)}
-    </div>
+  const size = clampFontSize(value, limits);
+
+  function applySize(next: number) {
+    const clamped = clampFontSize(next, limits);
+    if (clamped !== size) onChange(clamped);
+  }
+
+  function handleKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    const keyTargets: Record<string, number> = {
+      ArrowUp: size + 1,
+      ArrowRight: size + 1,
+      ArrowDown: size - 1,
+      ArrowLeft: size - 1,
+      PageUp: size + 2,
+      PageDown: size - 2,
+      Home: limits.min,
+      End: limits.max,
+    };
+    if (keyTargets[event.key] === undefined) return;
+    event.preventDefault();
+    applySize(keyTargets[event.key]);
+  }
+
+  return <div
+    className="font-size-stepper"
+    role="spinbutton"
+    aria-label={ariaLabel}
+    aria-valuemin={limits.min}
+    aria-valuemax={limits.max}
+    aria-valuenow={size}
+    aria-valuetext={`${size} 像素`}
+    aria-disabled={false}
+    tabIndex={0}
+    onKeyDown={handleKeyDown}
+  >
+    <span className="font-size-stepper-value" aria-hidden="true">{size}<small>px</small></span>
+    <span className="font-size-stepper-buttons">
+      <button type="button" tabIndex={-1} aria-label={`增大${ariaLabel}`} title={`增大${ariaLabel}`} disabled={size >= limits.max} onClick={() => applySize(size + 1)}>
+        <svg viewBox="0 0 12 8" aria-hidden="true"><path d="M1 6.4 6 1.6l5 4.8" /></svg>
+      </button>
+      <button type="button" tabIndex={-1} aria-label={`减小${ariaLabel}`} title={`减小${ariaLabel}`} disabled={size <= limits.min} onClick={() => applySize(size - 1)}>
+        <svg viewBox="0 0 12 8" aria-hidden="true"><path d="M1 1.6 6 6.4l5-4.8" /></svg>
+      </button>
+    </span>
   </div>;
+}
+
+// Low-level validation text from the native preference store is developer-facing:
+// the UI now clamps every value inside the accepted range, so a rejection means a
+// programming error, not something the user can act on.
+function preferenceNoticeMessage(error: string) {
+  return error.includes("must be") ? "" : error;
 }
 
 async function nativeInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -545,7 +577,14 @@ function useUserPreferences() {
   const pendingPreferences = useRef<Partial<UserPreferences>>({});
 
   function mergeStoredPreferences(current: UserPreferences, stored: Partial<UserPreferences> | null | undefined) {
-    const next = { ...DEFAULT_USER_PREFERENCES, ...(stored ?? {}) };
+    const next = { ...DEFAULT_USER_PREFERENCES };
+    for (const [key, storedValue] of Object.entries(stored ?? {}) as [keyof UserPreferences, unknown][]) {
+      if (isUsablePreferenceValue(storedValue)) next[key] = storedValue as never;
+    }
+    // Older builds stored font sizes the native store no longer accepts; clamp them
+    // so the translation window never renders an out-of-range size.
+    next.sourceFontSize = clampFontSize(next.sourceFontSize, FONT_SIZE_LIMITS);
+    next.translationFontSize = clampFontSize(next.translationFontSize, FONT_SIZE_LIMITS);
     for (const key of Object.keys(pendingPreferences.current) as (keyof UserPreferences)[]) {
       next[key] = current[key] as never;
     }
@@ -628,9 +667,10 @@ function useUserPreferences() {
       .catch(() => undefined)
       .then(() => nativeInvoke<UserPreferences>("set_user_preference", { preference, value }))
       .then((saved) => {
+        const acknowledged = saved ? saved[preference] : undefined;
         setPreferences((current) => {
           if (current[preference] !== value) return current;
-          return { ...current, [preference]: saved ? saved[preference] : value };
+          return isUsablePreferenceValue(acknowledged) ? { ...current, [preference]: acknowledged } : current;
         });
         if (pendingPreferences.current[preference] === value) delete pendingPreferences.current[preference];
         setPreferencesError("");
@@ -1108,7 +1148,8 @@ function MainWindow() {
   }, [result]);
 
   useEffect(() => {
-    if (preferencesError) setNotice(preferencesError);
+    const message = preferenceNoticeMessage(preferencesError);
+    if (message) setNotice(message);
   }, [preferencesError]);
 
   useEffect(() => {
@@ -1313,7 +1354,8 @@ function SettingsWindow() {
   providerDraftsRef.current = providerDrafts;
 
   useEffect(() => {
-    if (preferencesError) setNotice(preferencesError);
+    const message = preferenceNoticeMessage(preferencesError);
+    if (message) setNotice(message);
   }, [preferencesError]);
 
   useEffect(() => () => {
@@ -2005,8 +2047,6 @@ function SettingsWindow() {
       const provider = providerCollection.find((item) => item.id === providerId);
       return provider ? (settingsEnabledProviderModels[providerId] ?? [provider.model]).map((model) => ({ id: modelChoiceKey(providerId, model), providerId, model, vendor: provider.vendor })) : [];
     });
-    const sourceFontSizeLabel = closestFontSizeLabel(sourceFontSize, SOURCE_FONT_SIZE_OPTIONS);
-    const translationFontSizeLabel = closestFontSizeLabel(translationFontSize, TRANSLATION_FONT_SIZE_OPTIONS);
     return <div className="settings-page-view preferences-settings-page"><h1 className="sr-only">偏好设置</h1>
       <section className="preferences-section" aria-labelledby="preferences-general-title">
         <header className="preferences-section-heading"><h2 id="preferences-general-title">偏好</h2></header>
@@ -2021,8 +2061,8 @@ function SettingsWindow() {
       <section className="preferences-section" aria-labelledby="preferences-font-title">
         <header className="preferences-section-heading"><h2 id="preferences-font-title">字体</h2></header>
         <div className="preferences-section-rows">
-          <div className="font-size-setting-row"><div><strong>原文字号</strong></div><FontSizeScale ariaLabel="原文字号" value={sourceFontSizeLabel} options={SOURCE_FONT_SIZE_OPTIONS} onChange={setSourceFontSize} /></div>
-          <div className="font-size-setting-row"><div><strong>译文字号</strong></div><FontSizeScale ariaLabel="译文字号" value={translationFontSizeLabel} options={TRANSLATION_FONT_SIZE_OPTIONS} onChange={setTranslationFontSize} /></div>
+          <div className="font-size-setting-row"><div><strong>原文字号</strong></div><FontSizeStepper ariaLabel="原文字号" value={sourceFontSize} limits={FONT_SIZE_LIMITS} onChange={setSourceFontSize} /></div>
+          <div className="font-size-setting-row"><div><strong>译文字号</strong></div><FontSizeStepper ariaLabel="译文字号" value={translationFontSize} limits={FONT_SIZE_LIMITS} onChange={setTranslationFontSize} /></div>
         </div>
       </section>
       <section className="preferences-section preferences-secondary-section" aria-labelledby="preferences-other-title">

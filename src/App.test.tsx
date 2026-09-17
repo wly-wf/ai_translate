@@ -727,14 +727,108 @@ describe("App", () => {
     expect(screen.queryByText("鼠标完成选区后显示翻译入口")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("radio", { name: "深色" }));
     fireEvent.click(screen.getByRole("radio", { name: "紫色" }));
+    const sourceFontSizeStepper = screen.getByRole("spinbutton", { name: "原文字号" });
+    const translationFontSizeStepper = screen.getByRole("spinbutton", { name: "译文字号" });
+    expect(sourceFontSizeStepper).toHaveAttribute("aria-valuenow", "14");
+    expect(translationFontSizeStepper).toHaveAttribute("aria-valuenow", "16");
+    expect(sourceFontSizeStepper).toHaveAttribute("aria-valuemin", "12");
+    expect(sourceFontSizeStepper).toHaveAttribute("aria-valuemax", "20");
+    expect(translationFontSizeStepper).toHaveAttribute("aria-valuemin", "12");
+    expect(translationFontSizeStepper).toHaveAttribute("aria-valuemax", "20");
+    expect(sourceFontSizeStepper).toHaveTextContent("14px");
+    // Each arrow click renders before the next one, so the steppers step 14 → 16 and 16 → 20.
+    await clickFontSizeArrow("增大原文字号", "原文字号", "15");
+    await clickFontSizeArrow("增大原文字号", "原文字号", "16");
+    await clickFontSizeArrow("增大译文字号", "译文字号", "17");
+    await clickFontSizeArrow("增大译文字号", "译文字号", "18");
+    await clickFontSizeArrow("增大译文字号", "译文字号", "19");
+    await clickFontSizeArrow("增大译文字号", "译文字号", "20");
+    expect(screen.getByRole("button", { name: "增大译文字号" })).toBeDisabled();
+
     await waitFor(() => expect(document.documentElement).toHaveAttribute("data-theme", "dark"));
     await waitFor(() => expect(document.documentElement).toHaveAttribute("data-accent", "purple"));
-    fireEvent.change(screen.getByLabelText("原文字号"), { target: { value: "3" } });
-    fireEvent.change(screen.getByLabelText("译文字号"), { target: { value: "4" } });
-
+    await waitFor(() => expect(document.documentElement.style.getPropertyValue("--source-font-size")).toBe("16px"));
     await waitFor(() => expect(document.documentElement.style.getPropertyValue("--translation-font-size")).toBe("20px"));
-    expect(document.documentElement.style.getPropertyValue("--source-font-size")).toBe("16px");
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_user_preference", { preference: "translationFontSize", value: 20 }));
     expect(invokeMock).toHaveBeenCalledWith("set_user_preference", { preference: "accentColor", value: "purple" });
+  });
+
+  it("adjusts font sizes between 10px and 20px with keyboard and arrow buttons", async () => {
+    mockWindowLabel("settings");
+    invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_enabled_providers") return Promise.resolve([]);
+      if (command === "get_preferences") return Promise.resolve({
+        autoSelection: true,
+        keepOnTop: false,
+        themeMode: "light",
+        accentColor: "blue",
+        sourceFontSize: 14,
+        translationFontSize: 16,
+      });
+      if (command === "set_user_preference") return Promise.resolve(args ?? {});
+      return Promise.resolve(undefined);
+    });
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "偏好设置" }));
+    // Wait for the stored preferences to load before driving the stepper.
+    const sourceFontSizeStepper = await screen.findByRole("spinbutton", { name: "原文字号" });
+    const translationFontSizeStepper = screen.getByRole("spinbutton", { name: "译文字号" });
+    await waitFor(() => expect(sourceFontSizeStepper).toHaveAttribute("aria-valuenow", "14"));
+    expect(sourceFontSizeStepper).toHaveAttribute("aria-valuetext", "14 像素");
+    // Bounds are 12–20 for both rows and stay inside the native store's limits.
+    expect(sourceFontSizeStepper).toHaveAttribute("aria-valuemin", "12");
+    expect(sourceFontSizeStepper).toHaveAttribute("aria-valuemax", "20");
+    expect(translationFontSizeStepper).toHaveAttribute("aria-valuemin", "12");
+    expect(translationFontSizeStepper).toHaveAttribute("aria-valuemax", "20");
+
+    // Keyboard steps land one after another, so settle on each value before the next key.
+    await pressFontSizeKey(sourceFontSizeStepper, "ArrowUp", "15");
+    await pressFontSizeKey(sourceFontSizeStepper, "ArrowDown", "14");
+    await pressFontSizeKey(sourceFontSizeStepper, "PageUp", "16");
+    await pressFontSizeKey(sourceFontSizeStepper, "PageDown", "14");
+    await pressFontSizeKey(sourceFontSizeStepper, "Home", "12");
+    expect(screen.getByRole("button", { name: "减小原文字号" })).toBeDisabled();
+    await pressFontSizeKey(sourceFontSizeStepper, "ArrowDown", "12");
+    await pressFontSizeKey(sourceFontSizeStepper, "End", "20");
+    expect(screen.getByRole("button", { name: "增大原文字号" })).toBeDisabled();
+    await pressFontSizeKey(sourceFontSizeStepper, "ArrowUp", "20");
+
+    // One click per settled render, so the arrow buttons step 20 → 18.
+    await clickFontSizeArrow("减小原文字号", "原文字号", "19");
+    await clickFontSizeArrow("减小原文字号", "原文字号", "18");
+
+    await waitFor(() => expect(document.documentElement.style.getPropertyValue("--source-font-size")).toBe("18px"));
+    expect(screen.queryByText("字号预览")).not.toBeInTheDocument();
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_user_preference", { preference: "sourceFontSize", value: 18 }));
+  });
+
+  it("never shows a native range rejection when a font size is changed", async () => {
+    mockWindowLabel("settings");
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_enabled_providers") return Promise.resolve([]);
+      if (command === "get_preferences") return Promise.resolve({
+        autoSelection: true,
+        keepOnTop: false,
+        themeMode: "light",
+        accentColor: "blue",
+        sourceFontSize: 14,
+        translationFontSize: 16,
+      });
+      if (command === "set_user_preference") return Promise.reject(new Error("sourceFontSize must be between 12 and 24"));
+      return Promise.resolve(undefined);
+    });
+    const { container } = render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "偏好设置" }));
+    const sourceFontSizeStepper = await screen.findByRole("spinbutton", { name: "原文字号" });
+    await waitFor(() => expect(sourceFontSizeStepper).toHaveAttribute("aria-valuenow", "14"));
+    await clickFontSizeArrow("增大原文字号", "原文字号", "15");
+
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.queryByText(/must be/)).not.toBeInTheDocument();
+    expect(container.querySelector(".notice")).toBeNull();
+    expect(sourceFontSizeStepper).toHaveAttribute("aria-valuenow", "15");
   });
 
   it("keeps system color mode synchronized with operating-system changes", async () => {
@@ -1094,3 +1188,21 @@ describe("App", () => {
     }
   });
 });
+
+async function pressFontSizeKey(element: HTMLElement, key: string, expectedValue: string) {
+  const stepperName = element.getAttribute("aria-label") ?? "";
+  const valueNow = () => screen.getByRole("spinbutton", { name: stepperName }).getAttribute("aria-valuenow");
+  fireEvent.keyDown(element, { key });
+  expect(valueNow()).toBe(expectedValue);
+  // Let the preference save round-trip settle, then confirm it did not shift the value.
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  expect(valueNow()).toBe(expectedValue);
+}
+
+async function clickFontSizeArrow(buttonName: string, stepperName: string, expectedValue: string) {
+  const valueNow = () => screen.getByRole("spinbutton", { name: stepperName }).getAttribute("aria-valuenow");
+  fireEvent.click(screen.getByRole("button", { name: buttonName }));
+  expect(valueNow()).toBe(expectedValue);
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  expect(valueNow()).toBe(expectedValue);
+}
