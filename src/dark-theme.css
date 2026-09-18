@@ -175,10 +175,8 @@
 :root[data-theme="dark"] .provider-column-footer > button.is-active { color: var(--theme-primary-strong); background: var(--theme-primary-soft); }
 :root[data-theme="dark"] .provider-add-button { color: var(--theme-primary-strong); background: var(--theme-primary-soft); border-color: var(--theme-primary-border); }
 :root[data-theme="dark"] .provider-add-button:hover { background: var(--theme-primary-soft-hover); border-color: var(--theme-primary); }
-:root[data-theme="dark"] .settings-form-card.provider-config-card,
-:root[data-theme="dark"] .settings-page-view .connection-selector-card { color: var(--ink); background: var(--dark-panel); border-color: #3a4859; box-shadow: 0 13px 32px rgba(4, 9, 17, .19); }
+:root[data-theme="dark"] .settings-form-card.provider-config-card { color: var(--ink); background: var(--dark-panel); border-color: #3a4859; box-shadow: 0 13px 32px rgba(4, 9, 17, .19); }
 :root[data-theme="dark"] .settings-form-card.provider-config-card .field-label,
-:root[data-theme="dark"] .settings-page-view .connection-selector-card .field-label,
 :root[data-theme="dark"] .provider-model-section .model-section-title h3 { color: #d3deea; }
 :root[data-theme="dark"] .settings-form-card.provider-config-card input,
 :root[data-theme="dark"] .settings-main select,
@@ -195,11 +193,7 @@
 :root[data-theme="dark"] .api-key-toggle,
 :root[data-theme="dark"] .model-remove-button { color: #b2c5d9; }
 :root[data-theme="dark"] .api-key-toggle:hover { color: var(--dark-blue); background: var(--dark-raised); }
-:root[data-theme="dark"] .connection-summary,
-:root[data-theme="dark"] .settings-page-view .connection-summary,
-:root[data-theme="dark"] .connection-note,
 :root[data-theme="dark"] .connection-field-result { color: var(--muted); background: #293440; border-color: #435467; }
-:root[data-theme="dark"] .connection-summary strong { color: var(--ink); }
 :root[data-theme="dark"] .connection-field-result.testing,
 :root[data-theme="dark"] .connection-result.testing { color: #f1d29f; background: #3d3224; }
 :root[data-theme="dark"] .connection-field-result.success,

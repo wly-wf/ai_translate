@@ -39,7 +39,7 @@ fn run_live_regression(baseline: bool) {
                 if baseline {
                     baseline_translation(&provider, &model, &preferences).await
                 } else {
-                    request_translation(provider.clone(), model.clone(), SCREENSHOT_SOURCE.to_string(), preferences.clone()).await
+                    request_translation_with_config(provider.clone(), model.clone(), SCREENSHOT_SOURCE.to_string(), preferences.clone(), configured_provider(&provider)?).await
                         .and_then(|result| result.translation.ok_or_else(|| result.error.unwrap_or_default()))
                 }
             });

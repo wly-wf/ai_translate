@@ -273,8 +273,7 @@ describe("App", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "完成" }));
 
     fireEvent.click(screen.getByRole("button", { name: "添加接口" }));
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("save_provider_config", {
-      provider: "openai",
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("create_custom_provider", {
       vendorName: "modelscope",
       apiKey: "modelscope-key",
       baseUrl: "https://api.openai.com",
@@ -850,7 +849,7 @@ describe("App", () => {
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_user_preference", { preference: "sourceFontSize", value: 18 }));
   });
 
-  it("never shows a native range rejection when a font size is changed", async () => {
+  it("rolls back font size after a rejected save without showing raw native errors", async () => {
     mockWindowLabel("settings");
     invokeMock.mockImplementation((command: string) => {
       if (command === "get_enabled_providers") return Promise.resolve([]);
@@ -865,17 +864,17 @@ describe("App", () => {
       if (command === "set_user_preference") return Promise.reject(new Error("sourceFontSize must be between 12 and 24"));
       return Promise.resolve(undefined);
     });
-    const { container } = render(<App />);
+    render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: "偏好设置" }));
     const sourceFontSizeStepper = await screen.findByRole("spinbutton", { name: "原文字号" });
     await waitFor(() => expect(sourceFontSizeStepper).toHaveAttribute("aria-valuenow", "14"));
-    await clickFontSizeArrow("增大原文字号", "原文字号", "15");
+    fireEvent.click(screen.getByRole("button", { name: "增大原文字号" }));
 
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     expect(screen.queryByText(/must be/)).not.toBeInTheDocument();
-    expect(container.querySelector(".notice")).toBeNull();
-    expect(sourceFontSizeStepper).toHaveAttribute("aria-valuenow", "15");
+    expect(screen.getByRole("status")).toHaveTextContent("设置未保存");
+    expect(sourceFontSizeStepper).toHaveAttribute("aria-valuenow", "14");
   });
 
   it("keeps system color mode synchronized with operating-system changes", async () => {

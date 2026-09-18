@@ -68,6 +68,7 @@ const MAX_UIA_ANCESTORS: usize = 16;
 const CLIPBOARD_RETRIES: usize = 20;
 const CLIPBOARD_RETRY_DELAY: Duration = Duration::from_millis(20);
 const MAX_CLIPBOARD_FORMATS: usize = 128;
+const MAX_CLIPBOARD_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
 const CLIPBOARD_RESTORE_RETRIES: usize = 8;
 const CLIPBOARD_RESTORE_RETRY_DELAY: Duration = Duration::from_millis(20);
 const CLIPBOARD_RESTORE_SETTLE_DELAY: Duration = Duration::from_millis(20);
@@ -1111,10 +1112,42 @@ enum ClipboardSnapshot {
     Empty,
 }
 
+fn clipboard_snapshot_size(format: u32, kind: ClipboardHandleKind, source: HANDLE) -> Result<usize, String> {
+    use windows::Win32::Graphics::Gdi::{GetObjectW, GetEnhMetaFileBits, GetMetaFileBitsEx, GetPaletteEntries, BITMAP, HPALETTE};
+    let bytes = match kind {
+        ClipboardHandleKind::GlobalMemory => unsafe { GlobalSize(HGLOBAL(source.0)) },
+        ClipboardHandleKind::EnhancedMetafile => unsafe { GetEnhMetaFileBits(HENHMETAFILE(source.0), None) as usize },
+        ClipboardHandleKind::MetafilePicture => {
+            if unsafe { GlobalSize(HGLOBAL(source.0)) } < size_of::<METAFILEPICT>() { return Err("Invalid clipboard metafile".into()); }
+            let ptr = unsafe { GlobalLock(HGLOBAL(source.0)) };
+            if ptr.is_null() { return Err("Could not inspect clipboard metafile".into()); }
+            let metafile = unsafe { (*(ptr as *const METAFILEPICT)).hMF };
+            let bytes = unsafe { GetMetaFileBitsEx(metafile, 0, None) as usize };
+            let _ = unsafe { GlobalUnlock(HGLOBAL(source.0)) };
+            bytes.saturating_add(size_of::<METAFILEPICT>())
+        }
+        ClipboardHandleKind::GdiObject if format == u32::from(CF_PALETTE.0) =>
+            unsafe { GetPaletteEntries(HPALETTE(source.0), 0, None) as usize * 4 },
+        ClipboardHandleKind::GdiObject => {
+            let mut bitmap = BITMAP::default();
+            if unsafe { GetObjectW(HGDIOBJ(source.0), size_of::<BITMAP>() as i32, Some((&mut bitmap as *mut BITMAP).cast())) } == 0 {
+                return Err("Could not inspect clipboard bitmap".into());
+            }
+            (bitmap.bmWidthBytes.unsigned_abs() as usize)
+                .saturating_mul(bitmap.bmHeight.unsigned_abs() as usize)
+                .saturating_mul(usize::from(bitmap.bmPlanes))
+        }
+        ClipboardHandleKind::Unsupported => return Err("Unsupported clipboard format".into()),
+    };
+    if bytes == 0 { return Err("Clipboard format has an unknown size".into()); }
+    Ok(bytes)
+}
+
 fn snapshot_clipboard() -> Result<ClipboardSnapshot, String> {
     let _clipboard = ClipboardGuard::open(None)
         .ok_or_else(|| "could not snapshot the clipboard for fallback".to_string())?;
     let mut formats = Vec::new();
+    let mut snapshot_bytes = 0usize;
     let mut format = unsafe { EnumClipboardFormats(0) };
     while format != 0 {
         if formats.len() >= MAX_CLIPBOARD_FORMATS {
@@ -1142,6 +1175,10 @@ fn snapshot_clipboard() -> Result<ClipboardSnapshot, String> {
             return Err(format!(
                 "clipboard metafile format {format} is smaller than its header"
             ));
+        }
+        snapshot_bytes = snapshot_bytes.saturating_add(clipboard_snapshot_size(format, kind, source)?);
+        if snapshot_bytes > MAX_CLIPBOARD_SNAPSHOT_BYTES {
+            return Err("clipboard snapshot exceeds the 16 MiB safety budget".into());
         }
         let format_id = u16::try_from(format)
             .map_err(|_| format!("invalid clipboard format identifier {format}"))?;

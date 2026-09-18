@@ -105,6 +105,7 @@ mod tests {
                         Err(error) => panic!("mock accept failed: {error}"),
                     }
                 };
+                socket.set_nonblocking(false).unwrap();
                 socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
                 let mut bytes = Vec::new();
                 let mut buffer = [0; 4096];

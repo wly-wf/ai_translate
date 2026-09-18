@@ -1,7 +1,8 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import App from "./App";
+const App = React.lazy(() => import("./App"));
+const Float = React.lazy(() => import("./SelectionFloat").then((module) => ({ default: module.SelectionFloat })));
 
 document.documentElement.dataset.window = "__TAURI_INTERNALS__" in window
   ? getCurrentWebviewWindow().label
@@ -31,6 +32,8 @@ try {
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <App />
+    <React.Suspense fallback={null}>
+      {document.documentElement.dataset.window === "selection-float" ? <Float /> : <App />}
+    </React.Suspense>
   </React.StrictMode>,
 );
