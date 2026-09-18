@@ -1,3 +1,4 @@
+import { mergeTranslationSnapshot } from "./translationSnapshots";
 import type { ProviderId } from "./providerTypes";
 import { isTauriDesktop, nativeInvoke, useUserPreferences } from "./useUserPreferences";
 import { type MouseEvent, useEffect, useRef, useState } from "react";
@@ -26,6 +27,7 @@ export function MainWindow() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const latestRequestId = useRef(0);
   const providerLoadVersion = useRef(0);
+  const snapshotRef = useRef<Translation | null>(null);
   const displayedRequestId = useRef<number | undefined>(undefined);
   const latestTranslationAttempt = useRef(0);
   const titlebarDragRef = useRef<TitlebarDragState | null>(null);
@@ -73,7 +75,7 @@ export function MainWindow() {
         clearFocusLossTimer();
         void nativeInvoke<Translation | null>("get_latest_translation")
           .then((snapshot) => {
-            if (!snapshot || (snapshot.requestId ?? 0) <= latestRequestId.current) return;
+            if (!snapshot || (snapshot.requestId ?? 0) < latestRequestId.current) return;
             applyTranslationSnapshot(snapshot);
           })
           .catch(() => undefined);
@@ -111,7 +113,10 @@ export function MainWindow() {
   function applyTranslationSnapshot(snapshot: Translation) {
     const isNewRequest = displayedRequestId.current !== snapshot.requestId;
     if (!acceptRequest(snapshot.requestId)) return;
-    const orderedSnapshot = { ...snapshot, results: orderProviderResults(snapshot.results, providerOrderRef.current) };
+    const merged = mergeTranslationSnapshot(snapshotRef.current, snapshot);
+    if (merged === snapshotRef.current) return;
+    snapshotRef.current = merged;
+    const orderedSnapshot = { ...merged, results: orderProviderResults(merged.results, providerOrderRef.current) };
     const providerId = orderedSnapshot.results[0]?.providerId ?? DEFAULT_PROVIDER_ID;
     setActiveProviderId(providerId);
     if (orderedSnapshot.results[0]?.model) setActiveProviderModel(orderedSnapshot.results[0].model);
@@ -129,14 +134,17 @@ export function MainWindow() {
     const version = ++providerLoadVersion.current;
     const orderedIds = orderedProviderIds(providerOrderRef.current, providerIds);
     setEnabledProviderIds(orderedIds);
-    const entries = await Promise.all(orderedIds.map(async (providerId) => {
+    const loaded = await Promise.allSettled(orderedIds.map(async (providerId) => {
       const config = await nativeInvoke<ProviderConfigResponse | null>("get_provider_config", { provider: providerId });
       return [providerId, config ? modelsFromConfig(config) : [], config?.vendorName?.trim()] as const;
     }));
     if (version !== providerLoadVersion.current) return;
+    const entries = loaded.flatMap((entry) => entry.status === "fulfilled" ? [entry.value] : []);
+    const failed = loaded.filter((entry) => entry.status === "rejected").length;
+    if (failed) setNotice(`${failed} 个供应商配置读取失败，其余模型仍可使用。`);
     setEnabledProviderModels(Object.fromEntries(entries.flatMap(([providerId, models]) => models.length ? [[providerId, models]] : [])));
     setEnabledProviderNames(Object.fromEntries(entries.flatMap(([providerId, , vendorName]) => vendorName ? [[providerId, vendorName]] : [])));
-    setHasApiKey(providerIds.length > 0);
+    setHasApiKey(entries.some(([, models]) => models.length > 0));
   }
 
   function finishTitlebarDrag() {
@@ -183,7 +191,6 @@ export function MainWindow() {
       .then((providerIds) => {
         const enabled = providerIds ?? [];
         if (enabled[0]) setActiveProviderId(enabled[0]);
-        setExpandedProviderIds(enabled);
         return loadEnabledProviders(enabled);
       })
       .catch((error) => setNotice(String(error)));
@@ -220,7 +227,6 @@ export function MainWindow() {
     const enabledProvidersListener = listen<ProviderId[]>("enabled-providers-changed", (event) => {
       const enabled = event.payload ?? [];
       if (enabled[0]) setActiveProviderId(enabled[0]);
-      setExpandedProviderIds(enabled);
       void loadEnabledProviders(enabled).catch((error) => setNotice(String(error)));
     });
     void nativeInvoke<Translation | null>("get_latest_translation")
@@ -229,6 +235,8 @@ export function MainWindow() {
       })
       .catch(() => undefined);
     return () => {
+      providerLoadVersion.current += 1;
+      finishTitlebarDrag();
       void startedListener.then((remove) => remove());
       void resultListener.then((remove) => remove());
       void errorListener.then((remove) => remove());
@@ -241,16 +249,20 @@ export function MainWindow() {
 
   useEffect(() => {
     if (!isTauriDesktop() || !result || !translationIsPending(result)) return;
+    let disposed = false;
+    let pending = false;
     const timer = window.setInterval(() => {
+      if (pending) return;
+      pending = true;
       void nativeInvoke<Translation | null>("get_latest_translation")
         .then((snapshot) => {
-          if (!snapshot || snapshot.requestId !== result.requestId
-            || JSON.stringify(snapshot.results) === JSON.stringify(result.results)) return;
+          if (disposed || !snapshot || snapshot.requestId !== result.requestId) return;
           applyTranslationSnapshot(snapshot);
         })
-        .catch(() => undefined);
+        .catch(() => undefined)
+        .finally(() => { pending = false; });
     }, 1500);
-    return () => window.clearInterval(timer);
+    return () => { disposed = true; window.clearInterval(timer); };
   }, [result]);
 
   useEffect(() => {
@@ -327,7 +339,7 @@ export function MainWindow() {
   const activeProvider = { ...activeProviderDefinition, model: enabledProviderModels[activeProviderId]?.[0] ?? activeProviderModel ?? activeProviderDefinition.model };
   const quickTranslateChoices = enabledProviderIds.flatMap((providerId) => {
     const provider = runtimeProvider(providerId);
-    return provider ? (enabledProviderModels[providerId] ?? [provider.model]).map((model) => ({ id: modelChoiceKey(providerId, model), providerId, model, vendor: provider.vendor })) : [];
+    return provider ? (enabledProviderModels[providerId] ?? []).map((model) => ({ id: modelChoiceKey(providerId, model), providerId, model, vendor: provider.vendor })) : [];
   });
   return <main className="app-shell">
     <header className="titlebar" onMouseDown={beginTitlebarDrag} onMouseUp={finishTitlebarDrag}>

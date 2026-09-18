@@ -103,3 +103,81 @@ it("opens the existing custom slot instead of silently overwriting it", async ()
   expect(mocks.invoke.mock.calls.some(([command]) => command === "open_add_provider_window")).toBe(false);
   expect(screen.getByText(/当前支持一个自定义接口/)).toBeInTheDocument();
 });
+
+it("does not let an old same-batch snapshot erase completed translations", async () => {
+  setup("main");
+  await act(async () => { await Promise.resolve(); });
+  const handler = mocks.listen.mock.calls.find(([name]) => name === "translation-result")![1];
+  const row = { providerId: "deepseek", model: "model-a", translation: null, error: null };
+  const pending = { source: "hello", requestId: 10, results: [row] };
+  act(() => handler({ payload: { ...pending, results: [{ ...row, translation: "已完成的译文" }] } }));
+  act(() => handler({ payload: pending }));
+  expect(screen.getAllByText("已完成的译文").length).toBeGreaterThan(0);
+  expect(screen.queryByText("翻译中…")).not.toBeInTheDocument();
+});
+
+it("keeps healthy quick models when another provider config cannot be read", async () => {
+  mocks.label = "main";
+  mocks.invoke.mockImplementation((command: string, args?: { provider: string }) => {
+    if (command === "get_enabled_providers") return Promise.resolve(["deepseek", "xiaomi"]);
+    if (command === "get_provider_config") return args?.provider === "deepseek"
+      ? Promise.resolve({ model: "healthy-model", models: ["healthy-model"] })
+      : Promise.reject(new Error("broken config"));
+    return Promise.resolve(undefined);
+  });
+  render(<App />);
+  fireEvent.click(screen.getByRole("button", { name: "快速翻译" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "选择翻译模型" })).toHaveTextContent("healthy-model"));
+  fireEvent.click(screen.getByRole("button", { name: "选择翻译模型" }));
+  expect(screen.getAllByRole("option")).toHaveLength(1);
+  expect(screen.getByText(/1 个供应商配置读取失败/)).toBeInTheDocument();
+});
+
+it("ignores an initial preference response older than a change event", async () => {
+  let resolve!: (value: unknown) => void;
+  const initial = new Promise((done) => { resolve = done; });
+  mocks.invoke.mockImplementation((command: string) => command === "get_preferences" ? initial : Promise.resolve());
+  const { result } = renderHook(useUserPreferences);
+  const handler = mocks.listen.mock.calls.find(([name]) => name === "preferences-changed")![1];
+  act(() => handler({ payload: { themeMode: "dark", proxyHost: "new.example.com" } }));
+  await act(async () => resolve({ themeMode: "light", proxyHost: "old.example.com" }));
+  expect(result.current.themeMode).toBe("dark");
+  expect(result.current.proxyHost).toBe("new.example.com");
+});
+
+it("validates preference payloads while preserving explicit empty and null values", async () => {
+  mocks.invoke.mockImplementation((command: string) => command === "get_preferences"
+    ? Promise.resolve({ themeMode: "dark", quickTranslateProvider: "deepseek", proxyBypass: "example.com" })
+    : Promise.resolve());
+  const { result } = renderHook(useUserPreferences);
+  await waitFor(() => expect(result.current.quickTranslateProvider).toBe("deepseek"));
+  const handler = mocks.listen.mock.calls.find(([name]) => name === "preferences-changed")![1];
+  act(() => handler({ payload: { quickTranslateProvider: null, proxyBypass: "", providerOrder: "invalid", themeMode: "invalid", sourceFontSize: {} } }));
+  expect(result.current.quickTranslateProvider).toBeNull();
+  expect(result.current.proxyBypass).toBe("");
+  expect(result.current.themeMode).toBe("dark");
+  expect(Array.isArray(result.current.providerOrder)).toBe(true);
+  expect(result.current.sourceFontSize).toBe(14);
+});
+
+
+it("rejects flush after a failed save and recovers after that field is saved", async () => {
+  let fail = true;
+  mocks.invoke.mockImplementation((command: string, args?: { preference: string; value: string }) => {
+    if (command === "get_preferences") return Promise.resolve({ proxyHost: "127.0.0.1" });
+    if (command === "set_user_preference") return fail
+      ? Promise.reject(new Error("disk full")) : Promise.resolve({ [args!.preference]: args!.value });
+    return Promise.resolve(undefined);
+  });
+  const { result } = renderHook(useUserPreferences);
+  await act(async () => { await Promise.resolve(); });
+  act(() => result.current.setProxyHost("proxy.example.com"));
+  await act(async () => { await expect(result.current.flushPreferenceUpdates()).rejects.toThrow("disk full"); });
+  expect(result.current.proxyHost).toBe("127.0.0.1");
+  expect(result.current.preferencesError).toContain("disk full");
+  fail = false;
+  act(() => result.current.setProxyHost("proxy.example.com"));
+  await act(async () => { await result.current.flushPreferenceUpdates(); });
+  expect(result.current.proxyHost).toBe("proxy.example.com");
+  expect(result.current.preferencesError).toBe("");
+});

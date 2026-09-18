@@ -1,4 +1,5 @@
 //! OpenAI-compatible protocol, response validation and translation quality policy.
+use crate::api_response::{read_json, error_detail};
 use std::time::Duration;
 use crate::{build_http_client, ProviderTranslation, StoredProviderConfig, UserPreferences, THINKING_DISABLED, translation_quality};
 
@@ -77,13 +78,7 @@ pub(crate) async fn request_translation_with_config(
         .map_err(|error| format!("无法连接 {provider}：{error}"))?;
         let status = response.status();
         if !status.is_success() {
-            let detail = response
-                .text()
-                .await
-                .unwrap_or_default()
-                .chars()
-                .take(400)
-                .collect::<String>();
+            let detail = error_detail(response).await;
             return Ok(ProviderTranslation {
                 provider_id: provider,
                 model,
@@ -91,7 +86,7 @@ pub(crate) async fn request_translation_with_config(
                 error: Some(format!("请求失败（{status}）：{detail}")),
             });
         }
-        let payload: serde_json::Value = match response.json().await {
+        let payload: serde_json::Value = match read_json(response).await {
             Ok(payload) => payload,
             Err(error) => {
                 return Ok(ProviderTranslation {
@@ -281,13 +276,11 @@ pub(crate) async fn send_connection_test(
 
     let status = response.status();
     if status.is_success() {
-        let payload: serde_json::Value = response.json().await
-            .map_err(|_| "接口未返回有效的模型 JSON 响应。".to_string())?;
+        let payload = read_json(response).await?;
         validated_translation_text(&payload)?;
         return Ok(());
     }
-    let detail = response.text().await.unwrap_or_default();
-    let detail = detail.chars().take(400).collect::<String>();
+    let detail = error_detail(response).await;
     Err(format!("请求失败（{status}）：{detail}"))
 }
 
@@ -371,11 +364,10 @@ pub(crate) async fn fetch_models(
         if matches!(status.as_u16(), 401 | 403) {
             return Err(format!("获取模型列表失败（{status}）：接口需要 API Key，请填写后重试。"));
         }
-        let detail = response.text().await.unwrap_or_default().chars().take(400).collect::<String>();
+        let detail = error_detail(response).await;
         return Err(format!("获取模型列表失败（{status}）：{detail}"));
     }
-    let payload: serde_json::Value = response.json().await
-        .map_err(|error| format!("无法解析模型列表：{error}"))?;
+    let payload = read_json(response).await?;
     parse_model_ids(provider, &payload)
 }
 

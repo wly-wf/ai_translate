@@ -9,6 +9,9 @@ use translation_api::*;
 mod translation_live_tests;
 mod native_frame;
 mod network;
+mod api_response;
+mod window_layout;
+use window_layout::fit_settings_window;
 use network::build_http_client;
 pub mod mouse_hook;
 pub mod windows_selection;
@@ -1771,7 +1774,7 @@ fn show_settings_window(app: &AppHandle) -> Result<(), String> {
     let dark = appearance.dark;
     let follow_system = appearance.follow_system;
     if let Some(window) = app.get_webview_window("settings") {
-        window.set_size(Size::Logical(LogicalSize::new(1120.0, 760.0))).map_err(|error| error.to_string())?;
+        fit_settings_window(&window, 1120.0, 760.0)?;
         window.set_resizable(false).map_err(|error| error.to_string())?;
         window.set_minimizable(true).map_err(|error| error.to_string())?;
         configure_standard_window_frame(&window, dark, follow_system)?;
@@ -1815,6 +1818,9 @@ fn show_settings_window(app: &AppHandle) -> Result<(), String> {
                 ) {
                     eprintln!("Settings custom frame refresh failed: {error}");
                 }
+                if let Err(error) = fit_settings_window(&window, 1120.0, 760.0) {
+                    eprintln!("Settings window sizing failed: {error}");
+                }
                 if let Err(error) = window.set_always_on_top(false) {
                     eprintln!("Settings window topmost reset after page load failed: {error}");
                 }
@@ -1849,7 +1855,7 @@ fn show_add_provider_window(app: &AppHandle) -> Result<(), String> {
     let dark = appearance.dark;
     let follow_system = appearance.follow_system;
     if let Some(window) = app.get_webview_window("add-provider") {
-        window.set_size(Size::Logical(LogicalSize::new(640.0, 600.0))).map_err(|error| error.to_string())?;
+        fit_settings_window(&window, 640.0, 600.0)?;
         window.set_resizable(false).map_err(|error| error.to_string())?;
         configure_standard_window_frame(&window, dark, follow_system)?;
         if let Some(parent) = app.get_webview_window("settings") {
@@ -1857,6 +1863,7 @@ fn show_add_provider_window(app: &AppHandle) -> Result<(), String> {
         } else {
             window.center().map_err(|error| error.to_string())?;
         }
+        fit_settings_window(&window, 640.0, 600.0)?;
         window.unminimize().map_err(|error| error.to_string())?;
         window.show().map_err(|error| error.to_string())?;
         window.set_focus().map_err(|error| error.to_string())?;
@@ -1911,6 +1918,9 @@ fn show_add_provider_window(app: &AppHandle) -> Result<(), String> {
                 };
                 if let Err(error) = position_result {
                     eprintln!("Add-provider window centering failed: {error}");
+                }
+                if let Err(error) = fit_settings_window(&window, 640.0, 600.0) {
+                    eprintln!("Add-provider window sizing failed: {error}");
                 }
                 if let Err(error) = window.show() {
                     eprintln!("Add-provider window show after page load failed: {error}");

@@ -54,13 +54,10 @@ function initialUserPreferences() {
   try {
     const stored = JSON.parse(window.localStorage.getItem("ai-translate-appearance") ?? "null") as Partial<UserPreferences> | null;
     if (!stored) return DEFAULT_USER_PREFERENCES;
-    return {
-      ...DEFAULT_USER_PREFERENCES,
-      themeMode: stored.themeMode ?? DEFAULT_USER_PREFERENCES.themeMode,
-      accentColor: stored.accentColor ?? DEFAULT_USER_PREFERENCES.accentColor,
-      sourceFontSize: stored.sourceFontSize ?? DEFAULT_USER_PREFERENCES.sourceFontSize,
-      translationFontSize: stored.translationFontSize ?? DEFAULT_USER_PREFERENCES.translationFontSize,
-    };
+    return normalizePreferences({
+      themeMode: stored.themeMode, accentColor: stored.accentColor,
+      sourceFontSize: stored.sourceFontSize, translationFontSize: stored.translationFontSize,
+    }, DEFAULT_USER_PREFERENCES);
   } catch {
     return DEFAULT_USER_PREFERENCES;
   }
@@ -81,12 +78,34 @@ export function clampFontSize(size: number, limits: { min: number; max: number }
   return Math.min(limits.max, Math.max(limits.min, Math.round(size)));
 }
 
-// Keeps a preference merged from the native store only when its value is usable;
-// a missing or malformed field must never overwrite a valid in-memory value.
-function isUsablePreferenceValue(value: unknown) {
-  if (value === undefined) return false;
-  if (typeof value === "string") return value.trim().length > 0;
-  return value !== null;
+// Validate IPC/cache values before they reach render logic. Empty proxy fields
+// and nullable model preferences are meaningful, not missing values.
+function normalizePreferences(stored: unknown, base: UserPreferences): UserPreferences {
+  const next = { ...base };
+  if (!stored || typeof stored !== "object" || Array.isArray(stored)) return next;
+  const enums: Partial<Record<keyof UserPreferences, readonly string[]>> = {
+    themeMode: ["light", "dark", "system"], accentColor: ["blue", "purple", "green", "orange", "rose"],
+    proxyMode: ["system", "disabled", "custom"], proxyType: ["http", "https", "socks4", "socks5"],
+  };
+  for (const [name, value] of Object.entries(stored)) {
+    if (!Object.prototype.hasOwnProperty.call(DEFAULT_USER_PREFERENCES, name)) continue;
+    const key = name as keyof UserPreferences;
+    let valid = false;
+    if (key === "sourceFontSize" || key === "translationFontSize") {
+      if (typeof value === "number" && Number.isFinite(value)) next[key] = clampFontSize(value, FONT_SIZE_LIMITS);
+      continue;
+    }
+    if (key === "providerOrder") {
+      if (Array.isArray(value) && value.every((id) => typeof id === "string")) next.providerOrder = [...new Set<string>(value)];
+      continue;
+    }
+    if (key === "quickTranslateProvider") valid = value === null || (typeof value === "string" && DEFAULT_USER_PREFERENCES.providerOrder.includes(value));
+    else if (key === "quickTranslateModel") valid = value === null || (typeof value === "string" && value.trim().length > 0);
+    else if (enums[key]) valid = typeof value === "string" && enums[key]!.includes(value);
+    else valid = typeof value === typeof DEFAULT_USER_PREFERENCES[key];
+    if (valid) next[key] = value as never;
+  }
+  return next;
 }
 
 export async function nativeInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -100,25 +119,22 @@ export function useUserPreferences() {
   const [preferences, setPreferences] = useState<UserPreferences>(initialUserPreferences);
   const [preferencesError, setPreferencesError] = useState("");
   const saveChain = useRef<Promise<unknown>>(Promise.resolve());
+  const saveErrors = useRef(new Map<keyof UserPreferences, string>());
   const pendingPreferences = useRef<Partial<UserPreferences>>({});
   const confirmedPreferences = useRef(preferences);
   const preferenceVersions = useRef<Partial<Record<keyof UserPreferences, number>>>({});
   const deferredPreferences = useRef(new Map<keyof UserPreferences, { timer: number; commit: () => void }>());
 
-  function mergeStoredPreferences(current: UserPreferences, stored: Partial<UserPreferences> | null | undefined) {
-    const next = { ...DEFAULT_USER_PREFERENCES };
-    for (const [key, storedValue] of Object.entries(stored ?? {}) as [keyof UserPreferences, unknown][]) {
-      if (isUsablePreferenceValue(storedValue)) next[key] = storedValue as never;
-    }
-    confirmedPreferences.current = { ...next };
-    // Older builds stored font sizes the native store no longer accepts; clamp them
-    // so the translation window never renders an out-of-range size.
-    next.sourceFontSize = clampFontSize(next.sourceFontSize, FONT_SIZE_LIMITS);
-    next.translationFontSize = clampFontSize(next.translationFontSize, FONT_SIZE_LIMITS);
-    for (const key of Object.keys(pendingPreferences.current) as (keyof UserPreferences)[]) {
-      next[key] = current[key] as never;
-    }
-    return next;
+  function acceptStoredPreferences(stored: unknown) {
+    const confirmed = normalizePreferences(stored, confirmedPreferences.current);
+    confirmedPreferences.current = confirmed;
+    setPreferences((current) => {
+      const next = { ...confirmed };
+      for (const key of Object.keys(pendingPreferences.current) as (keyof UserPreferences)[]) {
+        next[key] = current[key] as never;
+      }
+      return appearanceMatches(current, next) && JSON.stringify(current) === JSON.stringify(next) ? current : next;
+    });
   }
 
   useEffect(() => {
@@ -127,19 +143,22 @@ export function useUserPreferences() {
     }
     let cancelled = false;
     let unlisten: (() => void) | undefined;
+    let receivedEvent = false;
+    const initialVersions = { ...preferenceVersions.current };
     void listen<UserPreferences>("preferences-changed", (event) => {
-      if (!cancelled) setPreferences((current) => {
-        const next = mergeStoredPreferences(current, event.payload);
-        return appearanceMatches(current, next) && JSON.stringify(current) === JSON.stringify(next) ? current : next;
-      });
+      if (cancelled) return;
+      receivedEvent = true;
+      acceptStoredPreferences(event.payload);
     }).then((remove) => {
       if (cancelled) remove();
       else unlisten = remove;
     }).catch(() => undefined);
     void nativeInvoke<UserPreferences>("get_preferences")
       .then((stored) => {
-        if (cancelled) return;
-        setPreferences((current) => mergeStoredPreferences(current, stored));
+        if (cancelled || receivedEvent) return;
+        const untouched = Object.fromEntries(Object.entries(stored ?? {}).filter(([key]) =>
+          initialVersions[key as keyof UserPreferences] === preferenceVersions.current[key as keyof UserPreferences]));
+        acceptStoredPreferences(untouched);
       })
       .catch((error) => {
         if (cancelled) return;
@@ -195,10 +214,13 @@ export function useUserPreferences() {
       commit();
     }
     deferredPreferences.current.clear();
-    return saveChain.current.then(() => undefined);
+    return saveChain.current.then(() => {
+      const error = saveErrors.current.values().next().value;
+      if (error) throw new Error(error);
+    });
   }
 
-  useEffect(() => () => { void flushPreferenceUpdates(); }, []);
+  useEffect(() => () => { void flushPreferenceUpdates().catch(() => undefined); }, []);
 
   function updatePreference<K extends keyof UserPreferences>(preference: K, value: UserPreferences[K]) {
     const version = (preferenceVersions.current[preference] ?? 0) + 1;
@@ -211,18 +233,21 @@ export function useUserPreferences() {
         .catch(() => undefined)
         .then(() => nativeInvoke<UserPreferences>("set_user_preference", { preference, value }))
         .then((saved) => {
-          const acknowledged = saved?.[preference] ?? value;
+          const acknowledged = saved && Object.prototype.hasOwnProperty.call(saved, preference)
+            ? normalizePreferences(saved, confirmedPreferences.current)[preference] : value;
           confirmedPreferences.current = { ...confirmedPreferences.current, [preference]: acknowledged };
           if (preferenceVersions.current[preference] !== version) return;
           delete pendingPreferences.current[preference];
           setPreferences((current) => ({ ...current, [preference]: acknowledged }));
-          setPreferencesError("");
+          saveErrors.current.delete(preference);
+          setPreferencesError([...saveErrors.current.values()].join("; "));
         })
         .catch((error) => {
           if (preferenceVersions.current[preference] !== version) return;
           delete pendingPreferences.current[preference];
           setPreferences((current) => ({ ...current, [preference]: confirmedPreferences.current[preference] }));
-          setPreferencesError(String(error));
+          saveErrors.current.set(preference, String(error));
+          setPreferencesError([...saveErrors.current.values()].join("; "));
         });
     };
     const previous = deferredPreferences.current.get(preference);
