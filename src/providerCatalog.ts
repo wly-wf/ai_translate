@@ -1,5 +1,5 @@
 import { version } from "../package.json";
-import type { SettingsProviderId, ProviderId } from "./providerTypes";
+import { isCustomProvider, type SettingsProviderId, type ProviderId } from "./providerTypes";
 import { type AccentColor } from "./useUserPreferences";
 import { siDeepseek, siMoonshotai, type SimpleIcon } from "simple-icons";
 import bailianIcon from "@lobehub/icons-static-svg/icons/bailian-color.svg";
@@ -283,3 +283,13 @@ export function normalizeSourceText(value: string) {
     .join("\n\n");
 }
 
+
+// Custom instances share protocol defaults, never their saved configuration.
+export function settingsProvider(id: ProviderId): SettingsProvider | undefined {
+  return ALL_SETTINGS_PROVIDERS.find((provider) => provider.id === id)
+    ?? (isCustomProvider(id) ? { ...GENERIC_PROVIDERS[0], id } : undefined);
+}
+export function translationProvider(id: ProviderId): TranslationProvider | undefined {
+  const provider = settingsProvider(id);
+  return provider ? { ...provider, enabled: true } : undefined;
+}

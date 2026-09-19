@@ -208,8 +208,8 @@ textarea:focus, input:focus { outline: 2px solid var(--theme-primary-focus); out
 .primary:hover:not(:disabled) { background: var(--accent-deep); }
 .primary:active:not(:disabled), .secondary:active { transform: scale(.97); }
 .primary:disabled { cursor: not-allowed; opacity: .46; }
-.secondary { margin-left: 8px; color: #a84c1f; background: #fff0e9; border: 1px solid #f5d5c4; }
-.secondary:hover { background: #ffe7dc; }
+.secondary { margin-left: 8px; color: #56616d; background: #f5f6f7; border: 1px solid #dfe3e7; }
+.secondary:hover { background: #e9ecef; }
 .primary:focus-visible, .secondary:focus-visible, .titlebar-icon-button:focus-visible, .titlebar-quick-action:focus-visible, .settings-window-button:focus-visible, .settings-close-button:focus-visible, .provider-header:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .provider-list { display: grid; gap: 12px; }
 .provider-card { overflow: hidden; overflow: clip; background: #f0f1f1; border: 1px solid #e9eaeb; border-radius: 11px; transition: background-color .18s ease, border-color .18s ease, box-shadow .18s ease; }
@@ -661,6 +661,7 @@ textarea:focus, input:focus { outline: 2px solid var(--theme-primary-focus); out
 .add-provider-notice { margin: 10px 0 0; }
 .add-provider-actions { flex: 0 0 auto; display: flex; justify-content: flex-end; gap: 9px; padding: 14px 3px 20px; background: #fff; border-top: 1px solid #eef1f4; }
 .add-provider-actions .primary, .add-provider-actions .secondary { min-width: 90px; min-height: 42px; margin: 0; padding-inline: 18px; border-radius: 10px; font-size: 13px; }
+.add-provider-actions .secondary:focus-visible { outline-color: #77808a; }
 
 @media (max-width: 640px) {
   .add-provider-content { padding-inline: 22px; }

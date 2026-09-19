@@ -425,6 +425,7 @@ describe("App", () => {
   it("shows a red delete menu only for user-added providers and removes their configuration", async () => {
     mockWindowLabel("settings");
     invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_custom_providers") return Promise.resolve(["openai"]);
       if (command === "get_enabled_providers") return Promise.resolve(["deepseek", "openai"]);
       if (command === "get_provider_config" && args?.provider === "openai") {
         return Promise.resolve({ vendorName: "魔搭社区", apiKey: "saved", baseUrl: "https://example.com", model: "demo-model", models: ["demo-model"] });

@@ -10,10 +10,89 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({ getCurrentWebviewWindow: () =>
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ onFocusChanged: vi.fn().mockResolvedValue(() => {}) }), cursorPosition: vi.fn() }));
 Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
 import App from "./App";
+
+const customA = "custom-00000000000000000000000000000001";
+const customB = "custom-00000000000000000000000000000002";
+function multiProviderMock(command: string, args?: Record<string, unknown>) {
+  if (command === "get_custom_providers") return Promise.resolve(["openai", customA, customB]);
+  if (command === "get_enabled_providers") return Promise.resolve([customA, customB]);
+  if (command === "get_provider_config") {
+    const name = args?.provider === customA ? "Alpha" : args?.provider === customB ? "Beta" : "Legacy";
+    return Promise.resolve({ vendorName: name, apiKey: `key-${name}`, baseUrl: `https://${name.toLowerCase()}.example.com/v1`, model: "shared-model", models: ["shared-model"] });
+  }
+  if (command === "delete_custom_provider") return Promise.resolve([customB]);
+  return Promise.resolve(undefined);
+}
+
+it("adds a new provider from its creation event without replacing the existing providers", async () => {
+  mocks.label = "settings";
+  mocks.invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+    if (command === "get_custom_providers") return Promise.resolve([customA]);
+    return multiProviderMock(command, args);
+  });
+  render(<App />);
+  await screen.findByRole("button", { name: /Alpha/ });
+  const handler = mocks.listen.mock.calls.find(([name]) => name === "provider-config-created")![1];
+  await act(async () => handler({ payload: customB }));
+  expect(await screen.findByRole("button", { name: /Beta/ })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /Alpha/ })).toBeInTheDocument();
+  expect(screen.getByLabelText("API Key")).toHaveValue("key-Beta");
+});
+
+it("does not borrow legacy credentials when fetching models for a new provider", async () => {
+  mocks.label = "add-provider";
+  mocks.invoke.mockImplementation((command: string) => command === "fetch_provider_models" ? Promise.resolve([]) : Promise.resolve(undefined));
+  render(<App />);
+  fireEvent.click(screen.getByRole("button", { name: /获取/ }));
+  await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("fetch_provider_models", expect.objectContaining({ apiKey: "", useStoredKey: false })));
+});
+
+it("loads disabled legacy and multiple custom providers, saving and deleting only the selected instance", async () => {
+  mocks.label = "settings";
+  mocks.invoke.mockImplementation(multiProviderMock);
+  render(<App />);
+  await screen.findByRole("button", { name: /Alpha/ });
+  expect(screen.getByRole("button", { name: /Beta/ })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /Legacy/ })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /Alpha/ }));
+  expect(screen.getByLabelText("API Key")).toHaveValue("key-Alpha");
+  fireEvent.change(screen.getByLabelText("API 地址"), { target: { value: "https://changed.example.com/v1" } });
+  await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("save_provider_config", expect.objectContaining({ provider: customA, vendorName: "Alpha", baseUrl: "https://changed.example.com/v1" })));
+  fireEvent.click(screen.getByRole("button", { name: /Beta/ }));
+  expect(screen.getByLabelText("API 地址")).toHaveValue("https://beta.example.com/v1");
+  expect(screen.getByLabelText("API Key")).toHaveValue("key-Beta");
+  fireEvent.contextMenu(screen.getByRole("button", { name: /Alpha/ }), { clientX: 100, clientY: 100 });
+  fireEvent.click(screen.getByRole("menuitem", { name: "删除供应商 Alpha" }));
+  await waitFor(() => expect(screen.queryByRole("button", { name: /Alpha/ })).not.toBeInTheDocument());
+  expect(screen.getByRole("button", { name: /Beta/ })).toBeInTheDocument();
+  expect(mocks.invoke).toHaveBeenCalledWith("delete_custom_provider", { provider: customA });
+});
+
+it("keeps identical model names distinct in custom-provider results and quick choices", async () => {
+  mocks.label = "main";
+  mocks.invoke.mockImplementation(multiProviderMock);
+  render(<App />);
+  fireEvent.click(screen.getByRole("button", { name: "快速翻译" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "选择翻译模型" })).toHaveTextContent("shared-model"));
+  fireEvent.click(screen.getByRole("button", { name: "选择翻译模型" }));
+  expect(screen.getAllByRole("option")).toHaveLength(2);
+  fireEvent.click(screen.getByRole("option", { name: /Beta/ }));
+  fireEvent.change(screen.getByLabelText("输入文本"), { target: { value: "hello" } });
+  fireEvent.click(screen.getByRole("button", { name: "翻译" }));
+  await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("translate_text", expect.objectContaining({ provider: customB, model: "shared-model" })));
+  const handler = mocks.listen.mock.calls.find(([name]) => name === "translation-result")![1];
+  act(() => handler({ payload: { source: "hello", requestId: 50, results: [
+    { providerId: customA, model: "shared-model", translation: "Alpha result" },
+    { providerId: customB, model: "shared-model", translation: "Beta result" },
+  ] } }));
+  expect(screen.getByRole("button", { name: /shared-model\/Alpha/ })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /shared-model\/Beta/ })).toBeInTheDocument();
+});
 afterEach(() => { cleanup(); mocks.listen.mockClear(); mocks.invoke.mockReset(); });
 function setup(label = "settings") {
   mocks.label = label;
   mocks.invoke.mockImplementation((command: string) => {
+    if (command === "get_custom_providers") return Promise.resolve(["openai"]);
     if (command === "get_enabled_providers") return Promise.resolve(["deepseek"]);
     if (command === "get_provider_config") return Promise.resolve({ vendorName: "Custom", apiKey: "test", baseUrl: "https://example.com", model: "model-a", models: ["model-a"] });
     return Promise.resolve(undefined);
@@ -95,13 +174,13 @@ it("restores the confirmed toggle state when storage rejects a preference", asyn
   expect(result.current.preferencesError).toContain("storage unavailable");
 });
 
-it("opens the existing custom slot instead of silently overwriting it", async () => {
+it("allows adding another provider while the legacy custom provider exists", async () => {
   setup();
   await screen.findByRole("button", { name: /Custom/ });
   const add = screen.getByRole("button", { name: /添加自定义供应商/ });
   fireEvent.click(add);
-  expect(mocks.invoke.mock.calls.some(([command]) => command === "open_add_provider_window")).toBe(false);
-  expect(screen.getByText(/当前支持一个自定义接口/)).toBeInTheDocument();
+  expect(mocks.invoke.mock.calls.some(([command]) => command === "open_add_provider_window")).toBe(true);
+  expect(screen.getByRole("button", { name: /Custom/ })).toBeInTheDocument();
 });
 
 it("does not let an old same-batch snapshot erase completed translations", async () => {

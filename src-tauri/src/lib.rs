@@ -10,6 +10,8 @@ mod translation_live_tests;
 mod native_frame;
 mod network;
 mod api_response;
+mod custom_providers;
+use custom_providers::{is_custom_provider, custom_provider_ids, save_custom_provider_ids, new_custom_provider_id};
 mod window_layout;
 use window_layout::fit_settings_window;
 use network::build_http_client;
@@ -866,8 +868,8 @@ fn next_translation_request_id() -> u64 {
 fn supported_provider(provider: &str) -> bool {
     matches!(
         provider,
-        "deepseek" | "xiaomi" | "qwen" | "zhipu" | "moonshot" | "openai"
-    )
+        "deepseek" | "xiaomi" | "qwen" | "zhipu" | "moonshot"
+    ) || is_custom_provider(provider)
 }
 
 fn provider_keyring_entry(provider: &str) -> Result<Entry, String> {
@@ -1298,7 +1300,7 @@ async fn save_provider_config(
     tauri::async_runtime::spawn_blocking(move || {
         let update_lock = update_app.state::<EnabledProvidersUpdateLock>();
         let _guard = update_lock.0.lock().unwrap_or_else(|error| error.into_inner());
-        if provider == "openai" {
+        if is_custom_provider(&provider) {
             provider_keyring_entry(&provider)?.get_password()
                 .map_err(|_| "自定义供应商已删除，请重新添加。".to_string())?;
         }
@@ -1318,38 +1320,46 @@ async fn save_provider_config(
 }
 
 #[tauri::command]
+async fn get_custom_providers(app: AppHandle) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let update_lock = app.state::<EnabledProvidersUpdateLock>();
+        let _guard = update_lock.0.lock().unwrap_or_else(|error| error.into_inner());
+        custom_provider_ids()
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn create_custom_provider(
-    app: AppHandle,
-    vendor_name: String,
-    api_key: String,
-    base_url: String,
-    model: String,
-    models: Vec<String>,
-) -> Result<(), String> {
+    app: AppHandle, vendor_name: String, api_key: String, base_url: String,
+    model: String, models: Vec<String>,
+) -> Result<String, String> {
     if vendor_name.trim().is_empty() { return Err("供应商名称不能为空。".into()); }
     let update_app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let provider = tauri::async_runtime::spawn_blocking(move || {
         let update_lock = update_app.state::<EnabledProvidersUpdateLock>();
         let _guard = update_lock.0.lock().unwrap_or_else(|error| error.into_inner());
-        match provider_keyring_entry("openai")?.get_password() {
-            Ok(_) => return Err("当前仅支持一个自定义供应商，请在设置中编辑或删除已有接口。".into()),
-            Err(KeyringError::NoEntry) => {}
-            Err(error) => return Err(format!("无法检查已有自定义供应商：{error}")),
-        }
-        save_provider_config_sync("openai".into(), Some(vendor_name), api_key, base_url, model, Some(models))?;
-        let mut providers = enabled_providers_sync();
-        if !providers.iter().any(|provider| provider == "openai") { providers.push("openai".into()); }
-        if let Err(error) = save_enabled_providers_sync(&providers) {
-            provider_keyring_entry("openai")?.delete_credential()
-                .map_err(|rollback| format!("{error}；撤销新增接口失败：{rollback}"))?;
+        let mut custom = custom_provider_ids()?;
+        let provider = new_custom_provider_id()?;
+        save_provider_config_sync(provider.clone(), Some(vendor_name), api_key, base_url, model, Some(models))?;
+        custom.push(provider.clone());
+        if let Err(error) = save_custom_provider_ids(&custom) {
+            provider_keyring_entry(&provider)?.delete_credential().map_err(|rollback| format!("{error}; rollback: {rollback}"))?;
             return Err(error);
         }
-        Ok::<_, String>(())
+        // Registration is durable before enabling. If enabling fails, keep the
+        // provider visible and editable instead of orphaning its credentials.
+        let mut providers = enabled_providers_sync();
+        providers.push(provider.clone());
+        let enabled = save_enabled_providers_sync(&providers);
+        Ok::<_, String>((provider, enabled))
     }).await.map_err(|error| error.to_string())??;
     let providers = get_enabled_providers(app.clone()).await;
     app.emit("enabled-providers-changed", providers).map_err(|error| error.to_string())?;
-    app.emit("provider-config-created", "openai").map_err(|error| error.to_string())?;
-    Ok(())
+    app.emit("provider-config-created", &provider.0).map_err(|error| error.to_string())?;
+    // A saved provider is a successful creation even if it could not be enabled.
+    // The settings toggle reflects persisted state and permits retrying enable.
+    if let Err(error) = provider.1 { eprintln!("Custom provider saved but enable failed: {error}"); }
+    Ok(provider.0)
 }
 
 #[tauri::command]
@@ -1388,7 +1398,7 @@ async fn get_provider_config(provider: String) -> Result<Option<ProviderConfigRe
 
 #[tauri::command]
 async fn delete_custom_provider(app: AppHandle, provider: String) -> Result<Vec<String>, String> {
-    if provider != "openai" {
+    if !is_custom_provider(&provider) {
         return Err("只能删除用户添加的自定义供应商。".to_string());
     }
     let removed_provider = provider.clone();
@@ -1397,6 +1407,8 @@ async fn delete_custom_provider(app: AppHandle, provider: String) -> Result<Vec<
     let (providers, reset_active_provider) = tauri::async_runtime::spawn_blocking(move || {
         let update_lock = update_app.state::<EnabledProvidersUpdateLock>();
         let _guard = update_lock.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut custom = custom_provider_ids()?;
+        custom.retain(|id| id != &provider);
         match provider_keyring_entry(&provider)?.delete_credential() {
             Ok(()) | Err(KeyringError::NoEntry) => {}
             Err(error) => return Err(format!("无法删除自定义供应商配置：{error}")),
@@ -1405,6 +1417,7 @@ async fn delete_custom_provider(app: AppHandle, provider: String) -> Result<Vec<
         providers.retain(|item| item != &provider);
         let providers = apply_provider_order(providers, &provider_order);
         save_enabled_providers_sync(&providers)?;
+        save_custom_provider_ids(&custom)?;
         let reset_active_provider = active_provider_sync() == provider;
         if reset_active_provider {
             account_entry(ACTIVE_PROVIDER_ACCOUNT)?
@@ -1456,11 +1469,16 @@ async fn fetch_provider_models(
     provider: String,
     api_key: String,
     base_url: String,
+    use_stored_key: Option<bool>,
 ) -> Result<Vec<String>, String> {
     if !supported_provider(&provider) {
         return Err(format!("不支持的 AI 提供商：{provider}"));
     }
-    let key = provider_api_key(&provider, &api_key);
+    let key = if use_stored_key.unwrap_or(true) {
+        provider_api_key(&provider, &api_key)
+    } else {
+        api_key.trim().to_string()
+    };
     let preferences = current_preferences(&app);
     fetch_models(&provider, &key, &base_url, &preferences).await
 }
@@ -2215,6 +2233,7 @@ pub fn run() {
             translate_selection_float,
             save_provider_config,
             create_custom_provider,
+            get_custom_providers,
             get_provider_config,
             delete_custom_provider,
             test_provider_connection,

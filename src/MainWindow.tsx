@@ -5,7 +5,7 @@ import { type MouseEvent, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 import appIcon from "../src-tauri/icons/tray-icon.svg";
-import { type Translation, type TranslationError, type ActiveProviderChanged, type TitlebarDragState, type ProviderConfigResponse, NO_ENABLED_PROVIDER_NOTICE, SETTINGS_PROVIDERS, withCustomProviderIdentity, modelsFromConfig, translationResultKey, modelChoiceKey, AVAILABLE_TRANSLATION_PROVIDERS, DEFAULT_PROVIDER_ID, orderedProviderIds, orderProviderResults, translationLanguageClass, normalizeSourceText } from "./providerCatalog";
+import { type Translation, type TranslationError, type ActiveProviderChanged, type TitlebarDragState, type ProviderConfigResponse, translationProvider, NO_ENABLED_PROVIDER_NOTICE, SETTINGS_PROVIDERS, withCustomProviderIdentity, modelsFromConfig, translationResultKey, modelChoiceKey, AVAILABLE_TRANSLATION_PROVIDERS, DEFAULT_PROVIDER_ID, orderedProviderIds, orderProviderResults, translationLanguageClass, normalizeSourceText } from "./providerCatalog";
 import { ProviderIcon, ModelPicker, preferenceNoticeMessage, Icon, ProviderSetupNotice, ExpandableText, QuickTranslateIcon, ReturnToFloatIcon } from "./sharedUI";
 
 export function MainWindow() {
@@ -331,7 +331,7 @@ export function MainWindow() {
   }
 
   const runtimeProvider = (providerId: ProviderId) => {
-    const provider = AVAILABLE_TRANSLATION_PROVIDERS.find((item) => item.id === providerId);
+    const provider = translationProvider(providerId);
     const vendorName = enabledProviderNames[providerId];
     return provider && vendorName ? withCustomProviderIdentity(provider, vendorName) : provider;
   };

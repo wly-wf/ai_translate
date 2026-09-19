@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import type { ProviderId } from "./providerTypes";
+import { isCustomProvider, type ProviderId } from "./providerTypes";
 
 export type ThemeMode = "light" | "dark" | "system";
 export type AccentColor = "blue" | "purple" | "green" | "orange" | "rose";
@@ -99,7 +99,7 @@ function normalizePreferences(stored: unknown, base: UserPreferences): UserPrefe
       if (Array.isArray(value) && value.every((id) => typeof id === "string")) next.providerOrder = [...new Set<string>(value)];
       continue;
     }
-    if (key === "quickTranslateProvider") valid = value === null || (typeof value === "string" && DEFAULT_USER_PREFERENCES.providerOrder.includes(value));
+    if (key === "quickTranslateProvider") valid = value === null || (typeof value === "string" && (DEFAULT_USER_PREFERENCES.providerOrder.includes(value) || isCustomProvider(value)));
     else if (key === "quickTranslateModel") valid = value === null || (typeof value === "string" && value.trim().length > 0);
     else if (enums[key]) valid = typeof value === "string" && enums[key]!.includes(value);
     else valid = typeof value === typeof DEFAULT_USER_PREFERENCES[key];

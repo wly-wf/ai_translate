@@ -93,7 +93,7 @@ export function AddProviderWindow() {
     setModelFetchError("");
     setNotice("");
     try {
-      const models = await nativeInvoke<string[]>("fetch_provider_models", { provider: provider.id, apiKey: draft.apiKey, baseUrl: draft.baseUrl });
+      const models = await nativeInvoke<string[]>("fetch_provider_models", { provider: provider.id, apiKey: draft.apiKey, baseUrl: draft.baseUrl, useStoredKey: false });
       setFetchedModels(uniqueModels(models));
     } catch (error) {
       setModelFetchError(String(error).replace(provider.id, dialogProvider.vendor));

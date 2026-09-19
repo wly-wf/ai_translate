@@ -2,7 +2,7 @@ import type { SettingsProviderId, ProviderId } from "./providerTypes";
 import { type ThemeMode, type AccentColor, clampFontSize, nativeInvoke } from "./useUserPreferences";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { siGithub } from "simple-icons";
-import { type SettingsProvider, type ModelChoice, PROVIDER_ICONS, SETTINGS_PROVIDER_ICONS, PROVIDER_IMAGE_ICONS, withCustomProviderIdentity, AVAILABLE_TRANSLATION_PROVIDERS, ACCENT_COLOR_OPTIONS } from "./providerCatalog";
+import { type SettingsProvider, type ModelChoice, PROVIDER_ICONS, SETTINGS_PROVIDER_ICONS, PROVIDER_IMAGE_ICONS, withCustomProviderIdentity, translationProvider, ACCENT_COLOR_OPTIONS } from "./providerCatalog";
 
 export function ProviderIcon({ provider }: { provider: { id: string; mark: string; accent: string } }) {
   const imageIcon = PROVIDER_IMAGE_ICONS[provider.id as SettingsProviderId];
@@ -24,7 +24,7 @@ export function ModelPicker({ value, choices, onChange, ariaLabel, disabled = fa
   const rootRef = useRef<HTMLDivElement>(null);
   const selectedChoice = choices.find((choice) => choice.id === value) ?? null;
   const providerForChoice = (choice: ModelChoice) => {
-    const provider = AVAILABLE_TRANSLATION_PROVIDERS.find((item) => item.id === choice.providerId);
+    const provider = translationProvider(choice.providerId);
     return provider ? withCustomProviderIdentity(provider, choice.vendor) : provider;
   };
   const selectedProvider = selectedChoice ? providerForChoice(selectedChoice) : null;
@@ -55,7 +55,7 @@ export function ModelPicker({ value, choices, onChange, ariaLabel, disabled = fa
   </div>;
 }
 
-export function InlineSelect({ value, options, onChange, ariaLabel, disabled = false }: { value: string; options: string[]; onChange: (value: string) => void; ariaLabel: string; disabled?: boolean }) {
+export function InlineSelect({ value, options, onChange, ariaLabel, disabled = false, showCheck = true }: { value: string; options: string[]; onChange: (value: string) => void; ariaLabel: string; disabled?: boolean; showCheck?: boolean }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -79,7 +79,7 @@ export function InlineSelect({ value, options, onChange, ariaLabel, disabled = f
     <button className="inline-select-trigger" type="button" role="combobox" aria-label={ariaLabel} aria-haspopup="listbox" aria-expanded={open} disabled={disabled} onClick={() => setOpen((current) => !current)}>
       <span>{value}</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
     </button>
-    {open && <div className="inline-select-menu" role="listbox" aria-label={ariaLabel}>{options.map((option) => <button className={`inline-select-option${option === value ? " is-selected" : ""}`} type="button" role="option" aria-selected={option === value} key={option} onClick={() => { onChange(option); setOpen(false); }}><span>{option}</span>{option === value && <span className="inline-select-check" aria-hidden="true">✓</span>}</button>)}</div>}
+    {open && <div className="inline-select-menu" role="listbox" aria-label={ariaLabel}>{options.map((option) => <button className={`inline-select-option${option === value ? " is-selected" : ""}`} type="button" role="option" aria-selected={option === value} key={option} onClick={() => { onChange(option); setOpen(false); }}><span>{option}</span>{showCheck && option === value && <span className="inline-select-check" aria-hidden="true">✓</span>}</button>)}</div>}
   </div>;
 }
 

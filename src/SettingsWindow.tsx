@@ -1,4 +1,4 @@
-import type { SettingsProviderId, ProviderId, GenericProviderId } from "./providerTypes";
+import { isCustomProvider, type SettingsProviderId, type ProviderId, type GenericProviderId } from "./providerTypes";
 import { type ThemeMode, type ProxyType, type ProxyMode, FONT_SIZE_LIMITS, isTauriDesktop, nativeInvoke, useUserPreferences } from "./useUserPreferences";
 import { type CSSProperties, type MouseEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
@@ -6,7 +6,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ProviderWrites } from "./providerWrites";
 import { useLongPressReorder } from "./useLongPressReorder";
 import appIcon from "../src-tauri/icons/tray-icon.svg";
-import { type SettingsPage, type SettingsProvider, type ProviderDraft, type ProviderConfigResponse, type ConnectionState, type ModelChoice, APP_VERSION, PROJECT_LINKS, SETTINGS_PROVIDERS, GENERIC_PROVIDERS, ALL_SETTINGS_PROVIDERS, createProviderDrafts, uniqueModels, withCustomProviderIdentity, modelsFromConfig, draftFromConfig, modelChoiceKey, orderProviders } from "./providerCatalog";
+import { type SettingsPage, type SettingsProvider, type ProviderDraft, type ProviderConfigResponse, type ConnectionState, type ModelChoice, APP_VERSION, PROJECT_LINKS, settingsProvider, SETTINGS_PROVIDERS, GENERIC_PROVIDERS, ALL_SETTINGS_PROVIDERS, createProviderDrafts, uniqueModels, withCustomProviderIdentity, modelsFromConfig, draftFromConfig, modelChoiceKey, orderProviders } from "./providerCatalog";
 import { ProviderIcon, CheckIcon, InlineSelect, SegmentedControl, AccentColorPicker, FontSizeStepper, preferenceNoticeMessage, Icon, SearchIcon, ModelAddIcon, ModelRefreshIcon, DeleteIcon, AvailableModelsDialog, SettingsNavIcon, AboutIcon } from "./sharedUI";
 
 export function SettingsWindow() {
@@ -50,6 +50,7 @@ export function SettingsWindow() {
   const connectionRequestId = useRef(0);
   const modelFetchRequestId = useRef(0);
   const providerWrites = useRef(new ProviderWrites());
+  const deletedCustomProviders = useRef(new Set<string>());
   const deletingProviders = useRef(new Set<ProviderId>());
   const providerAutoSaveTimers = useRef<Partial<Record<SettingsProviderId, number>>>({});
   const providerAutoSaveRequestIds = useRef<Partial<Record<SettingsProviderId, number>>>({});
@@ -206,11 +207,11 @@ export function SettingsWindow() {
   }, [enabledProviderIds]);
 
   const providerWithCustomName = (provider: SettingsProvider) => {
-    const customName = provider.id === "openai" ? providerDrafts.openai.vendorName.trim() : "";
+    const customName = isCustomProvider(provider.id) ? providerDrafts[provider.id]?.vendorName.trim() : "";
     return customName ? withCustomProviderIdentity(provider, customName) : provider;
   };
   const providerCollection = orderProviders(
-    [...SETTINGS_PROVIDERS, ...GENERIC_PROVIDERS.filter((provider) => addedGenericProviders.includes(provider.id as GenericProviderId))]
+    [...SETTINGS_PROVIDERS, ...addedGenericProviders.map((id) => settingsProvider(id)!)]
       .map(providerWithCustomName),
     providerOrderPreview ?? providerOrder,
   );
@@ -323,23 +324,24 @@ export function SettingsWindow() {
   useEffect(() => {
     if (!isTauriDesktop()) return;
     let cancelled = false;
-    void Promise.all(GENERIC_PROVIDERS.map(async (provider) => {
+    void nativeInvoke<GenericProviderId[]>("get_custom_providers").then((ids) => Promise.all((ids ?? []).filter(isCustomProvider).map(async (id) => {
+      const provider = settingsProvider(id)!;
       try {
         const config = await nativeInvoke<ProviderConfigResponse | null>("get_provider_config", { provider: provider.id });
         return config ? { provider, config } : null;
       } catch {
         return null;
       }
-    })).then((entries) => {
+    }))).then((entries) => {
       if (cancelled) return;
-      const configured = entries.filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+      const configured = entries.filter((entry): entry is NonNullable<typeof entry> => entry !== null && !deletedCustomProviders.current.has(entry.provider.id));
       if (!configured.length) return;
-      setAddedGenericProviders(configured.map(({ provider }) => provider.id as GenericProviderId));
+      setAddedGenericProviders((current) => [...new Set([...current, ...configured.map(({ provider }) => provider.id as GenericProviderId)])]);
       setProviderDrafts((drafts) => configured.reduce((nextDrafts, { provider, config }) => ({
         ...nextDrafts,
-        [provider.id]: draftFromConfig(config, provider.vendor),
+        [provider.id]: nextDrafts[provider.id]?.saved ? nextDrafts[provider.id] : draftFromConfig(config, provider.vendor),
       }), drafts));
-    });
+    }).catch((error) => { if (!cancelled) setNotice(String(error)); });
     return () => { cancelled = true; };
   }, []);
 
@@ -348,7 +350,7 @@ export function SettingsWindow() {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listen<string>("provider-config-created", (event) => {
-      const provider = GENERIC_PROVIDERS.find((item) => item.id === event.payload);
+      const provider = isCustomProvider(event.payload) ? settingsProvider(event.payload) : undefined;
       if (!provider) return;
       void Promise.all([
         nativeInvoke<ProviderConfigResponse | null>("get_provider_config", { provider: provider.id }),
@@ -360,7 +362,7 @@ export function SettingsWindow() {
         setEnabledProviderIds(enabledIds);
         setSelectedSettingsProviderId(provider.id);
         setSettingsPage("generic");
-        setNotice(`${provider.vendor} 已添加。`);
+        setNotice(`${config.vendorName || provider.vendor} 已添加${enabledIds.includes(provider.id) ? "。" : "，尚未启用，可使用开关启用。"}`);
       }).catch((error) => {
         if (!disposed) setNotice(String(error));
       });
@@ -376,7 +378,7 @@ export function SettingsWindow() {
 
   useEffect(() => {
     if (!isTauriDesktop()) return;
-    if (providerDraftsRef.current[selectedSettingsProviderId].saved) return;
+    if (providerDraftsRef.current[selectedSettingsProviderId]?.saved) return;
     let cancelled = false;
     const initialDraft = providerDraftsRef.current[selectedSettingsProviderId];
     void nativeInvoke<ProviderConfigResponse | null>("get_provider_config", { provider: selectedSettingsProviderId })
@@ -407,7 +409,7 @@ export function SettingsWindow() {
     if (page === "providers" && !SETTINGS_PROVIDERS.some((provider) => provider.id === selectedSettingsProviderId)) {
       setSelectedSettingsProviderId(SETTINGS_PROVIDERS[0].id);
     }
-    if (page === "generic" && !GENERIC_PROVIDERS.some((provider) => provider.id === selectedSettingsProviderId)) {
+    if (page === "generic" && !isCustomProvider(selectedSettingsProviderId)) {
       setSelectedSettingsProviderId(GENERIC_PROVIDERS[0].id);
     }
   }
@@ -420,7 +422,7 @@ export function SettingsWindow() {
     setModelDialogProviderId(null);
     setSelectedSettingsProviderId(providerId);
     if (settingsPage === "providers" || settingsPage === "generic") {
-      setSettingsPage(GENERIC_PROVIDERS.some((provider) => provider.id === providerId) ? "generic" : "providers");
+      setSettingsPage(isCustomProvider(providerId) ? "generic" : "providers");
     }
     setConnectionState({ providerId: null, status: "idle", message: "" });
     setModelFetchMessage({ providerId: null, message: "" });
@@ -435,11 +437,6 @@ export function SettingsWindow() {
   }
 
   function openAddProvider() {
-    if (addedGenericProviders.includes("openai")) {
-      selectSettingsProvider("openai");
-      setNotice("当前支持一个自定义接口，可在此编辑；更换接口前请删除已有供应商。");
-      return;
-    }
     setModelDialogProviderId(null);
     setProviderContextMenu(null);
     setNotice("");
@@ -470,9 +467,10 @@ export function SettingsWindow() {
     setNotice("");
     try {
       const providers = await providerWrites.current.run(providerId, () => nativeInvoke<SettingsProviderId[]>("delete_custom_provider", { provider: providerId }));
+      deletedCustomProviders.current.add(providerId);
       setEnabledProviderIds(providers ?? []);
       setAddedGenericProviders((current) => current.filter((id) => id !== providerId));
-      setProviderDrafts((drafts) => ({ ...drafts, [providerId]: createProviderDrafts()[providerId] }));
+      setProviderDrafts((drafts) => { const next = { ...drafts }; delete next[providerId]; return next; });
       setFetchedModels((current) => { const next = { ...current }; delete next[providerId]; return next; });
       setSettingsEnabledProviderModels((current) => { const next = { ...current }; delete next[providerId]; return next; });
       setTestModels((current) => { const next = { ...current }; delete next[providerId]; return next; });
@@ -557,7 +555,7 @@ export function SettingsWindow() {
 
   function providerConfigPayload(provider: SettingsProvider, draft: ProviderDraft, models: string[]) {
     const payload: Record<string, unknown> = { provider: provider.id, apiKey: draft.apiKey, baseUrl: draft.baseUrl, model: models[0], models };
-    if (provider.id === "openai") payload.vendorName = draft.vendorName;
+    if (isCustomProvider(provider.id)) payload.vendorName = draft.vendorName;
     return payload;
   }
 
@@ -589,7 +587,7 @@ export function SettingsWindow() {
   }
 
   async function persistProviderDraft(providerId: SettingsProviderId, draft: ProviderDraft, models: string[]) {
-    const provider = ALL_SETTINGS_PROVIDERS.find((item) => item.id === providerId);
+    const provider = settingsProvider(providerId);
     if (!provider) return;
     const requestId = (providerAutoSaveRequestIds.current[providerId] ?? 0) + 1;
     providerAutoSaveRequestIds.current[providerId] = requestId;
@@ -887,8 +885,8 @@ export function SettingsWindow() {
       <section className="proxy-settings-card" aria-labelledby="proxy-settings-title">
         <h2 id="proxy-settings-title">代理设置</h2>
         <div className="proxy-settings-rows">
-          <div className="proxy-form-row"><span>连接方式</span><InlineSelect ariaLabel="代理模式" value={proxyModeLabels[proxyMode]} options={Object.values(proxyModeLabels)} onChange={(label) => setProxyMode((Object.keys(proxyModeLabels) as ProxyMode[]).find((mode) => proxyModeLabels[mode] === label) ?? "disabled")} /></div>
-          <div className="proxy-form-row"><span>代理类型</span><InlineSelect ariaLabel="代理类型" value={proxyTypeLabels[proxyType]} options={Object.values(proxyTypeLabels)} disabled={!proxyEnabled} onChange={(label) => setProxyType((Object.keys(proxyTypeLabels) as ProxyType[]).find((type) => proxyTypeLabels[type] === label) ?? "http")} /></div>
+          <div className="proxy-form-row"><span>连接方式</span><InlineSelect showCheck={false} ariaLabel="代理模式" value={proxyModeLabels[proxyMode]} options={Object.values(proxyModeLabels)} onChange={(label) => setProxyMode((Object.keys(proxyModeLabels) as ProxyMode[]).find((mode) => proxyModeLabels[mode] === label) ?? "disabled")} /></div>
+          <div className="proxy-form-row"><span>代理类型</span><InlineSelect showCheck={false} ariaLabel="代理类型" value={proxyTypeLabels[proxyType]} options={Object.values(proxyTypeLabels)} disabled={!proxyEnabled} onChange={(label) => setProxyType((Object.keys(proxyTypeLabels) as ProxyType[]).find((type) => proxyTypeLabels[type] === label) ?? "http")} /></div>
           <label className="proxy-form-row"><span>服务器地址</span><input aria-label="服务器地址" value={proxyHost} disabled={!proxyEnabled} onChange={(event) => setProxyHost(event.target.value)} placeholder="127.0.0.1" spellCheck={false} /></label>
           <label className="proxy-form-row"><span>端口</span><input aria-label="端口" inputMode="numeric" value={proxyPort} disabled={!proxyEnabled} onChange={(event) => setProxyPort(event.target.value.replace(/\D/g, ""))} placeholder="7890" /></label>
           <label className="proxy-form-row"><span>用户名</span><input aria-label="代理用户名" value={proxyUsername} disabled={!proxyEnabled} onChange={(event) => setProxyUsername(event.target.value)} placeholder="可选" autoComplete="off" /></label>

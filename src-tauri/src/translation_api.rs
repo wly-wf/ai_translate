@@ -159,7 +159,7 @@ pub(crate) fn normalize_provider_base_url(provider: &str, base_url: &str) -> Str
 }
 
 pub(crate) fn uses_azure_api_key(provider: &str, endpoint: &str) -> bool {
-    provider == "openai" && reqwest::Url::parse(endpoint).ok().is_some_and(|url| {
+    crate::is_custom_provider(provider) && reqwest::Url::parse(endpoint).ok().is_some_and(|url| {
         url.host_str().is_some_and(|host| host.ends_with(".openai.azure.com"))
             || url.path().contains("/openai/deployments/")
     })

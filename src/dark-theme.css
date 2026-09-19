@@ -117,8 +117,9 @@
 :root[data-theme="dark"] .quick-translate-page .primary:hover:not(:disabled),
 :root[data-theme="dark"] .primary:hover:not(:disabled),
 :root[data-theme="dark"] .model-dialog-footer button:hover { color: #122038; background: var(--theme-primary-hover); border-color: var(--theme-primary-hover); }
-:root[data-theme="dark"] .secondary { color: #f1b490; background: #3d2c29; border-color: #6a4a3e; }
-:root[data-theme="dark"] .secondary:hover { background: #50352d; }
+:root[data-theme="dark"] .secondary { color: #d0d5dc; background: #2b3038; border-color: #454c56; }
+:root[data-theme="dark"] .secondary:hover { background: #363d47; }
+:root[data-theme="dark"] .add-provider-actions .secondary:focus-visible { outline-color: #adbac9; }
 :root[data-theme="dark"] .warning { color: #efd0a2; background: #332b24; border-color: #715337; }
 :root[data-theme="dark"] .notice { color: var(--muted); background: var(--dark-panel); border-color: var(--line); }
 :root[data-theme="dark"] .provider-setup-notice { color: #efcca9; background: linear-gradient(135deg, #392f28, #2b2928); border-color: #70533d; box-shadow: 0 8px 20px rgba(0, 0, 0, .14); }
