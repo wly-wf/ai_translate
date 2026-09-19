@@ -7,6 +7,8 @@ const host = process.env.TAURI_DEV_HOST;
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [react()],
+  // Keep image URLs compatible with the desktop CSP, which disallows data: images.
+  build: { assetsInlineLimit: 0 },
   test: {
     environment: "jsdom",
     include: ["src/**/*.test.{ts,tsx}"],
