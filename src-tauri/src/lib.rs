@@ -168,6 +168,12 @@ type LatestTranslation = Mutex<Option<TranslationBatch>>;
 struct EnabledProvidersUpdateLock(Mutex<()>);
 struct PreferencesUpdateLock(Mutex<()>);
 
+#[derive(Default)]
+struct AddProviderWindowState {
+    ready: bool,
+    requested: bool,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 enum ProxyMode {
@@ -1800,6 +1806,7 @@ fn show_settings_window(app: &AppHandle) -> Result<(), String> {
         window.unminimize().map_err(|error| error.to_string())?;
         window.show().map_err(|error| error.to_string())?;
         window.set_focus().map_err(|error| error.to_string())?;
+        prewarm_add_provider_window(app);
         return Ok(());
     }
 
@@ -1848,6 +1855,7 @@ fn show_settings_window(app: &AppHandle) -> Result<(), String> {
                 if let Err(error) = window.set_focus() {
                     eprintln!("Settings window focus after page load failed: {error}");
                 }
+                prewarm_add_provider_window(window.app_handle());
             }
         })
         .build()
@@ -1868,28 +1876,33 @@ fn center_child_window(child: &WebviewWindow, parent: &WebviewWindow) -> Result<
         .map_err(|error| error.to_string())
 }
 
-fn show_add_provider_window(app: &AppHandle) -> Result<(), String> {
+fn prewarm_add_provider_window(app: &AppHandle) {
+    let app = app.clone();
+    thread::spawn(move || {
+        if let Err(error) = show_add_provider_window(&app, false) {
+            eprintln!("Add-provider window preload failed: {error}");
+        }
+    });
+}
+
+fn show_add_provider_window(app: &AppHandle, requested: bool) -> Result<(), String> {
+    let state = app.state::<Mutex<AddProviderWindowState>>();
+    let mut state = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(window) = app.get_webview_window("add-provider") {
+        if requested {
+            state.requested = true;
+            if state.ready {
+                reveal_add_provider_window(app, &window)?;
+            }
+        }
+        return Ok(());
+    }
+    *state = AddProviderWindowState { ready: false, requested };
     let appearance = current_window_appearance(app);
     let dark = appearance.dark;
     let follow_system = appearance.follow_system;
-    if let Some(window) = app.get_webview_window("add-provider") {
-        fit_settings_window(&window, 640.0, 600.0)?;
-        window.set_resizable(false).map_err(|error| error.to_string())?;
-        configure_standard_window_frame(&window, dark, follow_system)?;
-        if let Some(parent) = app.get_webview_window("settings") {
-            center_child_window(&window, &parent)?;
-        } else {
-            window.center().map_err(|error| error.to_string())?;
-        }
-        fit_settings_window(&window, 640.0, 600.0)?;
-        window.unminimize().map_err(|error| error.to_string())?;
-        window.show().map_err(|error| error.to_string())?;
-        window.set_focus().map_err(|error| error.to_string())?;
-        return Ok(());
-    }
 
     let settings_parent = app.get_webview_window("settings");
-    let center_parent = settings_parent.clone();
     let builder = WebviewWindowBuilder::new(app, "add-provider", WebviewUrl::App("index.html".into()))
         .inner_size(640.0, 600.0)
         .min_inner_size(560.0, 580.0)
@@ -1915,39 +1928,6 @@ fn show_add_provider_window(app: &AppHandle) -> Result<(), String> {
         builder
     };
     let window = builder
-        .on_page_load(move |window, payload| {
-            if matches!(payload.event(), PageLoadEvent::Finished) {
-                let resolved_dark = if follow_system {
-                    window_uses_dark_theme(&window)
-                } else {
-                    dark
-                };
-                if let Err(error) = configure_standard_window_frame(
-                    &window,
-                    resolved_dark,
-                    follow_system,
-                ) {
-                    eprintln!("Add-provider custom frame refresh failed: {error}");
-                }
-                let position_result = if let Some(parent) = center_parent.as_ref() {
-                    center_child_window(&window, parent)
-                } else {
-                    window.center().map_err(|error| error.to_string())
-                };
-                if let Err(error) = position_result {
-                    eprintln!("Add-provider window centering failed: {error}");
-                }
-                if let Err(error) = fit_settings_window(&window, 640.0, 600.0) {
-                    eprintln!("Add-provider window sizing failed: {error}");
-                }
-                if let Err(error) = window.show() {
-                    eprintln!("Add-provider window show after page load failed: {error}");
-                }
-                if let Err(error) = window.set_focus() {
-                    eprintln!("Add-provider window focus after page load failed: {error}");
-                }
-            }
-        })
         .build()
         .map_err(|error| error.to_string())?;
     configure_standard_window_frame(&window, dark, follow_system)
@@ -1969,13 +1949,45 @@ async fn open_settings_window(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn open_add_provider_window(app: AppHandle) -> Result<(), String> {
-    show_add_provider_window(&app)
+    show_add_provider_window(&app, true)
+}
+
+#[tauri::command]
+async fn add_provider_window_ready(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
+    if window.label() != "add-provider" {
+        return Err("仅添加供应商窗口可以报告就绪。".to_string());
+    }
+    let state = app.state::<Mutex<AddProviderWindowState>>();
+    let mut state = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.ready = true;
+    if state.requested {
+        reveal_add_provider_window(&app, &window)?;
+    }
+    Ok(())
+}
+
+fn reveal_add_provider_window(app: &AppHandle, window: &WebviewWindow) -> Result<(), String> {
+    let appearance = current_window_appearance(app);
+    configure_standard_window_frame(window, appearance.dark, appearance.follow_system)?;
+    if let Some(parent) = app.get_webview_window("settings") {
+        center_child_window(window, &parent)?;
+    } else {
+        window.center().map_err(|error| error.to_string())?;
+    }
+    fit_settings_window(window, 640.0, 600.0)?;
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 async fn return_to_settings_window(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("add-provider") {
-        window.close().map_err(|error| error.to_string())?;
+        let state = app.state::<Mutex<AddProviderWindowState>>();
+        let mut state = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        window.hide().map_err(|error| error.to_string())?;
+        *state = AddProviderWindowState::default();
+        // Reset drafts and pending frontend work while retaining the native WebView.
+        window.reload().map_err(|error| error.to_string())?;
     }
     show_settings_window(&app)
 }
@@ -2207,6 +2219,7 @@ pub fn run() {
         .manage(Mutex::new(None::<TranslationBatch>))
         .manage(EnabledProvidersUpdateLock(Mutex::new(())))
         .manage(PreferencesUpdateLock(Mutex::new(())))
+        .manage(Mutex::<AddProviderWindowState>::default())
         .manage(translation_runtime::TranslationRuntime::default())
         .setup(move |app| {
             if let Some(window) = app.get_webview_window("main") {
@@ -2248,6 +2261,7 @@ pub fn run() {
             set_window_appearance,
             open_settings_window,
             open_add_provider_window,
+            add_provider_window_ready,
             return_to_settings_window,
             hide_settings_window,
         ])

@@ -218,8 +218,8 @@
 :root[data-theme="dark"] .model-section-title h3 { color: var(--ink); }
 :root[data-theme="dark"] .model-row,
 :root[data-theme="dark"] .add-provider-model-row { border-color: #3c4b5c; }
-:root[data-theme="dark"] .model-input-label input { color: var(--ink); background: transparent; }
-:root[data-theme="dark"] .model-input-label input:focus,
+:root[data-theme="dark"] .settings-form-card.provider-config-card .model-input-label input,
+:root[data-theme="dark"] .settings-form-card.provider-config-card .model-input-label input:focus { color: var(--ink); background: transparent; }
 :root[data-theme="dark"] .add-provider-field .add-provider-model-row input:focus { background: #344251; }
 :root[data-theme="dark"] .model-section-title > span,
 :root[data-theme="dark"] .placeholder-badge,

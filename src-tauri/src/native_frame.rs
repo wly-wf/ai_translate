@@ -61,6 +61,7 @@ fn apply_windows_custom_frame(window: &WebviewWindow, dark: bool) -> Result<(), 
         Graphics::Dwm::{
             DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_BORDER_COLOR,
             DWMWA_CAPTION_COLOR, DWMWA_COLOR_NONE, DWMWA_USE_IMMERSIVE_DARK_MODE,
+            DWMWA_TRANSITIONS_FORCEDISABLED,
             DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
         },
         UI::{
@@ -74,6 +75,20 @@ fn apply_windows_custom_frame(window: &WebviewWindow, dark: bool) -> Result<(), 
     };
 
     let hwnd = window.hwnd().map_err(|error| error.to_string())?;
+    if window.label() == "add-provider" {
+        // This reused window reloads immediately after hiding. Do not let DWM
+        // animate its old surface while the WebView is being reset.
+        let disable_transitions = 1_i32; // Win32 BOOL is a 32-bit integer.
+        unsafe {
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_TRANSITIONS_FORCEDISABLED,
+                std::ptr::from_ref(&disable_transitions).cast(),
+                std::mem::size_of_val(&disable_transitions) as u32,
+            )
+        }
+        .map_err(|error| error.to_string())?;
+    }
     if !unsafe {
         SetWindowSubclass(
             hwnd,

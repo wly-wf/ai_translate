@@ -321,8 +321,7 @@ export function AvailableModelsDialog({ provider, models, selectedModels, isLoad
     <div className="model-dialog-card" role="dialog" aria-modal="true" aria-label={`${provider.vendor} 可用模型`}>
       <header className="model-dialog-header">
         <div className="model-dialog-heading">
-          <span className="model-dialog-provider-mark" aria-hidden="true"><ProviderIcon provider={provider} /></span>
-          <h2>{provider.vendor}</h2>
+          <h2>{provider.vendor}模型</h2>
         </div>
         <button ref={closeButtonRef} type="button" className="model-dialog-close" onClick={onClose} aria-label="关闭可用模型" title="关闭"><Icon name="close" /></button>
       </header>
@@ -336,6 +335,7 @@ export function AvailableModelsDialog({ provider, models, selectedModels, isLoad
               {models.map((model) => {
                 const added = selectedModels.includes(model);
                 return <div className="model-dialog-option" role="listitem" key={model}>
+                  <ProviderIcon provider={provider} />
                   <strong>{model}</strong>
                   <button type="button" className={`model-dialog-action${added ? " is-remove" : ""}`} onClick={() => onToggle(model)} aria-label={added ? `移除模型 ${model}` : `添加模型 ${model}`} title={added ? "移除模型" : "添加模型"}>{added ? "−" : "+"}</button>
                 </div>;

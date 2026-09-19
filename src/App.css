@@ -407,24 +407,23 @@ textarea:focus, input:focus { outline: 2px solid var(--theme-primary-focus); out
 .provider-model-section .model-group { border-radius: 12px; }
 .provider-model-section .model-group-heading { min-height: 43px; padding: 0 15px; }
 .provider-model-section .model-group-heading strong { font-size: 14px; }
-.provider-model-section .model-row { min-height: 53px; padding: 6px 13px; }
-.provider-model-section .model-input-label input { min-height: 38px; padding: 0 3px; font-size: 14px; }
+.provider-model-section .model-row { min-height: 42px; padding: 2px 13px; }
+.settings-form-card.provider-config-card .model-input-label input { min-height: 38px; padding: 0 3px; background: transparent; border: 0; border-radius: 0; font-size: 14px; }
+.settings-form-card.provider-config-card .model-input-label input:focus { background: transparent; }
 .provider-model-section .model-row .provider-mark { width: 28px; height: 28px; flex-basis: 28px; }
 .model-dialog-backdrop { position: fixed; inset: 0; z-index: 40; width: 100vw; height: 100vh; margin: 0; padding: 0; background: transparent; border: 0; border-radius: 0; cursor: default; backdrop-filter: none; animation: model-dialog-fade-in .18s ease-out both; }
 .model-dialog-card { position: fixed; top: 50%; left: 50%; z-index: 41; width: min(640px, calc(100vw - 48px)); height: min(540px, calc(100vh - 48px)); display: flex; flex-direction: column; min-width: 0; overflow: hidden; color: #34414d; background: #fff; border: 1px solid #dde5ec; border-radius: 17px; box-shadow: 0 24px 70px rgba(34, 48, 63, .24), 0 4px 16px rgba(34, 48, 63, .09); transform: translate(-50%, -50%); animation: model-dialog-pop-in .2s cubic-bezier(.2, .8, .2, 1) both; }
-.model-dialog-header { position: relative; min-height: 60px; display: flex; align-items: center; justify-content: center; padding: 0 58px; background: #fff; border-bottom: 1px solid #e8edf2; }
-.model-dialog-heading { min-width: 0; display: flex; align-items: center; justify-content: center; gap: 12px; }
-.model-dialog-provider-mark { flex: 0 0 auto; }
-.model-dialog-provider-mark .provider-mark { width: 32px; height: 32px; flex-basis: 32px; border-radius: 9px; }
+.model-dialog-header { position: relative; min-height: 60px; display: flex; align-items: center; justify-content: flex-start; padding: 0 58px 0 22px; background: #fff; border-bottom: 1px solid #e8edf2; }
+.model-dialog-heading { min-width: 0; display: flex; align-items: center; }
 .model-dialog-heading h2 { margin: 0; overflow: hidden; color: #293641; font-size: 16px; font-weight: 750; letter-spacing: -.15px; text-overflow: ellipsis; white-space: nowrap; }
 .model-dialog-close { position: absolute; top: 50%; right: 13px; width: 32px; height: 32px; display: grid; place-items: center; padding: 0; color: #6f7b86; background: transparent; border: 0; border-radius: 9px; transform: translateY(-50%); }
 .model-dialog-close:hover { color: #2e5f92; background: #edf3f9; }
 .model-dialog-close:focus-visible { outline: 2px solid var(--theme-primary-focus); outline-offset: 2px; }
 .model-dialog-close .ui-icon { width: 17px; height: 17px; }
 .model-dialog-list { min-height: 150px; display: grid; align-content: start; flex: 1; overflow-y: auto; padding: 12px 20px 18px; background: #fff; scrollbar-width: thin; scrollbar-color: #ccd6df transparent; }
-.model-dialog-option { width: 100%; min-height: 54px; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 0 5px 0 2px; color: #46525d; background: transparent; border-bottom: 1px solid #edf0f3; }
-.model-dialog-option:last-child { border-bottom: 0; }
-.model-dialog-option > strong { min-width: 0; overflow: hidden; font-size: 13px; font-weight: 680; text-overflow: ellipsis; white-space: nowrap; }
+.model-dialog-option { width: 100%; min-height: 44px; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 0 5px 0 2px; color: #46525d; background: transparent; }
+.model-dialog-option > .provider-mark { width: 28px; height: 28px; flex: 0 0 28px; border-radius: 50%; }
+.model-dialog-option > strong { min-width: 0; flex: 1; overflow: hidden; font-size: 13px; font-weight: 680; text-overflow: ellipsis; white-space: nowrap; }
 .model-dialog-action { width: 32px; height: 32px; flex: 0 0 32px; display: grid; place-items: center; padding: 0; color: #4f779f; background: transparent; border: 0; border-radius: 7px; font-size: 22px; font-weight: 500; line-height: 1; transition: color .15s ease, background-color .15s ease; }
 .model-dialog-action:hover { color: #315e8a; background: #f1f4f6; }
 .model-dialog-action.is-remove { color: #a45d53; }

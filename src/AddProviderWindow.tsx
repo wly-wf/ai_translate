@@ -25,6 +25,11 @@ export function AddProviderWindow() {
   const dialogProvider = withCustomProviderIdentity(provider, draft.vendorName);
 
   useEffect(() => {
+    // The HTML load event can precede this lazy-loaded form's first commit.
+    void nativeInvoke("add_provider_window_ready").catch((error) => setNotice(String(error)));
+  }, []);
+
+  useEffect(() => {
     if (!modelDialogOpen) return;
     const frame = window.requestAnimationFrame(() => modelDialogCloseRef.current?.focus());
     const handleKeyDown = (event: KeyboardEvent) => {

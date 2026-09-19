@@ -1,4 +1,5 @@
 import "@testing-library/jest-dom/vitest";
+import { lazy, Suspense } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -223,6 +224,24 @@ describe("App", () => {
     const issuesLink = screen.getByRole("link", { name: /https:\/\/github\.com\/wly-wf\/ai_translate\/issues$/ });
     expect(repositoryLink).toHaveAttribute("href", "https://github.com/wly-wf/ai_translate");
     expect(issuesLink).toHaveAttribute("href", "https://github.com/wly-wf/ai_translate/issues");
+  });
+
+  it("only reveals add-provider after its lazy-loaded form has mounted", async () => {
+    mockWindowLabel("add-provider");
+    const loaded = deferred<{ default: typeof App }>();
+    const LazyApp = lazy(() => loaded.promise);
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "add_provider_window_ready") {
+        expect(screen.getByLabelText("供应商名称")).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "添加接口" })).toBeInTheDocument();
+      }
+      return Promise.resolve(undefined);
+    });
+    const { container } = render(<Suspense fallback={null}><LazyApp /></Suspense>);
+    expect(container).toBeEmptyDOMElement();
+    expect(invokeMock).not.toHaveBeenCalledWith("add_provider_window_ready", undefined);
+    await act(async () => loaded.resolve({ default: App }));
+    expect(invokeMock).toHaveBeenCalledWith("add_provider_window_ready", undefined);
   });
 
   it("renders add-provider in its own window with a unified close action", () => {
