@@ -670,10 +670,14 @@ describe("App", () => {
     const modelPicker = screen.getByRole("button", { name: "选择翻译模型" });
     await waitFor(() => expect(modelPicker).toHaveTextContent("deepseek-v4-flash"));
     fireEvent.click(modelPicker);
-    fireEvent.click(await screen.findByRole("option", { name: /mimo-v3.*Xiaomi MiMo/ }));
+    const modelOptions = screen.getByRole("listbox", { name: "选择翻译模型" });
+    expect(screen.queryByRole("dialog", { name: "选择翻译模型" })).not.toBeInTheDocument();
+    fireEvent.click(within(modelOptions).getByRole("option", { name: /mimo-v3.*Xiaomi MiMo/ }));
     expect(screen.queryByText("设为默认快速翻译模型")).not.toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("输入文本"), { target: { value: "hello" } });
-    expect(screen.getByLabelText("输入文本")).toHaveClass("is-mixed-language");
+    const quickInput = screen.getByLabelText("输入文本");
+    expect(quickInput).toHaveClass("is-chinese");
+    fireEvent.change(quickInput, { target: { value: "hello" } });
+    expect(quickInput).toHaveClass("is-mixed-language", "is-english");
     fireEvent.click(screen.getByRole("button", { name: "翻译" }));
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("translate_text", { text: "hello", provider: "xiaomi", model: "mimo-v3" }));
@@ -701,17 +705,16 @@ describe("App", () => {
     await waitFor(() => expect(defaultModelEntry).toHaveTextContent("deepseek-v4-flash/DeepSeek"));
     fireEvent.click(defaultModelEntry);
     expect(screen.getByRole("heading", { name: "偏好" })).toBeInTheDocument();
-    const modelDialog = screen.getByRole("dialog", { name: "选择默认模型" });
-    expect(screen.queryByRole("listbox", { name: "设置默认快速翻译模型" })).not.toBeInTheDocument();
-    const configuredModels = within(modelDialog).getByRole("list", { name: "已配置模型" });
-    expect(within(configuredModels).getByRole("button", { name: "deepseek-v4-flash/DeepSeek" })).toHaveAttribute("aria-pressed", "true");
-    fireEvent.click(within(configuredModels).getByRole("button", { name: /deepseek-reasoner.*DeepSeek/ }));
+    const modelOptions = screen.getByRole("listbox", { name: "设置默认快速翻译模型" });
+    expect(screen.queryByRole("dialog", { name: "选择默认模型" })).not.toBeInTheDocument();
+    expect(within(modelOptions).getByRole("option", { name: "deepseek-v4-flash/DeepSeek" })).toHaveAttribute("aria-selected", "true");
+    fireEvent.click(within(modelOptions).getByRole("option", { name: /deepseek-reasoner.*DeepSeek/ }));
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_user_preference", {
       preference: "quickTranslateModel",
       value: "deepseek-reasoner",
     }));
-    expect(screen.queryByRole("dialog", { name: "选择默认模型" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("listbox", { name: "设置默认快速翻译模型" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "设置默认快速翻译模型" })).toHaveTextContent("deepseek-reasoner");
   });
 

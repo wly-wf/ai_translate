@@ -7,7 +7,7 @@ import { ProviderWrites } from "./providerWrites";
 import { useLongPressReorder } from "./useLongPressReorder";
 import appIcon from "../src-tauri/icons/tray-icon.svg";
 import { type SettingsPage, type SettingsProvider, type ProviderDraft, type ProviderConfigResponse, type ConnectionState, type ModelChoice, APP_VERSION, PROJECT_LINKS, settingsProvider, SETTINGS_PROVIDERS, GENERIC_PROVIDERS, ALL_SETTINGS_PROVIDERS, createProviderDrafts, uniqueModels, withCustomProviderIdentity, modelsFromConfig, draftFromConfig, modelChoiceKey, orderProviders } from "./providerCatalog";
-import { ProviderIcon, CheckIcon, InlineSelect, SegmentedControl, AccentColorPicker, FontSizeStepper, preferenceNoticeMessage, Icon, SearchIcon, ModelAddIcon, ModelRefreshIcon, DeleteIcon, AvailableModelsDialog, SettingsNavIcon, AboutIcon } from "./sharedUI";
+import { ProviderIcon, ModelPicker, InlineSelect, SegmentedControl, AccentColorPicker, FontSizeStepper, preferenceNoticeMessage, Icon, SearchIcon, ModelAddIcon, ModelRefreshIcon, DeleteIcon, AvailableModelsDialog, SettingsNavIcon, AboutIcon } from "./sharedUI";
 
 export function SettingsWindow() {
   const [autostart, setAutostart] = useState(false);
@@ -46,7 +46,6 @@ export function SettingsWindow() {
   const [testModels, setTestModels] = useState<Partial<Record<SettingsProviderId, string>>>({});
   const [testModelDialogProviderId, setTestModelDialogProviderId] = useState<SettingsProviderId | null>(null);
   const [testModelDialogSelection, setTestModelDialogSelection] = useState("");
-  const [quickModelDialogOpen, setQuickModelDialogOpen] = useState(false);
   const connectionRequestId = useRef(0);
   const modelFetchRequestId = useRef(0);
   const providerWrites = useRef(new ProviderWrites());
@@ -58,8 +57,6 @@ export function SettingsWindow() {
   const modelFetchButtonRef = useRef<HTMLButtonElement>(null);
   const modelDialogCloseRef = useRef<HTMLButtonElement>(null);
   const testModelDialogCloseRef = useRef<HTMLButtonElement>(null);
-  const quickModelTriggerRef = useRef<HTMLButtonElement>(null);
-  const quickModelDialogCloseRef = useRef<HTMLButtonElement>(null);
   const providerContextMenuRef = useRef<HTMLDivElement>(null);
   const providerContextMenuActionRef = useRef<HTMLButtonElement>(null);
   const providerOrderPreviewRef = useRef<ProviderId[] | null>(null);
@@ -128,19 +125,6 @@ export function SettingsWindow() {
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [testModelDialogProviderId]);
-
-  useEffect(() => {
-    if (!quickModelDialogOpen) return;
-    const frame = window.requestAnimationFrame(() => quickModelDialogCloseRef.current?.focus());
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") closeQuickModelDialog();
-    };
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [quickModelDialogOpen]);
 
   useEffect(() => {
     if (!providerContextMenu) return;
@@ -429,11 +413,6 @@ export function SettingsWindow() {
     setModelFetchDetail({ providerId: null, message: "" });
     setShowApiKey(false);
     setNotice("");
-  }
-
-  function closeQuickModelDialog() {
-    setQuickModelDialogOpen(false);
-    window.requestAnimationFrame(() => quickModelTriggerRef.current?.focus());
   }
 
   function openAddProvider() {
@@ -821,48 +800,20 @@ export function SettingsWindow() {
         <div className="preferences-section-rows"><div className="preference-setting-row"><div><strong>启动时自动运行</strong></div><label className="settings-switch"><input aria-label="启动时自动运行" type="checkbox" checked={autostart} disabled={autostartBusy} onChange={(event) => void updateAutostart(event.target.checked)} /><span aria-hidden="true" /></label></div></div>
         {autostartError && <p className="notice" role="alert">{autostartError}</p>}
       </section>
-      {quickModelDialogOpen && renderQuickModelDialog(defaultModelChoices)}
     </div>;
   }
 
   function renderQuickModelTrigger(choices: ModelChoice[]) {
     const selectedChoice = choices.find((choice) => choice.providerId === quickTranslateProvider && (choice.model === quickTranslateModel || quickTranslateModel === null)) ?? null;
-    const selectedProvider = selectedChoice
-      ? providerCollection.find((provider) => provider.id === selectedChoice.providerId)
-      : null;
-    return <button ref={quickModelTriggerRef} className="default-quick-model-trigger" type="button" aria-label="设置默认快速翻译模型" aria-haspopup="dialog" aria-expanded={quickModelDialogOpen} onClick={() => setQuickModelDialogOpen(true)} disabled={!choices.length}>
-      {selectedProvider ? <ProviderIcon provider={selectedProvider} /> : <span className="model-picker-placeholder-icon" aria-hidden="true">◇</span>}
-      <span className="default-quick-model-value">{selectedChoice && selectedProvider ? <strong>{selectedChoice.model}/{selectedProvider.vendor}</strong> : <strong>未配置模型</strong>}</span>
-    </button>;
-  }
-
-  function renderQuickModelDialog(choices: ModelChoice[]) {
-    const selectedChoice = choices.find((choice) => choice.providerId === quickTranslateProvider && (choice.model === quickTranslateModel || quickTranslateModel === null)) ?? null;
-    return <>
-      <button type="button" className="quick-model-dialog-backdrop" aria-label="关闭模型选择" onClick={closeQuickModelDialog} />
-      <section className="quick-model-dialog" role="dialog" aria-modal="true" aria-labelledby="quick-model-dialog-title">
-        <header className="quick-model-dialog-header">
-          <h2 id="quick-model-dialog-title">选择默认模型</h2>
-          <button ref={quickModelDialogCloseRef} type="button" className="quick-model-dialog-close" onClick={closeQuickModelDialog} aria-label="关闭模型选择" title="关闭"><Icon name="close" /></button>
-        </header>
-        <div className="quick-model-choice-list" role="list" aria-label="已配置模型">
-        {choices.map((choice) => {
-          const provider = providerCollection.find((item) => item.id === choice.providerId);
-          if (!provider) return null;
-          const selected = choice.id === selectedChoice?.id;
-          return <div role="listitem" key={choice.providerId}><button className={`quick-model-choice${selected ? " is-selected" : ""}`} type="button" aria-pressed={selected} onClick={() => {
-            setQuickTranslateProvider(choice.providerId);
-            setQuickTranslateModel(choice.model);
-            closeQuickModelDialog();
-          }}>
-            <ProviderIcon provider={provider} />
-            <span><strong>{choice.model}/{provider.vendor}</strong></span>
-            {selected && <CheckIcon />}
-          </button></div>;
-        })}
-        </div>
-      </section>
-    </>;
+    return <ModelPicker
+      value={selectedChoice?.id ?? null}
+      choices={choices}
+      ariaLabel="设置默认快速翻译模型"
+      onChange={(choice) => {
+        setQuickTranslateProvider(choice.providerId);
+        setQuickTranslateModel(choice.model);
+      }}
+    />;
   }
 
   function renderProxyPage() {

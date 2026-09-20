@@ -48,10 +48,9 @@ export function ModelPicker({ value, choices, onChange, ariaLabel, disabled = fa
   return <div className={`model-picker${open ? " is-open" : ""}`} ref={rootRef}>
     <button className="model-picker-trigger" type="button" aria-label={ariaLabel} aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((current) => !current)} disabled={disabled || choices.length === 0}>
       {selectedProvider ? <ProviderIcon provider={selectedProvider} /> : <span className="model-picker-placeholder-icon" aria-hidden="true">◇</span>}
-      <span className="model-picker-value">{selectedChoice && selectedProvider ? <><strong>{selectedChoice.model}</strong><small>{selectedProvider.vendor}</small></> : <strong>未设置默认模型</strong>}</span>
-      <svg className="model-picker-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
+      <span className="model-picker-value">{selectedChoice && selectedProvider ? <strong>{selectedChoice.model}/{selectedProvider.vendor}</strong> : <strong>未设置默认模型</strong>}</span>
     </button>
-    {open && <div className="model-picker-menu" role="listbox" aria-label={ariaLabel}>{choices.map((choice) => { const provider = providerForChoice(choice); if (!provider) return null; const selected = choice.id === value; return <button className={`model-picker-option${selected ? " is-selected" : ""}`} type="button" role="option" aria-selected={selected} key={choice.id} onClick={() => { onChange(choice); setOpen(false); }}><ProviderIcon provider={provider} /><span><strong>{choice.model}</strong><small>{provider.vendor}</small></span>{selected && <span className="model-picker-selected-dot" aria-hidden="true" />}</button>; })}</div>}
+    {open && <div className="model-picker-menu" role="listbox" aria-label={ariaLabel}>{choices.map((choice) => { const provider = providerForChoice(choice); if (!provider) return null; const selected = choice.id === value; return <button className={`model-picker-option${selected ? " is-selected" : ""}`} type="button" role="option" aria-selected={selected} key={choice.id} onClick={() => { onChange(choice); setOpen(false); }}><ProviderIcon provider={provider} /><span><strong>{choice.model}/{provider.vendor}</strong></span>{selected && <span className="model-picker-selected-dot" aria-hidden="true" />}</button>; })}</div>}
   </div>;
 }
 

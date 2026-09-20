@@ -5,7 +5,7 @@ import { type MouseEvent, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 import appIcon from "../src-tauri/icons/tray-icon.svg";
-import { type Translation, type TranslationError, type ActiveProviderChanged, type TitlebarDragState, type ProviderConfigResponse, translationProvider, NO_ENABLED_PROVIDER_NOTICE, SETTINGS_PROVIDERS, withCustomProviderIdentity, modelsFromConfig, translationResultKey, modelChoiceKey, AVAILABLE_TRANSLATION_PROVIDERS, DEFAULT_PROVIDER_ID, orderedProviderIds, orderProviderResults, translationLanguageClass, normalizeSourceText } from "./providerCatalog";
+import { type Translation, type TranslationError, type ActiveProviderChanged, type TitlebarDragState, type ProviderConfigResponse, translationProvider, NO_ENABLED_PROVIDER_NOTICE, SETTINGS_PROVIDERS, withCustomProviderIdentity, modelsFromConfig, translationResultKey, modelChoiceKey, AVAILABLE_TRANSLATION_PROVIDERS, DEFAULT_PROVIDER_ID, orderedProviderIds, orderProviderResults, containsCjk, translationLanguageClass, normalizeSourceText } from "./providerCatalog";
 import { ProviderIcon, ModelPicker, preferenceNoticeMessage, Icon, ProviderSetupNotice, ExpandableText, QuickTranslateIcon, ReturnToFloatIcon } from "./sharedUI";
 
 export function MainWindow() {
@@ -371,7 +371,7 @@ export function MainWindow() {
         {!hasApiKey && <ProviderSetupNotice onOpenError={setNotice} />}
         <div className="quick-model-picker"><ModelPicker value={modelChoiceKey(quickTranslateProviderId, quickTranslateModelName)} choices={quickTranslateChoices} onChange={(choice) => { setQuickTranslateProviderId(choice.providerId); setQuickTranslateModelName(choice.model); }} ariaLabel="选择翻译模型" disabled={!quickTranslateChoices.length} /></div>
         <div className="input-card">
-          <textarea ref={inputRef} id="translation-input" aria-label="输入文本" className={/[A-Za-z]/.test(text) ? "is-mixed-language" : undefined} value={text} onChange={(event) => setText(event.target.value)} placeholder="输入要翻译的内容…" />
+          <textarea ref={inputRef} id="translation-input" aria-label="输入文本" className={`${text.trim() && !containsCjk(text) ? "is-english" : "is-chinese"}${/[A-Za-z]/.test(text) ? " is-mixed-language" : ""}`} value={text} onChange={(event) => setText(event.target.value)} placeholder="输入要翻译的内容…" />
         </div>
         <div className="quick-translate-action"><span className="character-count">{text.length} 字符</span><button className="primary" disabled={loading || !text.trim()} onClick={() => void translate()}>{loading ? "翻译中…" : "翻译"}</button></div>
       </div> : result ? <div className="translation-result">
