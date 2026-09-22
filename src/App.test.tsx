@@ -178,10 +178,13 @@ describe("App", () => {
     const xiaomiButton = screen.getByRole("button", { name: /Xiaomi MiMo/ });
     const bailianButton = screen.getByRole("button", { name: /阿里云百炼/ });
     const zhipuButton = screen.getByRole("button", { name: /智谱开放平台/ });
-    expect(screen.getByRole("button", { name: /Moonshot/ })).toBeInTheDocument();
+    const deepseekButton = screen.getByRole("button", { name: /DeepSeek/ });
+    const moonshotButton = screen.getByRole("button", { name: /Moonshot/ });
+    expect(deepseekButton.querySelector(".provider-deepseek-mark .provider-brand-image")).not.toBeNull();
     expect(xiaomiButton.querySelector(".provider-mimo-mark .provider-brand-image")).not.toBeNull();
     expect(bailianButton.querySelector(".provider-bailian-mark .provider-brand-image")).not.toBeNull();
     expect(zhipuButton.querySelector(".provider-zhipu-mark .provider-brand-image")).not.toBeNull();
+    expect(moonshotButton.querySelector(".provider-moonshot-mark .provider-brand-image")).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "最小化" }));
     expect(invokeMock).toHaveBeenCalledWith("minimize_window", undefined);
     const apiKeyInput = screen.getByLabelText("API Key");

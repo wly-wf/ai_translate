@@ -150,10 +150,9 @@ p { margin: 0; line-height: 1.55; }
 .warning-icon { flex: 0 0 17px; width: 17px; height: 17px; display: grid; place-items: center; color: #fff; background: #dc9c43; border-radius: 50%; font-size: 11px; font-weight: 800; }
 
 .provider-mark { flex: 0 0 28px; width: 28px; height: 28px; display: grid; place-items: center; color: white; border-radius: 9px; font-size: 12px; font-weight: 800; box-shadow: inset 0 0 0 1px rgba(255,255,255,.25); }
-.provider-mimo-mark { overflow: hidden; color: #1f2328; background: #fff; border: 1px solid #dfe3e6; box-shadow: none; }
-.provider-brand-mark { color: #3d6fc4; background: #fff; border: 1px solid #e1e6eb; box-shadow: none; }
+.provider-mimo-mark { overflow: hidden; background: #fff; border: 1px solid #dfe3e6; box-shadow: none; }
+.provider-brand-mark { background: #fff; border: 1px solid #e1e6eb; box-shadow: none; }
 .provider-custom-mark { color: #435f91; background: #fff; border: 1px solid #e1e6eb; box-shadow: none; }
-.provider-icon { width: 18px; height: 18px; display: block; fill: currentColor; }
 .provider-brand-image { width: 19px; height: 19px; display: block; object-fit: contain; }
 .provider-mimo-mark .provider-brand-image { width: 20px; height: 20px; }
 
@@ -355,7 +354,6 @@ textarea:focus, input:focus { outline: 2px solid var(--theme-primary-focus); out
 .provider-list-row.is-over { box-shadow: inset 0 2px 0 var(--theme-primary); }
 @keyframes provider-drag-overlay-lift { from { opacity: .9; transform: scale(.985); } to { opacity: .98; transform: scale(1.012); } }
 .provider-list-item .provider-mark { width: 31px; height: 31px; flex-basis: 31px; border-radius: 50%; font-size: 12px; }
-.provider-list-item .provider-icon { width: 18px; height: 18px; }
 .provider-context-menu { position: fixed; z-index: 80; width: 168px; padding: 5px; background: #fff; border: 1px solid #e2e7eb; border-radius: 10px; box-shadow: 0 12px 32px rgba(37, 50, 63, .2), 0 2px 8px rgba(37, 50, 63, .08); animation: provider-context-menu-in .12s ease-out both; }
 .provider-context-menu-delete { width: 100%; min-height: 38px; display: flex; align-items: center; gap: 9px; padding: 0 10px; color: #b44c40; text-align: left; background: transparent; border: 0; border-radius: 7px; font-size: 12px; font-weight: 700; }
 .provider-context-menu-delete:hover { color: #9f392e; background: #fff0ee; }
@@ -506,6 +504,7 @@ textarea:focus, input:focus { outline: 2px solid var(--theme-primary-focus); out
 .default-quick-model-control .model-picker-menu { right: 0; left: auto; width: min(320px, calc(100vw - 48px)); }
 .default-quick-model-trigger { min-height: 42px; display: flex; align-items: center; gap: 10px; padding: 4px 0; color: #263b56; text-align: left; background: transparent; border: 0; border-radius: 0; box-shadow: none; transition: color .16s ease; }
 .default-quick-model-trigger:hover:not(:disabled) .default-quick-model-value strong,
+.default-quick-model-control .model-picker-trigger:hover:not(:disabled) .model-picker-value strong,
 .quick-model-picker .model-picker-trigger:hover:not(:disabled) .model-picker-value strong { color: var(--theme-primary-strong); }
 .default-quick-model-trigger:focus-visible { outline: 2px solid var(--theme-primary-focus); outline-offset: 2px; }
 .default-quick-model-trigger:disabled { cursor: not-allowed; opacity: .58; }
@@ -621,8 +620,8 @@ textarea:focus, input:focus { outline: 2px solid var(--theme-primary-focus); out
 .about-update-status { display: flex; align-items: center; gap: 7px; max-width: 860px; margin: 10px 2px 0 !important; color: #929da7 !important; font-size: 10px !important; }
 .about-update-status > span { width: 6px; height: 6px; flex: 0 0 6px; background: #b6c0c9; border-radius: 50%; }
 .about-pending-badge { flex: 0 0 auto; padding: 5px 8px; color: #8b97a1; background: #f0f2f4; border-radius: 999px; font-size: 10px; font-weight: 750; }
-.about-link-action { min-width: 0; max-width: 360px; display: inline-flex; align-items: center; justify-self: end; gap: 5px; color: var(--theme-primary); font-size: 11px; font-weight: 650; overflow-wrap: anywhere; text-align: right; text-decoration: none; }
-.about-link-action:hover { color: var(--theme-primary-strong); text-decoration: underline; text-underline-offset: 3px; }
+.about-link-action { min-width: 0; max-width: 360px; display: inline-flex; align-items: center; justify-self: end; gap: 5px; color: #7e8a95; font-size: 12px; font-weight: 520; overflow-wrap: anywhere; text-align: right; text-decoration: none; }
+.about-link-action:hover { color: var(--theme-primary-strong); }
 .about-link-action:focus-visible { outline: 2px solid var(--theme-primary-focus); outline-offset: 2px; }
 .about-link-action .about-icon { width: 13px; height: 13px; }
 

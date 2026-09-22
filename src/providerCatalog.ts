@@ -1,10 +1,11 @@
 import { version } from "../package.json";
 import { isCustomProvider, type SettingsProviderId, type ProviderId } from "./providerTypes";
 import { type AccentColor } from "./useUserPreferences";
-import { siDeepseek, siMoonshotai, type SimpleIcon } from "simple-icons";
-import bailianIcon from "@lobehub/icons-static-svg/icons/bailian-color.svg";
-import xiaomiMimoIcon from "@lobehub/icons-static-svg/icons/xiaomimimo.svg";
-import zhipuIcon from "@lobehub/icons-static-svg/icons/zhipu-color.svg";
+import bailianIcon from "./assets/providers/bailian.svg";
+import deepseekIcon from "./assets/providers/deepseek.svg";
+import moonshotIcon from "./assets/providers/moonshot.svg";
+import xiaomiMimoIcon from "./assets/providers/xiaomi-mimo.svg";
+import zhipuIcon from "./assets/providers/zhipu.svg";
 
 export type SettingsPage = "providers" | "generic" | "preferences" | "proxy" | "about";
 export type ProviderTranslationResult = { providerId: ProviderId; model: string; translation?: string | null; error?: string | null };
@@ -85,19 +86,12 @@ export const PROJECT_LINKS = [
   },
 ] as const;
 
-export const PROVIDER_ICONS: Partial<Record<ProviderId, SimpleIcon>> = {
-  deepseek: siDeepseek,
-};
-
-export const SETTINGS_PROVIDER_ICONS: Partial<Record<SettingsProviderId, SimpleIcon>> = {
-  deepseek: siDeepseek,
-  moonshot: siMoonshotai,
-};
-
 export const PROVIDER_IMAGE_ICONS: Partial<Record<SettingsProviderId, { src: string; className: string }>> = {
+  deepseek: { src: deepseekIcon, className: "provider-deepseek-mark" },
   xiaomi: { src: xiaomiMimoIcon, className: "provider-mimo-mark" },
   qwen: { src: bailianIcon, className: "provider-bailian-mark" },
   zhipu: { src: zhipuIcon, className: "provider-zhipu-mark" },
+  moonshot: { src: moonshotIcon, className: "provider-moonshot-mark" },
 };
 
 export const SETTINGS_PROVIDERS: SettingsProvider[] = [

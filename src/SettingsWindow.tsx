@@ -859,7 +859,7 @@ export function SettingsWindow() {
       <header className="about-brand"><img src={appIcon} alt="" /><div><h1>AI Translate</h1><p>轻量、快速的 Windows 桌面翻译工具</p></div></header>
       <div className="about-info-list" aria-label="软件信息">
         <div className="about-info-row"><span className="about-link-icon" aria-hidden="true"><AboutIcon name="version" /></span><strong>版本</strong><span className="about-info-value">v{APP_VERSION} · 开发预览版</span></div>
-        {PROJECT_LINKS.map((link) => <div className="about-info-row" key={link.id}><span className="about-link-icon" aria-hidden="true"><AboutIcon name={link.id === "repository" ? "github" : "issues"} /></span><strong>{link.title}</strong>{link.url ? <a className="about-link-action" href={link.url} target="_blank" rel="noreferrer">{link.url}<AboutIcon name="external" /></a> : <span className="about-pending-badge">待配置</span>}</div>)}
+        {PROJECT_LINKS.map((link) => <div className="about-info-row" key={link.id}><span className="about-link-icon" aria-hidden="true"><AboutIcon name={link.id === "repository" ? "github" : "issues"} /></span><strong>{link.title}</strong>{link.url ? <a className="about-link-action" href={link.url} target="_blank" rel="noreferrer">{link.url}</a> : <span className="about-pending-badge">待配置</span>}</div>)}
       </div>
     </div>;
   }
