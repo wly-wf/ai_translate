@@ -1,15 +1,16 @@
 import { isCustomProvider, type SettingsProviderId, type ProviderId, type GenericProviderId } from "./providerTypes";
 import { type ThemeMode, type ProxyType, type ProxyMode, FONT_SIZE_LIMITS, isTauriDesktop, nativeInvoke, useUserPreferences } from "./useUserPreferences";
-import { type CSSProperties, type MouseEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { type CSSProperties, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ProviderWrites } from "./providerWrites";
 import { useLongPressReorder } from "./useLongPressReorder";
 import appIcon from "../src-tauri/icons/tray-icon.svg";
 import { type SettingsPage, type SettingsProvider, type ProviderDraft, type ProviderConfigResponse, type ConnectionState, type ModelChoice, APP_VERSION, PROJECT_LINKS, settingsProvider, SETTINGS_PROVIDERS, GENERIC_PROVIDERS, ALL_SETTINGS_PROVIDERS, createProviderDrafts, uniqueModels, withCustomProviderIdentity, modelsFromConfig, draftFromConfig, modelChoiceKey, orderProviders } from "./providerCatalog";
-import { ProviderIcon, ModelPicker, InlineSelect, SegmentedControl, AccentColorPicker, FontSizeStepper, preferenceNoticeMessage, Icon, SearchIcon, ModelAddIcon, ModelRefreshIcon, DeleteIcon, AvailableModelsDialog, SettingsNavIcon, AboutIcon } from "./sharedUI";
+import { ProviderIcon, ModelPicker, InlineSelect, SegmentedControl, AccentColorPicker, FontSizeStepper, preferenceNoticeMessage, Icon, SearchIcon, ModelAddIcon, ModelRefreshIcon, DeleteIcon, AvailableModelsDialog, SettingsNavIcon, AboutIcon, ApiKeyInput, useDialogLifecycle } from "./sharedUI";
+import { useWindowDrag } from "./useWindowDrag";
 
 export function SettingsWindow() {
+  const { beginWindowDrag } = useWindowDrag();
   const [autostart, setAutostart] = useState(false);
   const [autostartBusy, setAutostartBusy] = useState(true);
   const [autostartError, setAutostartError] = useState("");
@@ -29,7 +30,6 @@ export function SettingsWindow() {
   } = useUserPreferences();
   const [notice, setNotice] = useState("");
   const [proxyTestState, setProxyTestState] = useState<{ status: "idle" | "testing" | "success" | "error"; message: string }>({ status: "idle", message: "" });
-  const [showApiKey, setShowApiKey] = useState(false);
   const [providerSearch, setProviderSearch] = useState("");
   const [providerOrderPreview, setProviderOrderPreview] = useState<ProviderId[] | null>(null);
   const [providerContextMenu, setProviderContextMenu] = useState<{ providerId: GenericProviderId; x: number; y: number } | null>(null);
@@ -56,6 +56,7 @@ export function SettingsWindow() {
   const providerDraftsRef = useRef(providerDrafts);
   const modelFetchButtonRef = useRef<HTMLButtonElement>(null);
   const modelDialogCloseRef = useRef<HTMLButtonElement>(null);
+  const testModelButtonRef = useRef<HTMLButtonElement>(null);
   const testModelDialogCloseRef = useRef<HTMLButtonElement>(null);
   const providerContextMenuRef = useRef<HTMLDivElement>(null);
   const providerContextMenuActionRef = useRef<HTMLButtonElement>(null);
@@ -64,6 +65,7 @@ export function SettingsWindow() {
   const providerRowRectsRef = useRef(new Map<ProviderId, DOMRect>());
   const providerRowAnimationsRef = useRef(new Map<ProviderId, Animation>());
   providerDraftsRef.current = providerDrafts;
+  useDialogLifecycle(Boolean(testModelDialogProviderId), closeTestModelDialog, testModelDialogCloseRef, testModelButtonRef);
 
   useEffect(() => {
     const message = preferenceNoticeMessage(preferencesError);
@@ -99,32 +101,6 @@ export function SettingsWindow() {
       if (timer !== undefined) window.clearTimeout(timer);
     });
   }, []);
-
-  useEffect(() => {
-    if (!modelDialogProviderId) return;
-    const frame = window.requestAnimationFrame(() => modelDialogCloseRef.current?.focus());
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") closeModelDialog();
-    };
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [modelDialogProviderId]);
-
-  useEffect(() => {
-    if (!testModelDialogProviderId) return;
-    const frame = window.requestAnimationFrame(() => testModelDialogCloseRef.current?.focus());
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") closeTestModelDialog();
-    };
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [testModelDialogProviderId]);
 
   useEffect(() => {
     if (!providerContextMenu) return;
@@ -378,11 +354,6 @@ export function SettingsWindow() {
     return () => { cancelled = true; };
   }, [selectedSettingsProviderId]);
 
-  function dragWindow(event: MouseEvent<HTMLElement>) {
-    if ((event.target as HTMLElement).closest("button, input, textarea, select")) return;
-    void getCurrentWindow().startDragging();
-  }
-
   function switchSettingsPage(page: SettingsPage) {
     modelFetchRequestId.current += 1;
     setFetchingProviderId(null);
@@ -411,7 +382,6 @@ export function SettingsWindow() {
     setConnectionState({ providerId: null, status: "idle", message: "" });
     setModelFetchMessage({ providerId: null, message: "" });
     setModelFetchDetail({ providerId: null, message: "" });
-    setShowApiKey(false);
     setNotice("");
   }
 
@@ -469,9 +439,8 @@ export function SettingsWindow() {
     }
   }
 
-  function closeModelDialog(restoreFocus = true) {
+  function closeModelDialog() {
     setModelDialogProviderId(null);
-    if (restoreFocus) window.requestAnimationFrame(() => modelFetchButtonRef.current?.focus());
   }
 
   function closeTestModelDialog() {
@@ -714,6 +683,7 @@ export function SettingsWindow() {
       isLoading={isLoading}
       fetchError={fetchError}
       closeButtonRef={modelDialogCloseRef}
+      restoreFocusRef={modelFetchButtonRef}
       onToggle={(model) => toggleFetchedModel(provider.id, model)}
       onClose={() => closeModelDialog()}
       onRetry={() => void fetchProviderModels()}
@@ -751,8 +721,8 @@ export function SettingsWindow() {
       </div>
       <section className="settings-form-card provider-config-card">
         <div className="settings-field-group">
-          <div className="settings-label-row"><label className="field-label" htmlFor="provider-api-key">API Key</label><button className="inline-test" type="button" onClick={() => void testConnection()} disabled={connectionState.status === "testing"}><span aria-hidden="true">♡</span>{connectionState.status === "testing" ? "测试中" : "测试连接"}</button></div>
-          <div className="api-key-input-wrap"><input id="provider-api-key" aria-label="API Key" value={selectedDraft.apiKey} onChange={(event) => updateSelectedDraft("apiKey", event.target.value)} type={showApiKey ? "text" : "password"} placeholder={selectedDraft.saved ? "已保存，留空以保留当前 Key" : ""} /><button type="button" className="api-key-toggle" onClick={() => setShowApiKey((visible) => !visible)} aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"} title={showApiKey ? "隐藏 API Key" : "显示 API Key"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-5.5 9.5-5.5 9.5 5.5 9.5 5.5-3.4 5.5-9.5 5.5S2.5 12 2.5 12Z" /><circle cx="12" cy="12" r="2.5" /></svg></button></div>
+          <div className="settings-label-row"><label className="field-label" htmlFor="provider-api-key">API Key</label><button ref={testModelButtonRef} className="inline-test" type="button" onClick={() => void testConnection()} disabled={connectionState.status === "testing"}><span aria-hidden="true">♡</span>{connectionState.status === "testing" ? "测试中" : "测试连接"}</button></div>
+          <ApiKeyInput key={selectedSettingsProvider.id} id="provider-api-key" value={selectedDraft.apiKey} onChange={(value) => updateSelectedDraft("apiKey", value)} placeholder={selectedDraft.saved ? "已保存，留空以保留当前 Key" : ""} />
           {connectionState.providerId === selectedSettingsProvider.id && connectionState.status !== "idle" && <span className={`connection-inline-result connection-field-result ${connectionState.status}`} role="status" title={connectionState.message}>{connectionState.message}</span>}
         </div>
         <div className="settings-field-group"><label className="field-label" htmlFor="provider-base-url">API 地址</label><input id="provider-base-url" value={selectedDraft.baseUrl} onChange={(event) => updateSelectedDraft("baseUrl", event.target.value)} spellCheck={false} placeholder="填写服务地址或完整的 /chat/completions 地址" /></div>
@@ -948,6 +918,6 @@ export function SettingsWindow() {
     </aside>;
   }
 
-  return <main className="app-shell settings-window-shell"><section className={`settings-shell settings-shell-${isProviderPage ? "providers" : "single"}`}><div className="settings-topbar" onMouseDown={dragWindow}><div className="settings-brand settings-brand-top"><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong></div></div><div className="settings-window-actions"><button type="button" className="settings-window-button settings-minimize-button" onClick={() => void nativeInvoke<void>("minimize_window").catch(() => undefined)} aria-label="最小化" title="最小化"><Icon name="minimize" /></button><button type="button" className="settings-close-button" onClick={() => void nativeInvoke("hide_settings_window")} aria-label="关闭设置" title="关闭设置"><Icon name="close" /></button></div></div><aside className="settings-nav-panel"><div className="settings-brand" onMouseDown={dragWindow}><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong><small>设置中心</small></div></div><nav className="settings-primary-nav" aria-label="设置分类"><button type="button" className={activeNavPage === "preferences" ? "is-active" : ""} onClick={() => switchSettingsPage("preferences")}><SettingsNavIcon name="preferences" />偏好设置</button><button type="button" className={activeNavPage === "providers" ? "is-active" : ""} onClick={() => switchSettingsPage("providers")}><SettingsNavIcon name="providers" />供应商</button><button type="button" className={activeNavPage === "proxy" ? "is-active" : ""} onClick={() => switchSettingsPage("proxy")}><SettingsNavIcon name="proxy" />网络代理</button><button type="button" className={activeNavPage === "about" ? "is-active" : ""} onClick={() => switchSettingsPage("about")}><SettingsNavIcon name="about" />关于</button></nav></aside>{isProviderPage && renderProviderColumn()}<section className="settings-main">{settingsPage === "preferences" ? renderPreferencesPage() : settingsPage === "proxy" ? renderProxyPage() : settingsPage === "about" ? renderAboutPage() : renderProviderDetails()}{notice && <p className="notice" role="status">{notice}</p>}</section>{renderModelDialog()}{renderProviderContextMenu()}</section></main>;
+  return <main className="app-shell settings-window-shell"><section className={`settings-shell settings-shell-${isProviderPage ? "providers" : "single"}`}><div className="settings-topbar" onMouseDown={beginWindowDrag}><div className="settings-brand settings-brand-top"><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong></div></div><div className="settings-window-actions"><button type="button" className="settings-window-button settings-minimize-button" onClick={() => void nativeInvoke<void>("minimize_window").catch(() => undefined)} aria-label="最小化" title="最小化"><Icon name="minimize" /></button><button type="button" className="settings-close-button" onClick={() => void nativeInvoke("hide_settings_window")} aria-label="关闭设置" title="关闭设置"><Icon name="close" /></button></div></div><aside className="settings-nav-panel"><div className="settings-brand" onMouseDown={beginWindowDrag}><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong><small>设置中心</small></div></div><nav className="settings-primary-nav" aria-label="设置分类"><button type="button" className={activeNavPage === "preferences" ? "is-active" : ""} onClick={() => switchSettingsPage("preferences")}><SettingsNavIcon name="preferences" />偏好设置</button><button type="button" className={activeNavPage === "providers" ? "is-active" : ""} onClick={() => switchSettingsPage("providers")}><SettingsNavIcon name="providers" />供应商</button><button type="button" className={activeNavPage === "proxy" ? "is-active" : ""} onClick={() => switchSettingsPage("proxy")}><SettingsNavIcon name="proxy" />网络代理</button><button type="button" className={activeNavPage === "about" ? "is-active" : ""} onClick={() => switchSettingsPage("about")}><SettingsNavIcon name="about" />关于</button></nav></aside>{isProviderPage && renderProviderColumn()}<section className="settings-main">{settingsPage === "preferences" ? renderPreferencesPage() : settingsPage === "proxy" ? renderProxyPage() : settingsPage === "about" ? renderAboutPage() : renderProviderDetails()}{notice && <p className="notice" role="status">{notice}</p>}</section>{renderModelDialog()}{renderProviderContextMenu()}</section></main>;
 }
 

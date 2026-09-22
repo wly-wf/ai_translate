@@ -1,12 +1,13 @@
 import { mergeTranslationSnapshot } from "./translationSnapshots";
 import type { ProviderId } from "./providerTypes";
 import { isTauriDesktop, nativeInvoke, useUserPreferences } from "./useUserPreferences";
-import { type MouseEvent, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 import appIcon from "../src-tauri/icons/tray-icon.svg";
-import { type Translation, type TranslationError, type ActiveProviderChanged, type TitlebarDragState, type ProviderConfigResponse, translationProvider, NO_ENABLED_PROVIDER_NOTICE, SETTINGS_PROVIDERS, withCustomProviderIdentity, modelsFromConfig, translationResultKey, modelChoiceKey, AVAILABLE_TRANSLATION_PROVIDERS, DEFAULT_PROVIDER_ID, orderedProviderIds, orderProviderResults, containsCjk, translationLanguageClass, normalizeSourceText } from "./providerCatalog";
+import { type Translation, type TranslationError, type ActiveProviderChanged, type ProviderConfigResponse, translationProvider, NO_ENABLED_PROVIDER_NOTICE, SETTINGS_PROVIDERS, withCustomProviderIdentity, modelsFromConfig, translationResultKey, modelChoiceKey, AVAILABLE_TRANSLATION_PROVIDERS, DEFAULT_PROVIDER_ID, orderedProviderIds, orderProviderResults, containsCjk, translationLanguageClass, normalizeSourceText } from "./providerCatalog";
 import { ProviderIcon, ModelPicker, preferenceNoticeMessage, Icon, ProviderSetupNotice, ExpandableText, QuickTranslateIcon, ReturnToFloatIcon } from "./sharedUI";
+import { useWindowDrag } from "./useWindowDrag";
 
 export function MainWindow() {
   const [result, setResult] = useState<Translation | null>(null);
@@ -30,7 +31,7 @@ export function MainWindow() {
   const snapshotRef = useRef<Translation | null>(null);
   const displayedRequestId = useRef<number | undefined>(undefined);
   const latestTranslationAttempt = useRef(0);
-  const titlebarDragRef = useRef<TitlebarDragState | null>(null);
+  const { beginWindowDrag, finishWindowDrag } = useWindowDrag();
   const providerOrderRef = useRef(providerOrder);
   const activationGraceUntilRef = useRef(0);
   const focusLossTimerRef = useRef<number | null>(null);
@@ -147,41 +148,6 @@ export function MainWindow() {
     setHasApiKey(entries.some(([, models]) => models.length > 0));
   }
 
-  function finishTitlebarDrag() {
-    const drag = titlebarDragRef.current;
-    drag?.cleanup();
-    titlebarDragRef.current = null;
-  }
-
-  function beginTitlebarDrag(event: MouseEvent<HTMLElement>) {
-    if (event.button !== 0 || (event.target as HTMLElement).closest("button, input, textarea, select")) return;
-    finishTitlebarDrag();
-
-    const startX = event.screenX;
-    const startY = event.screenY;
-    let cleanedUp = false;
-    const handleMove = (moveEvent: globalThis.MouseEvent) => {
-      const drag = titlebarDragRef.current;
-      if (!drag || drag.started) return;
-      const deltaX = moveEvent.screenX - drag.startX;
-      const deltaY = moveEvent.screenY - drag.startY;
-      if (deltaX * deltaX + deltaY * deltaY < 16) return;
-      drag.started = true;
-      void getCurrentWindow().startDragging().catch(() => {
-        drag.started = false;
-      });
-    };
-    const cleanup = () => {
-      if (cleanedUp) return;
-      cleanedUp = true;
-      window.removeEventListener("mousemove", handleMove);
-      window.removeEventListener("mouseup", finishTitlebarDrag);
-    };
-    titlebarDragRef.current = { startX, startY, started: false, cleanup };
-    window.addEventListener("mousemove", handleMove);
-    window.addEventListener("mouseup", finishTitlebarDrag);
-  }
-
   useEffect(() => {
     if (!isTauriDesktop()) {
       setNotice("当前是普通浏览器预览，无法保存 API Key 或调用翻译。请使用 Tauri 桌面窗口。");
@@ -236,7 +202,7 @@ export function MainWindow() {
       .catch(() => undefined);
     return () => {
       providerLoadVersion.current += 1;
-      finishTitlebarDrag();
+      finishWindowDrag();
       void startedListener.then((remove) => remove());
       void resultListener.then((remove) => remove());
       void errorListener.then((remove) => remove());
@@ -342,7 +308,7 @@ export function MainWindow() {
     return provider ? (enabledProviderModels[providerId] ?? []).map((model) => ({ id: modelChoiceKey(providerId, model), providerId, model, vendor: provider.vendor })) : [];
   });
   return <main className="app-shell">
-    <header className="titlebar" onMouseDown={beginTitlebarDrag} onMouseUp={finishTitlebarDrag}>
+    <header className="titlebar" onMouseDown={beginWindowDrag} onMouseUp={finishWindowDrag}>
       <div className="titlebar-start">
         <img className="app-icon" src={appIcon} alt="AI Translate 翻译图标" />
         <span className="app-name">AI Translate</span>

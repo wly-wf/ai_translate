@@ -25,6 +25,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
 Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
 
 import App, { ExpandableText } from "./App";
+import { SelectionFloat } from "./SelectionFloat";
 
 function mockWindowLabel(label: string) {
   windowLabel = label;
@@ -60,10 +61,8 @@ describe("App", () => {
     listenMock.mockClear();
   });
 
-  it("routes the selection-float window to the translate-selection control", () => {
-    mockWindowLabel("selection-float");
-
-    render(<App />);
+  it("renders the selection-float translate-selection control", () => {
+    render(<SelectionFloat />);
 
     const button = screen.getByRole("button", { name: "翻译选中文本" });
 
@@ -75,8 +74,7 @@ describe("App", () => {
   });
 
   it("restarts the selection-float entrance animation for every native show event", () => {
-    mockWindowLabel("selection-float");
-    render(<App />);
+    render(<SelectionFloat />);
 
     const initialButton = screen.getByRole("button", { name: "翻译选中文本" });
     expect(initialButton).toHaveClass("is-visible");
@@ -1028,9 +1026,8 @@ describe("App", () => {
   });
 
   it("invokes selection translation once while a request is pending", async () => {
-    mockWindowLabel("selection-float");
     invokeMock.mockReturnValue(new Promise(() => {}));
-    render(<App />);
+    render(<SelectionFloat />);
     const button = screen.getByRole("button", { name: "翻译选中文本" });
 
     fireEvent.click(button);
@@ -1042,9 +1039,8 @@ describe("App", () => {
   });
 
   it("accepts another selected-text translation after a successful request", async () => {
-    mockWindowLabel("selection-float");
     invokeMock.mockResolvedValue(undefined);
-    render(<App />);
+    render(<SelectionFloat />);
     const showHandler = listenMock.mock.calls.find(([eventName]) => eventName === "selection-float:show")?.[1];
 
     fireEvent.click(screen.getByRole("button", { name: "翻译选中文本" }));
@@ -1219,9 +1215,8 @@ describe("App", () => {
   });
 
   it("reenables selection translation when the native command reports an error", async () => {
-    mockWindowLabel("selection-float");
     invokeMock.mockRejectedValue(new Error("network failed"));
-    render(<App />);
+    render(<SelectionFloat />);
     const button = screen.getByRole("button", { name: "翻译选中文本" });
 
     fireEvent.click(button);

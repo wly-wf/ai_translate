@@ -1,12 +1,12 @@
 import type { SettingsProviderId } from "./providerTypes";
 import { type ThemeMode, type AccentColor, clampFontSize, nativeInvoke } from "./useUserPreferences";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { type SettingsProvider, type ModelChoice, PROVIDER_IMAGE_ICONS, withCustomProviderIdentity, translationProvider, ACCENT_COLOR_OPTIONS } from "./providerCatalog";
 
 // GitHub mark from Simple Icons 16.28.0 (CC0-1.0).
 const GITHUB_ICON_PATH = "M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12";
 
-export function ProviderIcon({ provider }: { provider: { id: string; mark: string; accent: string } }) {
+export function ProviderIcon({ provider }: { provider: { id: string; mark: string } }) {
   const imageIcon = PROVIDER_IMAGE_ICONS[provider.id as SettingsProviderId];
   if (imageIcon) {
     return <span className={`provider-mark provider-brand-mark ${imageIcon.className}`} aria-hidden="true"><img className="provider-brand-image" src={imageIcon.src} alt="" /></span>;
@@ -14,27 +14,18 @@ export function ProviderIcon({ provider }: { provider: { id: string; mark: strin
   return <span className="provider-mark provider-custom-mark" aria-hidden="true">{provider.mark}</span>;
 }
 
-export function CheckIcon() {
-  return <svg className="quick-model-check-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5.5 12.5 4.1 4.1 8.9-9" /></svg>;
-}
-
-export function ModelPicker({ value, choices, onChange, ariaLabel, disabled = false }: { value: string | null; choices: ModelChoice[]; onChange: (choice: ModelChoice) => void; ariaLabel: string; disabled?: boolean }) {
-  const [open, setOpen] = useState(false);
+function useDismissiblePopover(open: boolean, close: () => void) {
   const rootRef = useRef<HTMLDivElement>(null);
-  const selectedChoice = choices.find((choice) => choice.id === value) ?? null;
-  const providerForChoice = (choice: ModelChoice) => {
-    const provider = translationProvider(choice.providerId);
-    return provider ? withCustomProviderIdentity(provider, choice.vendor) : provider;
-  };
-  const selectedProvider = selectedChoice ? providerForChoice(selectedChoice) : null;
+  const closeRef = useRef(close);
+  closeRef.current = close;
 
   useEffect(() => {
     if (!open) return;
     const closeOnOutsideClick = (event: globalThis.MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      if (!rootRef.current?.contains(event.target as Node)) closeRef.current();
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key === "Escape") closeRef.current();
     };
     document.addEventListener("mousedown", closeOnOutsideClick);
     document.addEventListener("keydown", closeOnEscape);
@@ -43,6 +34,52 @@ export function ModelPicker({ value, choices, onChange, ariaLabel, disabled = fa
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [open]);
+
+  return rootRef;
+}
+
+export function useDialogLifecycle(open: boolean, onClose: () => void, initialFocusRef: RefObject<HTMLElement | null>, restoreFocusRef?: RefObject<HTMLElement | null>) {
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  useEffect(() => {
+    if (!open) return;
+    const focusFrame = window.requestAnimationFrame(() => initialFocusRef.current?.focus());
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onCloseRef.current();
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.removeEventListener("keydown", closeOnEscape);
+      if (restoreFocusRef) window.requestAnimationFrame(() => restoreFocusRef.current?.focus());
+    };
+  }, [open, initialFocusRef, restoreFocusRef]);
+}
+
+export function ApiKeyInput({ id, value, onChange, placeholder = "", required = false }: {
+  id: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  required?: boolean;
+}) {
+  const [visible, setVisible] = useState(false);
+  return <div className="api-key-input-wrap">
+    <input id={id} value={value} onChange={(event) => onChange(event.target.value)} type={visible ? "text" : "password"} autoComplete="off" placeholder={placeholder} required={required} />
+    <button type="button" className="api-key-toggle" onClick={() => setVisible((current) => !current)} aria-label={visible ? "隐藏 API Key" : "显示 API Key"} title={visible ? "隐藏 API Key" : "显示 API Key"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-5.5 9.5-5.5 9.5 5.5 9.5 5.5-3.4 5.5-9.5 5.5S2.5 12 2.5 12Z" /><circle cx="12" cy="12" r="2.5" /></svg></button>
+  </div>;
+}
+
+export function ModelPicker({ value, choices, onChange, ariaLabel, disabled = false }: { value: string | null; choices: ModelChoice[]; onChange: (choice: ModelChoice) => void; ariaLabel: string; disabled?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useDismissiblePopover(open, () => setOpen(false));
+  const selectedChoice = choices.find((choice) => choice.id === value) ?? null;
+  const providerForChoice = (choice: ModelChoice) => {
+    const provider = translationProvider(choice.providerId);
+    return provider ? withCustomProviderIdentity(provider, choice.vendor) : provider;
+  };
+  const selectedProvider = selectedChoice ? providerForChoice(selectedChoice) : null;
 
   return <div className={`model-picker${open ? " is-open" : ""}`} ref={rootRef}>
     <button className="model-picker-trigger" type="button" aria-label={ariaLabel} aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((current) => !current)} disabled={disabled || choices.length === 0}>
@@ -55,23 +92,7 @@ export function ModelPicker({ value, choices, onChange, ariaLabel, disabled = fa
 
 export function InlineSelect({ value, options, onChange, ariaLabel, disabled = false, showCheck = true }: { value: string; options: string[]; onChange: (value: string) => void; ariaLabel: string; disabled?: boolean; showCheck?: boolean }) {
   const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const closeOnOutsideClick = (event: globalThis.MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", closeOnOutsideClick);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("mousedown", closeOnOutsideClick);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [open]);
+  const rootRef = useDismissiblePopover(open, () => setOpen(false));
 
   return <div className={`inline-select${open ? " is-open" : ""}`} ref={rootRef}>
     <button className="inline-select-trigger" type="button" role="combobox" aria-label={ariaLabel} aria-haspopup="listbox" aria-expanded={open} disabled={disabled} onClick={() => setOpen((current) => !current)}>
@@ -303,17 +324,20 @@ export function DeleteIcon() {
   return <svg className="provider-context-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 7h15M9 7V4.5h6V7M7 7l.7 12h8.6L17 7M10 10.5v5M14 10.5v5" /></svg>;
 }
 
-export function AvailableModelsDialog({ provider, models, selectedModels, isLoading, fetchError, closeButtonRef, onToggle, onClose, onRetry }: {
+export function AvailableModelsDialog({ provider, models, selectedModels, isLoading, fetchError, closeButtonRef, restoreFocusRef, onToggle, onClose, onRetry }: {
   provider: SettingsProvider;
   models: string[];
   selectedModels: string[];
   isLoading: boolean;
   fetchError: string;
   closeButtonRef: React.RefObject<HTMLButtonElement | null>;
+  restoreFocusRef: React.RefObject<HTMLButtonElement | null>;
   onToggle: (model: string) => void;
   onClose: () => void;
   onRetry: () => void;
 }) {
+  useDialogLifecycle(true, onClose, closeButtonRef, restoreFocusRef);
+
   return <>
     <button type="button" className="model-dialog-backdrop" aria-label="关闭可用模型窗口" onClick={onClose} />
     <div className="model-dialog-card" role="dialog" aria-modal="true" aria-label={`${provider.vendor} 可用模型`}>
@@ -356,16 +380,13 @@ export function SettingsNavIcon({ name }: { name: "preferences" | "providers" | 
   return <svg className="settings-nav-icon" viewBox="0 0 24 24" aria-hidden="true">{paths[name]}</svg>;
 }
 
-export function AboutIcon({ name }: { name: "version" | "system" | "github" | "issues" | "external" | "refresh" }) {
+export function AboutIcon({ name }: { name: "version" | "github" | "issues" }) {
   if (name === "github") {
     return <svg className="about-icon about-icon-github" viewBox="0 0 24 24" aria-hidden="true"><path d={GITHUB_ICON_PATH} /></svg>;
   }
   const paths: Record<Exclude<typeof name, "github">, React.ReactNode> = {
     version: <><path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5" /><path d="M20.5 5v7h-7" /></>,
-    system: <><rect x="3.5" y="4.5" width="17" height="12" rx="2" /><path d="M8 20h8M12 16.5V20" /></>,
     issues: <><circle cx="12" cy="12" r="8.5" /><path d="M12 7.5v5.5M12 16.5v.01" /></>,
-    external: <><path d="M9 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4" /><path d="M14 3h7v7M21 3l-9 9" /></>,
-    refresh: <><path d="M20 11a8 8 0 1 0 1 4" /><path d="M20 5v6h-6" /></>,
   };
   return <svg className="about-icon" viewBox="0 0 24 24" aria-hidden="true">{paths[name]}</svg>;
 }

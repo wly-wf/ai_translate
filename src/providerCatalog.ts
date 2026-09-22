@@ -12,21 +12,12 @@ export type ProviderTranslationResult = { providerId: ProviderId; model: string;
 export type Translation = { source: string; results: ProviderTranslationResult[]; requestId?: number };
 export type TranslationError = { requestId: number; message: string };
 export type ActiveProviderChanged = { providerId: ProviderId; model: string };
-export type TitlebarDragState = {
-  startX: number;
-  startY: number;
-  started: boolean;
-  cleanup: () => void;
-};
-
 export type TranslationProvider = {
   id: ProviderId;
   vendor: string;
   model: string;
   mark: string;
-  accent: string;
   enabled: boolean;
-  summary: string;
 };
 
 export type SettingsProvider = {
@@ -35,8 +26,6 @@ export type SettingsProvider = {
   model: string;
   baseUrl: string;
   mark: string;
-  accent: string;
-  summary: string;
 };
 
 export type ProviderDraft = {
@@ -75,13 +64,11 @@ export const PROJECT_LINKS = [
   {
     id: "repository",
     title: "GitHub 开源仓库",
-    description: "查看源代码、版本发布和项目进展。",
     url: "https://github.com/wly-wf/ai_translate",
   },
   {
     id: "issues",
     title: "GitHub Issues",
-    description: "提交问题、功能建议和使用反馈。",
     url: "https://github.com/wly-wf/ai_translate/issues",
   },
 ] as const;
@@ -101,8 +88,6 @@ export const SETTINGS_PROVIDERS: SettingsProvider[] = [
     model: "deepseek-v4-flash",
     baseUrl: "https://api.deepseek.com",
     mark: "D",
-    accent: "#16a394",
-    summary: "适合日常取词、技术文档和快速翻译。",
   },
   {
     id: "xiaomi",
@@ -110,8 +95,6 @@ export const SETTINGS_PROVIDERS: SettingsProvider[] = [
     model: "mimo-v2.5-pro",
     baseUrl: "https://api.xiaomimimo.com",
     mark: "M",
-    accent: "#ff6900",
-    summary: "Xiaomi MiMo 开放平台，兼容 OpenAI 接口。",
   },
   {
     id: "qwen",
@@ -119,8 +102,6 @@ export const SETTINGS_PROVIDERS: SettingsProvider[] = [
     model: "qwen-plus",
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     mark: "Q",
-    accent: "#5b55d6",
-    summary: "阿里云百炼兼容模式，支持通义千问。",
   },
   {
     id: "zhipu",
@@ -128,8 +109,6 @@ export const SETTINGS_PROVIDERS: SettingsProvider[] = [
     model: "glm-5.2",
     baseUrl: "https://open.bigmodel.cn/api/paas/v4",
     mark: "Z",
-    accent: "#3478f6",
-    summary: "智谱开放平台，兼容 OpenAI SDK。",
   },
   {
     id: "moonshot",
@@ -137,8 +116,6 @@ export const SETTINGS_PROVIDERS: SettingsProvider[] = [
     model: "kimi-k2.5",
     baseUrl: "https://api.moonshot.cn",
     mark: "K",
-    accent: "#242936",
-    summary: "Moonshot API，适合长文本和中文场景。",
   },
 ];
 
@@ -149,8 +126,6 @@ export const GENERIC_PROVIDERS: SettingsProvider[] = [
     model: "gpt-4o-mini",
     baseUrl: "https://api.openai.com",
     mark: "O",
-    accent: "#5f83bd",
-    summary: "标准 OpenAI Chat Completions 兼容接口。",
   },
 ];
 
@@ -179,13 +154,12 @@ export function customProviderMark(name: string, fallback = "供") {
   return Array.from(name.trim())[0] || fallback;
 }
 
-export function withCustomProviderIdentity<T extends { vendor: string; mark: string; accent: string }>(provider: T, name: string): T {
+export function withCustomProviderIdentity<T extends { vendor: string; mark: string }>(provider: T, name: string): T {
   const vendor = name.trim();
   return {
     ...provider,
     vendor: vendor || provider.vendor,
     mark: customProviderMark(vendor),
-    accent: "#5f83bd",
   };
 }
 

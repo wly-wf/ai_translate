@@ -1,6 +1,5 @@
 import { useEffect } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { SelectionFloat } from "./SelectionFloat";
 import { MainWindow } from "./MainWindow";
 import { SettingsWindow } from "./SettingsWindow";
 import { AddProviderWindow } from "./AddProviderWindow";
@@ -23,7 +22,6 @@ function App() {
   } catch {
     label = new URLSearchParams(window.location.search).get("window") ?? "main";
   }
-  if (label === "selection-float") return <SelectionFloat />;
   if (label === "settings") return <SettingsWindow />;
   if (label === "add-provider") return <AddProviderWindow />;
   return <MainWindow />;
