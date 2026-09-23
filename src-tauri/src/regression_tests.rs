@@ -130,10 +130,12 @@ fn newest_capture_request_replaces_an_older_pending_request() {
     pending.submit(CaptureRequest {
         generation: 1,
         point: windows::Win32::Foundation::POINT { x: 1, y: 2 },
+        start_point: windows::Win32::Foundation::POINT { x: 0, y: 2 },
     });
     pending.submit(CaptureRequest {
         generation: 2,
         point: windows::Win32::Foundation::POINT { x: 3, y: 4 },
+        start_point: windows::Win32::Foundation::POINT { x: 2, y: 4 },
     });
 
     let request = pending.take().unwrap();

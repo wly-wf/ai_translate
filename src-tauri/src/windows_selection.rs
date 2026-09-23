@@ -65,10 +65,13 @@ const CAPTURE_HELPER_POLL_DELAY: Duration = Duration::from_millis(10);
 const CAPTURE_FAILURE_RETRY_DELAY: Duration = Duration::from_millis(40);
 const CAPTURE_HELPER_STREAM_LIMIT: usize = 128 * 1024;
 const MAX_UIA_ANCESTORS: usize = 16;
+const SELECTION_START_TOLERANCE: i32 = 16;
+const SELECTION_END_TOLERANCE: i32 = 96;
 const CLIPBOARD_RETRIES: usize = 20;
 const CLIPBOARD_RETRY_DELAY: Duration = Duration::from_millis(20);
 const MAX_CLIPBOARD_FORMATS: usize = 128;
-const MAX_CLIPBOARD_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
+// A 4K bitmap can exceed 31 MiB and Windows may expose it in several formats.
+const MAX_CLIPBOARD_SNAPSHOT_BYTES: usize = 128 * 1024 * 1024;
 const CLIPBOARD_RESTORE_RETRIES: usize = 8;
 const CLIPBOARD_RESTORE_RETRY_DELAY: Duration = Duration::from_millis(20);
 const CLIPBOARD_RESTORE_SETTLE_DELAY: Duration = Duration::from_millis(20);
@@ -168,15 +171,15 @@ impl CapturedSelection {
     }
 }
 
-pub fn capture_selection(point: POINT) -> CaptureOutcome {
+pub fn capture_selection(point: POINT, start_point: POINT) -> CaptureOutcome {
     if native_window_is_terminal(point) {
         return CaptureOutcome::Empty;
     }
 
-    match capture_with_helper_process(point) {
+    match capture_with_helper_process(point, start_point) {
         Ok(first) => retry_failed_capture(first, || {
             thread::sleep(CAPTURE_FAILURE_RETRY_DELAY);
-            capture_with_helper_process(point).unwrap_or_else(CaptureOutcome::Failed)
+            capture_with_helper_process(point, start_point).unwrap_or_else(CaptureOutcome::Failed)
         }),
         Err(error) => CaptureOutcome::Failed(error),
     }
@@ -193,14 +196,14 @@ fn retry_failed_capture(
     }
 }
 
-fn capture_selection_in_process(point: POINT) -> CaptureOutcome {
+fn capture_selection_in_process(point: POINT, start_point: POINT) -> CaptureOutcome {
     trace_capture_phase("native-window-check");
     if native_window_is_terminal(point) {
         return CaptureOutcome::Empty;
     }
 
     trace_capture_phase("uia-start");
-    let attempt = match capture_with_uia(point) {
+    let attempt = match capture_with_uia(point, start_point) {
         Ok(attempt) => attempt,
         Err(error) => UiaAttempt::Failed(error.to_string()),
     };
@@ -214,8 +217,8 @@ pub fn run_capture_helper_if_requested() -> bool {
         return false;
     }
 
-    let outcome = helper_point_from_arguments(&mut arguments)
-        .map(capture_selection_in_process)
+    let outcome = helper_points_from_arguments(&mut arguments)
+        .map(|(point, start_point)| capture_selection_in_process(point, start_point))
         .unwrap_or_else(CaptureOutcome::Failed);
     let response = CaptureHelperOutcome::from(outcome);
     let stdout = std::io::stdout();
@@ -227,9 +230,9 @@ pub fn run_capture_helper_if_requested() -> bool {
     true
 }
 
-fn helper_point_from_arguments(
+fn helper_points_from_arguments(
     arguments: &mut impl Iterator<Item = OsString>,
-) -> Result<POINT, String> {
+) -> Result<(POINT, POINT), String> {
     let parse_coordinate = |value: Option<OsString>, name: &str| {
         value
             .and_then(|value| value.into_string().ok())
@@ -239,16 +242,20 @@ fn helper_point_from_arguments(
     };
     let x = parse_coordinate(arguments.next(), "x")?;
     let y = parse_coordinate(arguments.next(), "y")?;
-    Ok(POINT { x, y })
+    let start_x = parse_coordinate(arguments.next(), "start x")?;
+    let start_y = parse_coordinate(arguments.next(), "start y")?;
+    Ok((POINT { x, y }, POINT { x: start_x, y: start_y }))
 }
 
-fn capture_with_helper_process(point: POINT) -> Result<CaptureOutcome, String> {
+fn capture_with_helper_process(point: POINT, start_point: POINT) -> Result<CaptureOutcome, String> {
     let executable = env::current_exe()
         .map_err(|error| format!("could not locate selection helper executable: {error}"))?;
     let mut child = Command::new(executable)
         .arg(CAPTURE_HELPER_ARGUMENT)
         .arg(point.x.to_string())
         .arg(point.y.to_string())
+        .arg(start_point.x.to_string())
+        .arg(start_point.y.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -348,7 +355,7 @@ fn trace_capture_phase(phase: &str) {
     eprintln!("selection-helper phase={phase}");
 }
 
-fn capture_with_uia(point: POINT) -> Result<UiaAttempt, CaptureError> {
+fn capture_with_uia(point: POINT, start_point: POINT) -> Result<UiaAttempt, CaptureError> {
     trace_capture_phase("uia-initialize-mta");
     let _apartment = ComApartment::initialize()?;
     trace_capture_phase("uia-create-automation");
@@ -358,7 +365,7 @@ fn capture_with_uia(point: POINT) -> Result<UiaAttempt, CaptureError> {
     trace_capture_phase("uia-element-from-point");
     let element = unsafe { automation.ElementFromPoint(point)? };
     trace_capture_phase("uia-point-element");
-    let point_attempt = capture_from_uia_element(&automation, &element, point)?;
+    let point_attempt = capture_from_uia_element(&automation, &element, point, start_point)?;
     match &point_attempt {
         UiaAttempt::Ignored
         | UiaAttempt::PointMismatch
@@ -379,13 +386,14 @@ fn capture_with_uia(point: POINT) -> Result<UiaAttempt, CaptureError> {
         Ok(element) => element,
         Err(_) => return Ok(point_attempt),
     };
-    capture_from_uia_element(&automation, &focused, point)
+    capture_from_uia_element(&automation, &focused, point, start_point)
 }
 
 fn capture_from_uia_element(
     automation: &IUIAutomation,
     element: &IUIAutomationElement,
     point: POINT,
+    start_point: POINT,
 ) -> Result<UiaAttempt, CaptureError> {
     trace_capture_phase("uia-ignored-surface-ancestors");
     if element_is_ignored_selection_surface(automation, element) {
@@ -401,7 +409,7 @@ fn capture_from_uia_element(
     // TextPattern but fail individual selection/range calls. That is safe to
     // distinguish from failures before surface classification so the guarded
     // clipboard fallback still has a chance to retrieve the selection.
-    Ok(capture_from_text_pattern(&text_pattern, point).unwrap_or_else(|error| {
+    Ok(capture_from_text_pattern(&text_pattern, point, start_point).unwrap_or_else(|error| {
         UiaAttempt::SelectionFailed(error.to_string())
     }))
 }
@@ -434,8 +442,8 @@ fn text_pattern_from_element_or_ancestors(
 
 /// Reads the bounding rectangles UIA reports for a selected range. The
 /// returned SAFEARRAY contains plain VT_R8 doubles, four per rectangle in
-/// left/top/right/bottom order, in screen coordinates. Providers that expose
-/// no geometry yield `None` so the caller falls back to the release point.
+/// left/top/width/height order, in screen coordinates. Providers that expose
+/// no geometry yield `None`; geometry only validates the selected text.
 fn selection_bounding_rects(range: &IUIAutomationTextRange) -> Option<Vec<RECT>> {
     let array = unsafe { range.GetBoundingRectangles() }.ok()?;
     if array.is_null() {
@@ -454,12 +462,9 @@ fn selection_bounding_rects(range: &IUIAutomationTextRange) -> Option<Vec<RECT>>
             let doubles = unsafe { std::slice::from_raw_parts(data as *const f64, count) };
             let mut rects = Vec::with_capacity(count / 4);
             for chunk in doubles.chunks_exact(4) {
-                rects.push(RECT {
-                    left: chunk[0].round() as i32,
-                    top: chunk[1].round() as i32,
-                    right: chunk[2].round() as i32,
-                    bottom: chunk[3].round() as i32,
-                });
+                if let Some(rect) = selection_rect_from_uia(chunk) {
+                    rects.push(rect);
+                }
             }
             Some(rects)
         })();
@@ -470,24 +475,44 @@ fn selection_bounding_rects(range: &IUIAutomationTextRange) -> Option<Vec<RECT>>
     parsed
 }
 
-/// Anchors the selection float above the top edge of the selection while
-/// keeping the release point as the horizontal reference. Without usable
-/// geometry the plain release point is kept.
-fn selection_anchor(point: POINT, rects: &[RECT]) -> POINT {
-    let top = rects
-        .iter()
-        .filter(|rect| rect.right > rect.left && rect.bottom > rect.top)
-        .map(|rect| rect.top)
-        .min();
-    POINT {
-        x: point.x,
-        y: top.unwrap_or(point.y),
+// RangeFromPoint maps whitespace to the nearest text position, which can lie
+// outside a real selection. Check the gesture against the selected text bounds
+// before treating that mismatch as stale selection.
+fn selection_geometry_matches_drag(start: POINT, end: POINT, rects: &[RECT]) -> bool {
+    rects.iter().any(|rect| point_near_selection_rect(start, rect, SELECTION_START_TOLERANCE))
+        && rects.iter().any(|rect| point_near_selection_rect(end, rect, SELECTION_END_TOLERANCE))
+}
+
+fn selection_rect_from_uia(values: &[f64]) -> Option<RECT> {
+    let [left, top, width, height] = values else {
+        return None;
+    };
+    if !values.iter().all(|value| value.is_finite()) || *width <= 0.0 || *height <= 0.0 {
+        return None;
     }
+    Some(RECT {
+        left: left.round() as i32,
+        top: top.round() as i32,
+        right: (left + width).round() as i32,
+        bottom: (top + height).round() as i32,
+    })
+}
+
+fn point_near_selection_rect(point: POINT, rect: &RECT, horizontal_tolerance: i32) -> bool {
+    if rect.right <= rect.left || rect.bottom <= rect.top {
+        return false;
+    }
+    let vertical_tolerance = ((rect.bottom - rect.top) / 2).clamp(4, 12);
+    point.x >= rect.left.saturating_sub(horizontal_tolerance)
+        && point.x <= rect.right.saturating_add(horizontal_tolerance)
+        && point.y >= rect.top.saturating_sub(vertical_tolerance)
+        && point.y <= rect.bottom.saturating_add(vertical_tolerance)
 }
 
 fn capture_from_text_pattern(
     text_pattern: &IUIAutomationTextPattern,
     point: POINT,
+    start_point: POINT,
 ) -> Result<UiaAttempt, CaptureError> {
 
     trace_capture_phase("uia-get-selection");
@@ -500,7 +525,7 @@ fn capture_from_text_pattern(
     let point_range = unsafe { text_pattern.RangeFromPoint(point) }.ok();
     // `None` means the provider cannot map a screen point. `Some(false)` can
     // be either a stale UIA range or a valid release in line-end whitespace;
-    // the caller distinguishes that case and uses the guarded copy fallback.
+    // compare the full mouse gesture with the selection geometry below.
     let mut point_matches_selection = point_range.as_ref().map(|_| false);
     let mut selection_rects: Vec<RECT> = Vec::new();
 
@@ -530,9 +555,9 @@ fn capture_from_text_pattern(
         }
     }
 
-    let anchor = selection_anchor(point, &selection_rects);
-    let outcome = CapturedSelection::from_text_at_point(text, anchor);
+    let outcome = CapturedSelection::from_text_at_point(text, point);
     if point_matches_selection == Some(false)
+        && !selection_geometry_matches_drag(start_point, point, &selection_rects)
         && matches!(
             outcome,
             CaptureOutcome::Detected(_) | CaptureOutcome::TooLong { .. }
@@ -765,13 +790,18 @@ fn resolve_uia_attempt(
         UiaAttempt::Outcome(CaptureOutcome::Failed(error)) => CaptureOutcome::Failed(error),
         // Never press Ctrl+C in explicitly ignored code editors and terminals.
         UiaAttempt::Ignored => CaptureOutcome::Empty,
-        // RangeFromPoint returns the nearest text position, not necessarily a
-        // position inside the selection. A release in line-end whitespace can
-        // therefore miss a valid drag selection; use the guarded clipboard
-        // fallback to ask the foreground application for the actual selection.
-        UiaAttempt::PointMismatch
-        | UiaAttempt::Outcome(CaptureOutcome::Empty)
-        | UiaAttempt::Unavailable => fallback(),
+        UiaAttempt::PointMismatch => {
+            trace_capture_phase("uia-point-mismatch-fallback");
+            fallback()
+        }
+        UiaAttempt::Outcome(CaptureOutcome::Empty) => {
+            trace_capture_phase("uia-empty-fallback");
+            fallback()
+        }
+        UiaAttempt::Unavailable => {
+            trace_capture_phase("uia-unavailable-fallback");
+            fallback()
+        }
         UiaAttempt::SelectionFailed(error) => {
             eprintln!("selection-helper phase=uia-selection-fallback error={error}");
             fallback()
@@ -1143,6 +1173,15 @@ fn clipboard_snapshot_size(format: u32, kind: ClipboardHandleKind, source: HANDL
     Ok(bytes)
 }
 
+fn checked_clipboard_snapshot_bytes(current: usize, next: usize) -> Result<usize, String> {
+    let total = current.saturating_add(next);
+    if total > MAX_CLIPBOARD_SNAPSHOT_BYTES {
+        Err("clipboard snapshot exceeds the 128 MiB safety budget".into())
+    } else {
+        Ok(total)
+    }
+}
+
 fn snapshot_clipboard() -> Result<ClipboardSnapshot, String> {
     let _clipboard = ClipboardGuard::open(None)
         .ok_or_else(|| "could not snapshot the clipboard for fallback".to_string())?;
@@ -1176,10 +1215,10 @@ fn snapshot_clipboard() -> Result<ClipboardSnapshot, String> {
                 "clipboard metafile format {format} is smaller than its header"
             ));
         }
-        snapshot_bytes = snapshot_bytes.saturating_add(clipboard_snapshot_size(format, kind, source)?);
-        if snapshot_bytes > MAX_CLIPBOARD_SNAPSHOT_BYTES {
-            return Err("clipboard snapshot exceeds the 16 MiB safety budget".into());
-        }
+        snapshot_bytes = checked_clipboard_snapshot_bytes(
+            snapshot_bytes,
+            clipboard_snapshot_size(format, kind, source)?,
+        )?;
         let format_id = u16::try_from(format)
             .map_err(|_| format!("invalid clipboard format identifier {format}"))?;
         let duplicate = unsafe {
@@ -1525,6 +1564,38 @@ mod tests {
     }
 
     #[test]
+    fn line_end_whitespace_can_still_match_a_dragged_selection() {
+        let rects = [RECT { left: 100, top: 20, right: 180, bottom: 40 }];
+        assert!(selection_geometry_matches_drag(
+            POINT { x: 100, y: 30 },
+            POINT { x: 220, y: 30 },
+            &rects,
+        ));
+    }
+
+    #[test]
+    fn uia_selection_rectangle_uses_width_and_height() {
+        let rect = selection_rect_from_uia(&[100.0, 20.0, 80.0, 20.0]).unwrap();
+        assert_eq!((rect.left, rect.top, rect.right, rect.bottom), (100, 20, 180, 40));
+        assert!(selection_rect_from_uia(&[100.0, 20.0, 0.0, 20.0]).is_none());
+    }
+
+    #[test]
+    fn unrelated_drag_does_not_accept_a_stale_selection() {
+        let rects = [RECT { left: 100, top: 20, right: 180, bottom: 40 }];
+        assert!(!selection_geometry_matches_drag(
+            POINT { x: 100, y: 100 },
+            POINT { x: 220, y: 100 },
+            &rects,
+        ));
+        assert!(!selection_geometry_matches_drag(
+            POINT { x: 100, y: 30 },
+            POINT { x: 400, y: 30 },
+            &rects,
+        ));
+    }
+
+    #[test]
     fn mouse_release_point_sets_the_anchor() {
         let outcome = CapturedSelection::from_text_at_point(
             "selected".into(),
@@ -1537,33 +1608,6 @@ mod tests {
                 text: "selected".into(),
                 anchor: Anchor { x: 25, y: 35 },
             })
-        );
-    }
-
-    #[test]
-    fn selection_anchor_uses_the_top_of_the_selection_bounds() {
-        let rects = [
-            RECT { left: 10, top: 40, right: 60, bottom: 55 },
-            RECT { left: 20, top: 60, right: 50, bottom: 75 },
-        ];
-
-        assert_eq!(
-            selection_anchor(POINT { x: 45, y: 70 }, &rects),
-            POINT { x: 45, y: 40 }
-        );
-    }
-
-    #[test]
-    fn selection_anchor_keeps_the_release_point_without_usable_geometry() {
-        let degenerate = [RECT { left: 5, top: 30, right: 5, bottom: 30 }];
-
-        assert_eq!(
-            selection_anchor(POINT { x: 8, y: 9 }, &degenerate),
-            POINT { x: 8, y: 9 }
-        );
-        assert_eq!(
-            selection_anchor(POINT { x: 8, y: 9 }, &[]),
-            POINT { x: 8, y: 9 }
         );
     }
 
@@ -1581,11 +1625,14 @@ mod tests {
 
     #[test]
     fn capture_helper_coordinates_are_validated() {
-        let mut valid = [OsString::from("15"), OsString::from("-25")].into_iter();
-        assert_eq!(helper_point_from_arguments(&mut valid), Ok(POINT { x: 15, y: -25 }));
+        let mut valid = ["15", "-25", "5", "-25"].map(OsString::from).into_iter();
+        assert_eq!(
+            helper_points_from_arguments(&mut valid),
+            Ok((POINT { x: 15, y: -25 }, POINT { x: 5, y: -25 }))
+        );
 
-        let mut invalid = [OsString::from("x"), OsString::from("25")].into_iter();
-        assert!(helper_point_from_arguments(&mut invalid).is_err());
+        let mut invalid = ["15", "25", "x", "25"].map(OsString::from).into_iter();
+        assert!(helper_points_from_arguments(&mut invalid).is_err());
     }
 
     #[test]
@@ -1640,6 +1687,18 @@ mod tests {
                 ClipboardHandleKind::Unsupported
             );
         }
+    }
+
+    #[test]
+    fn clipboard_snapshot_accepts_two_4k_bitmap_representations() {
+        let bitmap_bytes = 3840 * 2160 * 4;
+        let first = checked_clipboard_snapshot_bytes(0, bitmap_bytes).unwrap();
+        assert!(checked_clipboard_snapshot_bytes(first, bitmap_bytes).is_ok());
+    }
+
+    #[test]
+    fn clipboard_snapshot_still_rejects_oversized_data() {
+        assert!(checked_clipboard_snapshot_bytes(MAX_CLIPBOARD_SNAPSHOT_BYTES, 1).is_err());
     }
 
     #[test]

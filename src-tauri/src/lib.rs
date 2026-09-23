@@ -408,6 +408,7 @@ fn handle_mouse_up(
 struct CaptureRequest {
     generation: u64,
     point: windows::Win32::Foundation::POINT,
+    start_point: windows::Win32::Foundation::POINT,
 }
 
 #[derive(Default)]
@@ -472,7 +473,7 @@ impl CaptureScheduler {
                     dispatch_mouse_up(&app, request.generation, CaptureOutcome::Empty, false);
                     continue;
                 }
-                let outcome = capture_selection(request.point);
+                let outcome = capture_selection(request.point, request.start_point);
                 dispatch_mouse_up(&app, request.generation, outcome, false);
             })
             .map_err(|error| format!("could not start selection capture worker: {error}"))?;
@@ -2224,12 +2225,17 @@ fn initialize_selection_float(app: &AppHandle) -> Result<(), String> {
                 dispatch_mouse_up(&mouse_app, generation, CaptureOutcome::Empty, false);
                 return;
             }
+            let Some(start_point) = event.start_point else {
+                dispatch_mouse_up(&mouse_app, generation, CaptureOutcome::Empty, false);
+                return;
+            };
             if let Err(error) = hide_float(&mouse_app) {
                 eprintln!("Previous selection float hide failed before capture: {error}");
             }
             scheduler.submit(CaptureRequest {
                 generation,
                 point: event.point,
+                start_point,
             });
         })
         .map_err(|error| error.to_string())
