@@ -1250,6 +1250,48 @@ async fn translate_text(app: AppHandle, text: String, provider: Option<String>, 
 }
 
 #[tauri::command]
+async fn retranslate_model(app: AppHandle, request_id: u64, provider: String, model: String) -> Result<TranslationBatch, String> {
+    let config = tauri::async_runtime::spawn_blocking({
+        let provider = provider.clone();
+        move || {
+            if !enabled_providers_sync().contains(&provider) {
+                return Err("所选模型未启用，请重新选择。".into());
+            }
+            configured_provider(&provider)
+        }
+    }).await.map_err(|error| error.to_string())??;
+    if !config.models.contains(&model) {
+        return Err("所选模型未配置，请重新选择。".into());
+    }
+    let new_request_id = next_translation_request_id();
+    let pending = {
+        let latest = app.state::<LatestTranslation>();
+        let mut latest = latest.lock().unwrap_or_else(|error| error.into_inner());
+        let batch = latest.as_ref().filter(|batch| batch.request_id == request_id)
+            .ok_or("翻译结果已更新，请重试。")?;
+        let mut pending = batch.clone();
+        let target = pending.results.iter_mut().find(|result| result.provider_id == provider && result.model == model)
+            .ok_or("未找到要重新翻译的模型。")?;
+        target.translation = None;
+        target.error = None;
+        pending.request_id = new_request_id;
+        if !app.state::<translation_runtime::TranslationRuntime>().begin(new_request_id) {
+            return Err("翻译已被更新的请求替代。".into());
+        }
+        *latest = Some(pending.clone());
+        pending
+    };
+    app.emit("translation-started", &pending).map_err(|error| error.to_string())?;
+    let source = pending.source.clone();
+    let preferences = current_preferences(&app);
+    let translated = request_translation_with_config(provider.clone(), model.clone(), source, preferences, config).await
+        .unwrap_or_else(|error| ProviderTranslation { provider_id: provider, model, translation: None, error: Some(error) });
+    publish_provider_result(&app, new_request_id, &translated);
+    get_latest_translation(app).filter(|batch| batch.request_id == new_request_id)
+        .ok_or_else(|| "翻译已被更新的请求替代。".into())
+}
+
+#[tauri::command]
 fn get_latest_translation(app: AppHandle) -> Option<TranslationBatch> {
     app.state::<LatestTranslation>()
         .lock()
@@ -2242,6 +2284,7 @@ pub fn run() {
             autostart::get_autostart,
             autostart::set_autostart,
             translate_text,
+            retranslate_model,
             get_latest_translation,
             translate_selection_float,
             save_provider_config,

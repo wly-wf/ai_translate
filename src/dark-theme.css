@@ -89,6 +89,8 @@
 :root[data-theme="dark"] .provider-card.is-active.is-open { color: var(--ink); background: var(--dark-panel); border-color: var(--line); box-shadow: 0 8px 26px rgba(4, 8, 14, .13); }
 :root[data-theme="dark"] .provider-card { background: #1e252f; border-color: #303b48; }
 :root[data-theme="dark"] .provider-header:hover { background: rgba(160, 195, 238, .065); }
+:root[data-theme="dark"] .provider-refresh-button:hover:not(:disabled),
+:root[data-theme="dark"] .provider-collapse-button:hover { background: rgba(160, 195, 238, .1); }
 :root[data-theme="dark"] .quick-translate-page .input-card { border-color: #3a495a; box-shadow: 0 12px 26px rgba(4, 9, 17, .2); }
 :root[data-theme="dark"] .quick-translate-page .input-head .field-label,
 :root[data-theme="dark"] .model-picker-value strong,
@@ -227,8 +229,10 @@
 :root[data-theme="dark"] .model-section-title h3 { color: var(--ink); }
 :root[data-theme="dark"] .model-row,
 :root[data-theme="dark"] .add-provider-model-row { border-color: #3c4b5c; }
-:root[data-theme="dark"] .settings-form-card.provider-config-card .model-input-label input,
-:root[data-theme="dark"] .settings-form-card.provider-config-card .model-input-label input:focus { color: var(--ink); background: transparent; }
+:root[data-theme="dark"] .provider-model-section .model-name { color: var(--ink); }
+:root[data-theme="dark"] .model-edit-button { color: #b2c5d9; }
+:root[data-theme="dark"] .model-edit-button:hover { color: var(--dark-blue); background: #344352; }
+:root[data-theme="dark"] .edit-model-dialog-content label { color: var(--muted); }
 :root[data-theme="dark"] .add-provider-field .add-provider-model-row input:focus { background: #344251; }
 :root[data-theme="dark"] .model-section-title > span,
 :root[data-theme="dark"] .placeholder-badge,

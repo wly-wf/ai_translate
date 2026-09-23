@@ -109,7 +109,7 @@ it("does not subscribe routine saves to navigation or draft replacement", async 
 it("retains the last saved model and explains how to disable translation", async () => {
   setup();
   fireEvent.click(await screen.findByRole("button", { name: "移除模型 model-a" }));
-  expect(screen.getByDisplayValue("model-a")).toBeInTheDocument();
+  expect(screen.getByText("model-a")).toHaveClass("model-name");
   expect(screen.getByText(/至少保留一个模型/)).toBeInTheDocument();
 });
 it("background results preserve quick input and collapsed model cards", async () => {

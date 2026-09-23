@@ -192,8 +192,10 @@ describe("App", () => {
     expect(apiKeyInput).toHaveAttribute("type", "text");
     expect(screen.queryByLabelText("模型名称")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "添加模型" }));
-    expect(screen.getByLabelText("模型名称")).toHaveValue("");
-    fireEvent.click(screen.getByRole("button", { name: "移除模型" }));
+    const addDialog = screen.getByRole("dialog", { name: "新增模型" });
+    expect(within(addDialog).getByLabelText("模型名称")).toHaveValue("");
+    expect(document.querySelector(".model-row")).toBeNull();
+    fireEvent.click(within(addDialog).getByRole("button", { name: "取消" }));
     expect(screen.queryByLabelText("模型名称")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "＋ 添加自定义供应商" }));
@@ -378,7 +380,11 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: /Xiaomi MiMo/ }));
     fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "mimo-key" } });
     fireEvent.click(screen.getByRole("button", { name: "添加模型" }));
-    fireEvent.change(screen.getByLabelText("模型名称"), { target: { value: "mimo-v2.5-pro" } });
+    const addDialog = screen.getByRole("dialog", { name: "新增模型" });
+    fireEvent.change(within(addDialog).getByLabelText("模型名称"), { target: { value: "mimo-v2.5-pro" } });
+    expect(document.querySelector(".model-row")).toBeNull();
+    fireEvent.click(within(addDialog).getByRole("button", { name: "保存" }));
+    expect(screen.getByText("mimo-v2.5-pro")).toHaveClass("model-name");
     fireEvent.click(screen.getByRole("checkbox", { name: "启用此翻译模型" }));
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("set_provider_enabled", { provider: "xiaomi", enabled: true }));
@@ -440,6 +446,40 @@ describe("App", () => {
     }), { timeout: 2000 });
     expect(screen.getByLabelText("API 地址")).toHaveValue("https://api.deepseek.example.com");
     expect(screen.queryByText("保存成功")).not.toBeInTheDocument();
+  });
+
+  it("edits an existing model only through its edit button and saves on confirmation", async () => {
+    mockWindowLabel("settings");
+    invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_enabled_providers") return Promise.resolve(["deepseek"]);
+      if (command === "get_provider_config" && args?.provider === "deepseek") {
+        return Promise.resolve({ apiKey: "saved-key", baseUrl: "https://api.deepseek.com", model: "deepseek-flash", models: ["deepseek-flash"] });
+      }
+      if (command === "get_provider_config") return Promise.resolve(null);
+      return Promise.resolve(undefined);
+    });
+    render(<App />);
+
+    const name = await screen.findByText("deepseek-flash");
+    expect(name).toHaveClass("model-name");
+    expect(screen.queryByLabelText("模型名称")).not.toBeInTheDocument();
+    fireEvent.click(name);
+    expect(screen.queryByRole("dialog", { name: "编辑模型名称" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑模型 deepseek-flash" }));
+    const dialog = screen.getByRole("dialog", { name: "编辑模型名称" });
+    fireEvent.change(within(dialog).getByLabelText("模型名称"), { target: { value: "cancelled-name" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(screen.getByText("deepseek-flash")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑模型 deepseek-flash" }));
+    fireEvent.change(screen.getByRole("dialog", { name: "编辑模型名称" }).querySelector("input")!, { target: { value: "deepseek-chat" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(screen.getByText("deepseek-chat")).toBeInTheDocument();
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("save_provider_config", {
+      provider: "deepseek", apiKey: "saved-key", baseUrl: "https://api.deepseek.com",
+      model: "deepseek-chat", models: ["deepseek-chat"],
+    }), { timeout: 2000 });
   });
 
   it("shows a red delete menu only for user-added providers and removes their configuration", async () => {
@@ -512,12 +552,12 @@ describe("App", () => {
     expect(dialog.querySelector(".model-dialog-check")).toBeNull();
     expect(dialog.querySelector(".is-selected")).toBeNull();
     fireEvent.click(addModelButton);
-    expect(screen.getAllByLabelText("模型名称").map((input) => (input as HTMLInputElement).value)).toEqual([
+    expect(Array.from(document.querySelectorAll(".model-name"), (name) => name.textContent)).toEqual([
       "deepseek-v4-flash",
       "deepseek-chat",
     ]);
     fireEvent.click(screen.getByRole("button", { name: "添加模型 deepseek-reasoner" }));
-    expect(screen.getAllByLabelText("模型名称").map((input) => (input as HTMLInputElement).value)).toEqual([
+    expect(Array.from(document.querySelectorAll(".model-name"), (name) => name.textContent)).toEqual([
       "deepseek-v4-flash",
       "deepseek-chat",
       "deepseek-reasoner",
@@ -525,7 +565,7 @@ describe("App", () => {
     const removeModelButton = dialog.querySelector<HTMLButtonElement>('[aria-label="移除模型 deepseek-chat"]');
     expect(removeModelButton).not.toBeNull();
     fireEvent.click(removeModelButton!);
-    expect(screen.getAllByLabelText("模型名称").map((input) => (input as HTMLInputElement).value)).toEqual([
+    expect(Array.from(document.querySelectorAll(".model-name"), (name) => name.textContent)).toEqual([
       "deepseek-v4-flash",
       "deepseek-reasoner",
     ]);
@@ -645,6 +685,43 @@ describe("App", () => {
     xiaomiRequest.resolve(["mimo-v2.5-pro"]);
     expect(await screen.findByRole("button", { name: "添加模型 mimo-v2.5-pro" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "添加模型 deepseek-chat" })).not.toBeInTheDocument();
+  });
+
+  it("refreshes only the selected result without collapsing its card", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_enabled_providers") return Promise.resolve(["deepseek", "xiaomi"]);
+      if (command === "get_provider_config") return Promise.resolve(null);
+      if (command === "retranslate_model") return Promise.resolve({
+        source: "hello", requestId: 2, results: [
+          { providerId: "deepseek", model: "deepseek-chat", translation: "新译文", error: null },
+          { providerId: "xiaomi", model: "mimo", translation: "原译文二", error: null },
+        ],
+      });
+      return Promise.resolve(undefined);
+    });
+    render(<App />);
+    await waitFor(() => expect(listenMock).toHaveBeenCalledWith("translation-result", expect.any(Function)));
+    const handler = listenMock.mock.calls.find(([name]) => name === "translation-result")![1];
+    act(() => handler({ payload: {
+      source: "hello", requestId: 1, results: [
+        { providerId: "deepseek", model: "deepseek-chat", translation: "原译文一", error: null },
+        { providerId: "xiaomi", model: "mimo", translation: "原译文二", error: null },
+      ],
+    } }));
+    const firstHeader = screen.getByRole("button", { name: "deepseek-chat/DeepSeek" });
+    const secondHeader = screen.getByRole("button", { name: "mimo/Xiaomi MiMo" });
+    fireEvent.click(secondHeader);
+    expect(secondHeader).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(screen.getByRole("button", { name: "重新翻译 DeepSeek 的 deepseek-chat" }));
+    expect(firstHeader).toHaveAttribute("aria-expanded", "true");
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("retranslate_model", {
+      requestId: 1, provider: "deepseek", model: "deepseek-chat",
+    }));
+    expect((await screen.findAllByText("新译文")).length).toBeGreaterThan(0);
+    expect(secondHeader).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(secondHeader);
+    expect(screen.getAllByText("原译文二").length).toBeGreaterThan(0);
   });
 
   it("uses the model selected from the quick translation picker", async () => {

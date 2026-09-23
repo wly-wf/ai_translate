@@ -42,10 +42,11 @@ export function SettingsWindow() {
   const [modelDialogProviderId, setModelDialogProviderId] = useState<SettingsProviderId | null>(null);
   const [modelFetchMessage, setModelFetchMessage] = useState<{ providerId: SettingsProviderId | null; message: string }>({ providerId: null, message: "" });
   const [modelFetchDetail, setModelFetchDetail] = useState<{ providerId: SettingsProviderId | null; message: string }>({ providerId: null, message: "" });
-  const [manualModelProviderIds, setManualModelProviderIds] = useState<SettingsProviderId[]>([]);
   const [testModels, setTestModels] = useState<Partial<Record<SettingsProviderId, string>>>({});
   const [testModelDialogProviderId, setTestModelDialogProviderId] = useState<SettingsProviderId | null>(null);
   const [testModelDialogSelection, setTestModelDialogSelection] = useState("");
+  const [editingModel, setEditingModel] = useState<{ providerId: SettingsProviderId; index: number; value: string } | null>(null);
+  const [addingModel, setAddingModel] = useState<{ providerId: SettingsProviderId; value: string } | null>(null);
   const connectionRequestId = useRef(0);
   const modelFetchRequestId = useRef(0);
   const providerWrites = useRef(new ProviderWrites());
@@ -58,6 +59,8 @@ export function SettingsWindow() {
   const modelDialogCloseRef = useRef<HTMLButtonElement>(null);
   const testModelButtonRef = useRef<HTMLButtonElement>(null);
   const testModelDialogCloseRef = useRef<HTMLButtonElement>(null);
+  const editModelInputRef = useRef<HTMLInputElement>(null);
+  const editModelButtonRef = useRef<HTMLButtonElement>(null);
   const providerContextMenuRef = useRef<HTMLDivElement>(null);
   const providerContextMenuActionRef = useRef<HTMLButtonElement>(null);
   const providerOrderPreviewRef = useRef<ProviderId[] | null>(null);
@@ -66,6 +69,7 @@ export function SettingsWindow() {
   const providerRowAnimationsRef = useRef(new Map<ProviderId, Animation>());
   providerDraftsRef.current = providerDrafts;
   useDialogLifecycle(Boolean(testModelDialogProviderId), closeTestModelDialog, testModelDialogCloseRef, testModelButtonRef);
+  useDialogLifecycle(Boolean(editingModel || addingModel), closeModelNameDialog, editModelInputRef, editModelButtonRef);
 
   useEffect(() => {
     const message = preferenceNoticeMessage(preferencesError);
@@ -355,6 +359,8 @@ export function SettingsWindow() {
   }, [selectedSettingsProviderId]);
 
   function switchSettingsPage(page: SettingsPage) {
+    setEditingModel(null);
+    setAddingModel(null);
     modelFetchRequestId.current += 1;
     setFetchingProviderId(null);
     setProviderContextMenu(null);
@@ -370,6 +376,8 @@ export function SettingsWindow() {
   }
 
   function selectSettingsProvider(providerId: SettingsProviderId) {
+    setEditingModel(null);
+    setAddingModel(null);
     connectionRequestId.current += 1;
     modelFetchRequestId.current += 1;
     setProviderContextMenu(null);
@@ -423,7 +431,6 @@ export function SettingsWindow() {
       setFetchedModels((current) => { const next = { ...current }; delete next[providerId]; return next; });
       setSettingsEnabledProviderModels((current) => { const next = { ...current }; delete next[providerId]; return next; });
       setTestModels((current) => { const next = { ...current }; delete next[providerId]; return next; });
-      setManualModelProviderIds((current) => current.filter((id) => id !== providerId));
       if (selectedSettingsProviderId === providerId) {
         setSelectedSettingsProviderId(SETTINGS_PROVIDERS[0].id);
         setSettingsPage("providers");
@@ -469,14 +476,9 @@ export function SettingsWindow() {
     scheduleProviderAutoSave(providerId, nextDraft);
   }
 
-  function addManualModel() {
-    setManualModelProviderIds((providers) => providers.includes(selectedSettingsProviderId) ? providers : [...providers, selectedSettingsProviderId]);
-    setProviderDrafts((drafts) => {
-      const draft = drafts[selectedSettingsProviderId];
-      if (draft.models.some((model) => !model.trim())) return drafts;
-      const models = [...draft.models, ""];
-      return { ...drafts, [selectedSettingsProviderId]: { ...draft, model: models[0] ?? "", models } };
-    });
+  function addManualModel(button: HTMLButtonElement) {
+    editModelButtonRef.current = button;
+    setAddingModel({ providerId: selectedSettingsProviderId, value: "" });
   }
 
   function updateSelectedModel(index: number, value: string) {
@@ -486,6 +488,28 @@ export function SettingsWindow() {
     const nextDraft = { ...draft, model: models[0] ?? "", models };
     updateProviderDraft(providerId, nextDraft);
     scheduleProviderAutoSave(providerId, nextDraft);
+  }
+
+  function closeModelNameDialog() {
+    setEditingModel(null);
+    setAddingModel(null);
+  }
+
+  function saveModelName() {
+    const dialog = editingModel ?? addingModel;
+    if (!dialog || dialog.providerId !== selectedSettingsProviderId) return;
+    const value = dialog.value.trim();
+    if (!value) return;
+    if (editingModel) {
+      updateSelectedModel(editingModel.index, value);
+    } else {
+      const draft = providerDraftsRef.current[dialog.providerId];
+      const models = [...draft.models, value];
+      const nextDraft = { ...draft, model: models[0], models };
+      updateProviderDraft(dialog.providerId, nextDraft);
+      scheduleProviderAutoSave(dialog.providerId, nextDraft);
+    }
+    closeModelNameDialog();
   }
 
   function removeSelectedModel(index: number) {
@@ -712,7 +736,7 @@ export function SettingsWindow() {
   function renderProviderDetails() {
     const isEnabledForTranslation = enabledProviderIds.includes(selectedSettingsProvider.id);
     const isFetchingModels = fetchingProviderId === selectedSettingsProvider.id;
-    const showModelEditor = selectedDraft.models.length > 0 || manualModelProviderIds.includes(selectedSettingsProvider.id);
+    const showModelEditor = selectedDraft.models.length > 0;
     return <div className="provider-detail-page">
       <h1 className="sr-only">{settingsPage === "generic" ? "通用接口配置" : "厂商接口配置"}</h1>
       <div className="provider-detail-intro">
@@ -730,14 +754,14 @@ export function SettingsWindow() {
           <div className="model-section-header">
             <div className="model-section-title"><h3>模型</h3><span>{selectedDraft.models.filter((model) => model.trim()).length}</span></div>
             <div className="model-toolbar">
-              <button type="button" aria-label="添加模型" title="添加模型" aria-expanded={showModelEditor} onClick={addManualModel}><ModelAddIcon /></button>
+              <button type="button" aria-label="添加模型" title="添加模型" aria-expanded={Boolean(addingModel)} onClick={(event) => addManualModel(event.currentTarget)}><ModelAddIcon /></button>
               {modelFetchMessage.providerId === selectedSettingsProvider.id && modelFetchMessage.message && <span className="model-fetch-message" role="status" title={modelFetchMessage.message}><span className="model-fetch-message-icon" aria-hidden="true">!</span><span>{modelFetchMessage.message}</span></span>}
               <button ref={modelFetchButtonRef} className="fetch-models" type="button" onClick={() => void fetchProviderModels()} disabled={isFetchingModels} aria-busy={isFetchingModels}><ModelRefreshIcon /><span>获取</span></button>
             </div>
           </div>
           {showModelEditor && <div className="model-group">
             <div className="model-group-heading"><strong>{selectedSettingsProvider.vendor}</strong></div>
-            {selectedDraft.models.map((model, index) => <div className="model-row" key={index}><ProviderIcon provider={selectedSettingsProvider} /><label className="model-input-label" htmlFor={`provider-model-${index}`}><span className="sr-only">模型名称</span><input id={`provider-model-${index}`} value={model} onChange={(event) => updateSelectedModel(index, event.target.value)} spellCheck={false} /></label><button type="button" className="model-remove-button" onClick={() => removeSelectedModel(index)} aria-label={model ? `移除模型 ${model}` : "移除模型"} title="移除模型">−</button></div>)}
+            {selectedDraft.models.map((model, index) => <div className="model-row" key={index}><ProviderIcon provider={selectedSettingsProvider} /><span className="model-name">{model}</span><button type="button" className="model-edit-button" onClick={(event) => { editModelButtonRef.current = event.currentTarget; setEditingModel({ providerId: selectedSettingsProvider.id, index, value: model }); }} aria-label={`编辑模型 ${model}`} title="编辑模型"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4.2-1 10.6-10.6a2 2 0 0 0-2.8-2.8L5.4 16.2 4 20Z" /><path d="m14.5 7.5 2.8 2.8" /></svg></button><button type="button" className="model-remove-button" onClick={() => removeSelectedModel(index)} aria-label={`移除模型 ${model}`} title="移除模型">−</button></div>)}
           </div>}
         </div>
       </section>
@@ -844,6 +868,20 @@ export function SettingsWindow() {
     </div>;
   }
 
+  function renderEditModelDialog() {
+    const dialog = editingModel ?? addingModel;
+    if (!dialog) return null;
+    const title = editingModel ? "编辑模型名称" : "新增模型";
+    return <>
+      <button type="button" className="model-dialog-backdrop" aria-label={`关闭${title}窗口`} onClick={closeModelNameDialog} />
+      <form className="model-dialog-card edit-model-dialog-card" role="dialog" aria-modal="true" aria-labelledby="edit-model-dialog-title" onSubmit={(event) => { event.preventDefault(); saveModelName(); }}>
+        <header className="model-dialog-header"><div className="model-dialog-heading"><h2 id="edit-model-dialog-title">{title}</h2></div><button type="button" className="model-dialog-close" onClick={closeModelNameDialog} aria-label={`关闭${title}窗口`} title="关闭"><Icon name="close" /></button></header>
+        <div className="edit-model-dialog-content"><label htmlFor="edit-model-name">模型名称</label><input ref={editModelInputRef} id="edit-model-name" value={dialog.value} onChange={(event) => editingModel ? setEditingModel({ ...editingModel, value: event.target.value }) : setAddingModel({ ...addingModel!, value: event.target.value })} spellCheck={false} /></div>
+        <footer className="model-dialog-footer"><button type="button" className="test-model-dialog-cancel" onClick={closeModelNameDialog}>取消</button><button type="submit" disabled={!dialog.value.trim()}>保存</button></footer>
+      </form>
+    </>;
+  }
+
   function renderProviderColumn() {
     const draggedProvider = reorder.state.phase === "dragging" && reorder.state.activeId
       ? providerCollection.find((provider) => provider.id === reorder.state.activeId) ?? null
@@ -918,6 +956,6 @@ export function SettingsWindow() {
     </aside>;
   }
 
-  return <main className="app-shell settings-window-shell"><section className={`settings-shell settings-shell-${isProviderPage ? "providers" : "single"}`}><div className="settings-topbar" onMouseDown={beginWindowDrag}><div className="settings-brand settings-brand-top"><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong></div></div><div className="settings-window-actions"><button type="button" className="settings-window-button settings-minimize-button" onClick={() => void nativeInvoke<void>("minimize_window").catch(() => undefined)} aria-label="最小化" title="最小化"><Icon name="minimize" /></button><button type="button" className="settings-close-button" onClick={() => void nativeInvoke("hide_settings_window")} aria-label="关闭设置" title="关闭设置"><Icon name="close" /></button></div></div><aside className="settings-nav-panel"><div className="settings-brand" onMouseDown={beginWindowDrag}><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong><small>设置中心</small></div></div><nav className="settings-primary-nav" aria-label="设置分类"><button type="button" className={activeNavPage === "preferences" ? "is-active" : ""} onClick={() => switchSettingsPage("preferences")}><SettingsNavIcon name="preferences" />偏好设置</button><button type="button" className={activeNavPage === "providers" ? "is-active" : ""} onClick={() => switchSettingsPage("providers")}><SettingsNavIcon name="providers" />供应商</button><button type="button" className={activeNavPage === "proxy" ? "is-active" : ""} onClick={() => switchSettingsPage("proxy")}><SettingsNavIcon name="proxy" />网络代理</button><button type="button" className={activeNavPage === "about" ? "is-active" : ""} onClick={() => switchSettingsPage("about")}><SettingsNavIcon name="about" />关于</button></nav></aside>{isProviderPage && renderProviderColumn()}<section className="settings-main">{settingsPage === "preferences" ? renderPreferencesPage() : settingsPage === "proxy" ? renderProxyPage() : settingsPage === "about" ? renderAboutPage() : renderProviderDetails()}{notice && <p className="notice" role="status">{notice}</p>}</section>{renderModelDialog()}{renderProviderContextMenu()}</section></main>;
+  return <main className="app-shell settings-window-shell"><section className={`settings-shell settings-shell-${isProviderPage ? "providers" : "single"}`}><div className="settings-topbar" onMouseDown={beginWindowDrag}><div className="settings-brand settings-brand-top"><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong></div></div><div className="settings-window-actions"><button type="button" className="settings-window-button settings-minimize-button" onClick={() => void nativeInvoke<void>("minimize_window").catch(() => undefined)} aria-label="最小化" title="最小化"><Icon name="minimize" /></button><button type="button" className="settings-close-button" onClick={() => void nativeInvoke("hide_settings_window")} aria-label="关闭设置" title="关闭设置"><Icon name="close" /></button></div></div><aside className="settings-nav-panel"><div className="settings-brand" onMouseDown={beginWindowDrag}><img src={appIcon} alt="AI Translate 图标" /><div><strong>AI Translate</strong><small>设置中心</small></div></div><nav className="settings-primary-nav" aria-label="设置分类"><button type="button" className={activeNavPage === "preferences" ? "is-active" : ""} onClick={() => switchSettingsPage("preferences")}><SettingsNavIcon name="preferences" />偏好设置</button><button type="button" className={activeNavPage === "providers" ? "is-active" : ""} onClick={() => switchSettingsPage("providers")}><SettingsNavIcon name="providers" />供应商</button><button type="button" className={activeNavPage === "proxy" ? "is-active" : ""} onClick={() => switchSettingsPage("proxy")}><SettingsNavIcon name="proxy" />网络代理</button><button type="button" className={activeNavPage === "about" ? "is-active" : ""} onClick={() => switchSettingsPage("about")}><SettingsNavIcon name="about" />关于</button></nav></aside>{isProviderPage && renderProviderColumn()}<section className="settings-main">{settingsPage === "preferences" ? renderPreferencesPage() : settingsPage === "proxy" ? renderProxyPage() : settingsPage === "about" ? renderAboutPage() : renderProviderDetails()}{notice && <p className="notice" role="status">{notice}</p>}</section>{renderModelDialog()}{renderEditModelDialog()}{renderProviderContextMenu()}</section></main>;
 }
 

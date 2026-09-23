@@ -6,7 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 import appIcon from "../src-tauri/icons/tray-icon.svg";
 import { type Translation, type TranslationError, type ActiveProviderChanged, type ProviderConfigResponse, translationProvider, NO_ENABLED_PROVIDER_NOTICE, SETTINGS_PROVIDERS, withCustomProviderIdentity, modelsFromConfig, translationResultKey, modelChoiceKey, AVAILABLE_TRANSLATION_PROVIDERS, DEFAULT_PROVIDER_ID, orderedProviderIds, orderProviderResults, containsCjk, translationLanguageClass, normalizeSourceText } from "./providerCatalog";
-import { ProviderIcon, ModelPicker, preferenceNoticeMessage, Icon, ProviderSetupNotice, ExpandableText, QuickTranslateIcon, ReturnToFloatIcon } from "./sharedUI";
+import { ProviderIcon, ModelPicker, preferenceNoticeMessage, Icon, ProviderSetupNotice, ExpandableText, QuickTranslateIcon, ReturnToFloatIcon, ModelRefreshIcon } from "./sharedUI";
 import { useWindowDrag } from "./useWindowDrag";
 
 export function MainWindow() {
@@ -22,6 +22,7 @@ export function MainWindow() {
   const [quickTranslateProviderId, setQuickTranslateProviderId] = useState<ProviderId>(DEFAULT_PROVIDER_ID);
   const [quickTranslateModelName, setQuickTranslateModelName] = useState(SETTINGS_PROVIDERS[0].model);
   const [loading, setLoading] = useState(false);
+  const [refreshingResultKey, setRefreshingResultKey] = useState<string | null>(null);
   const [expandedProviderIds, setExpandedProviderIds] = useState<string[]>([DEFAULT_PROVIDER_ID]);
   const [showQuickTranslate, setShowQuickTranslate] = useState(false);
   const [notice, setNotice] = useState("");
@@ -31,6 +32,7 @@ export function MainWindow() {
   const snapshotRef = useRef<Translation | null>(null);
   const displayedRequestId = useRef<number | undefined>(undefined);
   const latestTranslationAttempt = useRef(0);
+  const preserveExpandedOnRefresh = useRef(false);
   const { beginWindowDrag, finishWindowDrag } = useWindowDrag();
   const providerOrderRef = useRef(providerOrder);
   const activationGraceUntilRef = useRef(0);
@@ -123,7 +125,8 @@ export function MainWindow() {
     if (orderedSnapshot.results[0]?.model) setActiveProviderModel(orderedSnapshot.results[0].model);
     setResult(orderedSnapshot);
     if (isNewRequest) {
-      setExpandedProviderIds(orderedSnapshot.results.map(translationResultKey));
+      if (!preserveExpandedOnRefresh.current) setExpandedProviderIds(orderedSnapshot.results.map(translationResultKey));
+      preserveExpandedOnRefresh.current = false;
       setShowQuickTranslate(false);
       displayedRequestId.current = snapshot.requestId;
     }
@@ -278,6 +281,23 @@ export function MainWindow() {
     }
   }
 
+  async function refreshModel(providerId: ProviderId, model: string) {
+    if (!result?.requestId || loading || refreshingResultKey) return;
+    const resultKey = translationResultKey({ providerId, model });
+    setRefreshingResultKey(resultKey);
+    preserveExpandedOnRefresh.current = true;
+    setNotice("");
+    try {
+      const translated = await nativeInvoke<Translation>("retranslate_model", { requestId: result.requestId, provider: providerId, model });
+      applyTranslationSnapshot(translated);
+    } catch (error) {
+      preserveExpandedOnRefresh.current = false;
+      if (!String(error).includes("已被更新的请求替代")) setNotice(String(error));
+    } finally {
+      setRefreshingResultKey(null);
+    }
+  }
+
   function openQuickTranslate() {
     setShowQuickTranslate(true);
     setNotice("");
@@ -348,11 +368,14 @@ export function MainWindow() {
             const resultKey = translationResultKey(providerResult);
             const isOpen = expandedProviderIds.includes(resultKey);
             return <article className={`provider-card ${isOpen ? "is-open" : "is-closed"} is-active`} key={resultKey}>
-              <button className="provider-header" onClick={() => setExpandedProviderIds((ids) => isOpen ? ids.filter((id) => id !== resultKey) : [...ids, resultKey])} aria-expanded={isOpen}>
-                <ProviderIcon provider={provider} />
-                <span className="provider-heading"><strong>{provider.model}/{provider.vendor}</strong></span>
-                <Icon name="chevron" />
-              </button>
+              <div className="provider-card-header">
+                <button className="provider-header" onClick={() => setExpandedProviderIds((ids) => isOpen ? ids.filter((id) => id !== resultKey) : [...ids, resultKey])} aria-expanded={isOpen}>
+                  <ProviderIcon provider={provider} />
+                  <span className="provider-heading"><strong>{provider.model}/{provider.vendor}</strong></span>
+                </button>
+                <button className="provider-refresh-button" type="button" onClick={() => void refreshModel(providerResult.providerId, providerResult.model)} disabled={loading || Boolean(refreshingResultKey)} aria-label={`重新翻译 ${provider.vendor} 的 ${provider.model}`} title="重新翻译"><ModelRefreshIcon /></button>
+                <button className="provider-collapse-button" type="button" onClick={() => setExpandedProviderIds((ids) => isOpen ? ids.filter((id) => id !== resultKey) : [...ids, resultKey])} aria-label={`${isOpen ? "收起" : "展开"} ${provider.vendor} 的 ${provider.model}`} aria-expanded={isOpen}><Icon name="chevron" /></button>
+              </div>
               {isOpen && <div className="provider-body" aria-busy={!providerResult.translation && !providerResult.error && loading}>
                 <div className="text-line"><ExpandableText kind="source" text={normalizeSourceText(result.source)} /></div>
                 <div className="text-line translation-line">
