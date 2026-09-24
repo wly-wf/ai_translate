@@ -5,6 +5,8 @@ import { listen } from "@tauri-apps/api/event";
 import { ProviderWrites } from "./providerWrites";
 import { useLongPressReorder } from "./useLongPressReorder";
 import appIcon from "../src-tauri/icons/tray-icon.svg";
+import projectLicense from "../LICENSE?raw";
+import providerNotices from "./assets/providers/NOTICE.md?raw";
 import { type SettingsPage, type SettingsProvider, type ProviderDraft, type ProviderConfigResponse, type ConnectionState, type ModelChoice, APP_VERSION, PROJECT_LINKS, settingsProvider, SETTINGS_PROVIDERS, GENERIC_PROVIDERS, ALL_SETTINGS_PROVIDERS, createProviderDrafts, uniqueModels, withCustomProviderIdentity, modelsFromConfig, draftFromConfig, modelChoiceKey, orderProviders } from "./providerCatalog";
 import { ProviderIcon, ModelPicker, InlineSelect, SegmentedControl, AccentColorPicker, FontSizeStepper, preferenceNoticeMessage, Icon, SearchIcon, ModelAddIcon, ModelRefreshIcon, DeleteIcon, AvailableModelsDialog, SettingsNavIcon, AboutIcon, ApiKeyInput, useDialogLifecycle } from "./sharedUI";
 import { useWindowDrag } from "./useWindowDrag";
@@ -872,6 +874,10 @@ export function SettingsWindow() {
         <div className="about-info-row"><span className="about-link-icon" aria-hidden="true"><AboutIcon name="version" /></span><strong>版本</strong><span className="about-info-value">v{APP_VERSION} · 开发预览版</span></div>
         {PROJECT_LINKS.map((link) => <div className="about-info-row" key={link.id}><span className="about-link-icon" aria-hidden="true"><AboutIcon name={link.id === "repository" ? "github" : "issues"} /></span><strong>{link.title}</strong>{link.url ? <a className="about-link-action" href={link.url} target="_blank" rel="noreferrer">{link.url}</a> : <span className="about-pending-badge">待配置</span>}</div>)}
       </div>
+      <details className="about-licenses">
+        <summary>开源许可与第三方声明</summary>
+        <pre>{projectLicense}{"\n\n"}{providerNotices}</pre>
+      </details>
     </div>;
   }
 

@@ -1,8 +1,9 @@
 [package]
 name = "translator"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "Windows desktop AI translation app"
+authors = ["wly-wf"]
+license = "MIT"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -44,3 +45,6 @@ windows = { version = "0.61", features = [
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging"
 ] }
+
+[profile.release]
+strip = "symbols"

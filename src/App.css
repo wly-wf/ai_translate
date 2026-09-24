@@ -605,6 +605,9 @@ textarea:focus, input:focus { outline: 2px solid var(--theme-primary-focus); out
 .about-link-action { min-width: 0; max-width: 360px; display: inline-flex; align-items: center; justify-self: end; gap: 5px; color: #7e8a95; font-size: 12px; font-weight: 520; overflow-wrap: anywhere; text-align: right; text-decoration: none; }
 .about-link-action:hover { color: var(--theme-primary-strong); }
 .about-link-action:focus-visible { outline: 2px solid var(--theme-primary-focus); outline-offset: 2px; }
+.about-licenses { margin-top: 14px; padding: 14px 18px; background: #fafbfc; border-radius: 16px; }
+.about-licenses summary { cursor: pointer; color: #4b5966; font-size: 13px; font-weight: 650; }
+.about-licenses pre { max-height: 220px; margin: 12px 0 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: #66737f; font-family: inherit; font-size: 11px; line-height: 1.5; }
 
 @media (max-width: 1100px) {
   .settings-shell-providers { grid-template-columns: 190px 252px minmax(0, 1fr); }

@@ -1,24 +1,6 @@
-# Provider icon sources
-
-These local SVG assets are bundled with the application and are not fetched at runtime.
-
-- `deepseek.svg`: DeepSeek mark from Simple Icons 16.28.0.
-- `moonshot.svg`: Moonshot AI mark from Simple Icons 16.28.0.
-- `bailian.svg`: BaiLian mark from `@lobehub/icons-static-svg` 1.94.0.
-- `xiaomi-mimo.svg`: Xiaomi MiMo mark from `@lobehub/icons-static-svg` 1.94.0.
-- `zhipu.svg`: Zhipu mark from `@lobehub/icons-static-svg` 1.94.0.
-
-The product and logo names remain trademarks of their respective owners.
-The Simple Icons collection is released under CC0-1.0, but its maintainers note
-that individual brand marks may have separate rights and usage guidelines.
-See https://github.com/simple-icons/simple-icons/blob/develop/DISCLAIMER.md.
-
-The three icons sourced from LobeHub are covered by the following notice and
-license from https://github.com/lobehub/lobe-icons/blob/master/LICENSE:
-
 MIT License
 
-Copyright (c) 2023 LobeHub
+Copyright (c) 2026 wly-wf
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

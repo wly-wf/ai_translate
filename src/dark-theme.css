@@ -296,6 +296,9 @@
 :root[data-theme="dark"] .about-brand,
 :root[data-theme="dark"] .about-info-list { background: var(--dark-panel); border: 1px solid #354150; }
 :root[data-theme="dark"] .about-info-row > strong { color: #d0dbe6; }
+:root[data-theme="dark"] .about-licenses { background: var(--dark-panel); border: 1px solid #354150; }
+:root[data-theme="dark"] .about-licenses summary { color: #d0dbe6; }
+:root[data-theme="dark"] .about-licenses pre { color: var(--muted); }
 :root[data-theme="dark"] .about-link-icon { color: var(--dark-blue); background: #2b3d50; border-color: #4e6680; }
 :root[data-theme="dark"] .about-pending-badge { color: #b5c4d3; background: #2b3541; border-color: #455364; }
 :root[data-theme="dark"] .add-provider-window-shell,

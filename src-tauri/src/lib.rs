@@ -167,6 +167,7 @@ type LatestTranslation = Mutex<Option<TranslationBatch>>;
 
 struct EnabledProvidersUpdateLock(Mutex<()>);
 struct PreferencesUpdateLock(Mutex<()>);
+struct PreferencesLoadFailure(bool);
 
 #[derive(Default)]
 struct AddProviderWindowState {
@@ -764,7 +765,8 @@ fn load_preferences_sync() -> Result<UserPreferences, String> {
             preferences.preference_version = USER_PREFERENCES_VERSION;
             Ok(preferences)
         }
-        Err(_) => Ok(UserPreferences::default()),
+        Err(KeyringError::NoEntry) => Ok(UserPreferences::default()),
+        Err(error) => Err(format!("无法读取已保存的界面偏好：{error}")),
     }
 }
 
@@ -1305,8 +1307,19 @@ async fn retranslate_model(app: AppHandle, request_id: u64, provider: String, mo
     app.emit("translation-started", &pending).map_err(|error| error.to_string())?;
     let source = pending.source.clone();
     let preferences = current_preferences(&app);
-    let translated = request_translation_with_config(provider.clone(), model.clone(), source, preferences, config).await
-        .unwrap_or_else(|error| ProviderTranslation { provider_id: provider, model, translation: None, error: Some(error) });
+    let permits = app.state::<translation_runtime::TranslationRuntime>().permits.clone();
+    let task = tokio::spawn(async move {
+        let _permit = permits.acquire_owned().await.map_err(|error| error.to_string())?;
+        Ok::<_, String>(request_translation_with_config(provider.clone(), model.clone(), source, preferences, config).await
+            .unwrap_or_else(|error| ProviderTranslation { provider_id: provider, model, translation: None, error: Some(error) }))
+    });
+    app.state::<translation_runtime::TranslationRuntime>().track(new_request_id, task.abort_handle());
+    let translated = match task.await {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => return Err(error),
+        Err(error) if error.is_cancelled() => return Err("翻译已被更新的请求替代。".into()),
+        Err(error) => return Err(format!("翻译任务失败：{error}")),
+    };
     publish_provider_result(&app, new_request_id, &translated);
     get_latest_translation(app).filter(|batch| batch.request_id == new_request_id)
         .ok_or_else(|| "翻译已被更新的请求替代。".into())
@@ -1618,8 +1631,11 @@ async fn set_provider_enabled(
 }
 
 #[tauri::command]
-fn get_preferences(app: AppHandle) -> UserPreferences {
-    current_preferences(&app)
+fn get_preferences(app: AppHandle) -> Result<UserPreferences, String> {
+    if app.state::<PreferencesLoadFailure>().0 {
+        return Err("无法读取已保存的界面偏好。请重新启动应用后重试，避免覆盖原有设置。".into());
+    }
+    Ok(current_preferences(&app))
 }
 
 #[tauri::command]
@@ -1659,6 +1675,9 @@ async fn set_user_preference(
     preference: String,
     value: serde_json::Value,
 ) -> Result<UserPreferences, String> {
+    if app.state::<PreferencesLoadFailure>().0 {
+        return Err("无法读取已保存的界面偏好。请重新启动应用后重试，避免覆盖原有设置。".into());
+    }
     let updates_provider_order = preference == "providerOrder";
     let updates_auto_selection = matches!(preference.as_str(), "autoSelection" | "toggleAutoSelection");
     let update_app = app.clone();
@@ -1893,7 +1912,6 @@ fn reveal_settings_window(app: &AppHandle, window: &WebviewWindow) -> Result<(),
     window.unminimize().map_err(|error| error.to_string())?;
     window.show().map_err(|error| error.to_string())?;
     window.set_focus().map_err(|error| error.to_string())?;
-    prewarm_add_provider_window(app);
     Ok(())
 }
 
@@ -1973,24 +1991,6 @@ fn center_child_window(child: &WebviewWindow, parent: &WebviewWindow) -> Result<
     child
         .set_position(Position::Physical(PhysicalPosition::new(x, y)))
         .map_err(|error| error.to_string())
-}
-
-fn prewarm_add_provider_window(app: &AppHandle) {
-    let app = app.clone();
-    thread::spawn(move || {
-        if let Err(error) = show_add_provider_window(&app, false) {
-            eprintln!("Add-provider window preload failed: {error}");
-        }
-    });
-}
-
-fn prewarm_settings_window(app: &AppHandle) {
-    let app = app.clone();
-    thread::spawn(move || {
-        if let Err(error) = ensure_settings_window(&app, false) {
-            eprintln!("Settings window preload failed: {error}");
-        }
-    });
 }
 
 fn show_add_provider_window(app: &AppHandle, requested: bool) -> Result<(), String> {
@@ -2337,16 +2337,20 @@ pub fn run() {
         Ok(None) => return,
         Err(error) => { eprintln!("{error}"); return; }
     };
-    let preferences = load_preferences_sync().unwrap_or_else(|error| {
-        eprintln!("Could not load interface preferences, using defaults: {error}");
-        UserPreferences::default()
-    });
+    let (preferences, preferences_load_failed) = match load_preferences_sync() {
+        Ok(preferences) => (preferences, false),
+        Err(error) => {
+            eprintln!("Could not load interface preferences, using defaults: {error}");
+            (UserPreferences::default(), true)
+        }
+    };
     tauri::Builder::default()
         .manage(Mutex::<SelectionController>::default())
         .manage(Mutex::new(preferences))
         .manage(Mutex::new(None::<TranslationBatch>))
         .manage(EnabledProvidersUpdateLock(Mutex::new(())))
         .manage(PreferencesUpdateLock(Mutex::new(())))
+        .manage(PreferencesLoadFailure(preferences_load_failed))
         .manage(Mutex::<AddProviderWindowState>::default())
         .manage(Mutex::<SettingsWindowState>::default())
         .manage(translation_runtime::TranslationRuntime::default())
@@ -2365,7 +2369,6 @@ pub fn run() {
                     eprintln!("Selection float disabled: {error}");
                 }
             }
-            prewarm_settings_window(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
