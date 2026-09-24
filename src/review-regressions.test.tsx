@@ -4,7 +4,18 @@ import { afterEach, expect, it, vi } from "vitest";
 import { ProviderWrites } from "./providerWrites";
 import { useUserPreferences } from "./useUserPreferences";
 const mocks = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn().mockResolvedValue(() => {}), label: "settings" }));
-vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: (command: string, ...rest: [{ providers?: string[] }] | []) => {
+  if (command !== "get_provider_summaries") return mocks.invoke(command, ...rest);
+  const args = rest[0];
+  return Promise.all((args?.providers ?? []).map(async (providerId) => {
+    try {
+      const config = await mocks.invoke("get_provider_config", { provider: providerId });
+      return { providerId, vendorName: config?.vendorName ?? "", models: [...new Set([config?.model, ...(config?.models ?? [])].filter(Boolean))], error: null };
+    } catch (error) {
+      return { providerId, vendorName: "", models: [], error: String(error) };
+    }
+  }));
+} }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
 vi.mock("@tauri-apps/api/webviewWindow", () => ({ getCurrentWebviewWindow: () => ({ label: mocks.label }) }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ onFocusChanged: vi.fn().mockResolvedValue(() => {}) }), cursorPosition: vi.fn() }));

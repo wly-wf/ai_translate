@@ -1,7 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-const App = React.lazy(() => import("./App"));
+const App = React.lazy(() => import("./WindowApp").then((module) => ({ default: module.WindowApp })));
 const Float = React.lazy(() => import("./SelectionFloat").then((module) => ({ default: module.SelectionFloat })));
 
 document.documentElement.dataset.window = "__TAURI_INTERNALS__" in window

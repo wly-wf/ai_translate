@@ -19,7 +19,18 @@ vi.mock("@tauri-apps/api/window", () => ({
   cursorPosition: cursorPositionMock,
 }));
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: (command: string, ...rest: [{ providers?: string[] }] | []) => {
+  if (command !== "get_provider_summaries") return invokeMock(command, ...rest);
+  const args = rest[0];
+  return Promise.all((args?.providers ?? []).map(async (providerId) => {
+    try {
+      const config = await invokeMock("get_provider_config", { provider: providerId });
+      return { providerId, vendorName: config?.vendorName ?? "", models: [...new Set([config?.model, ...(config?.models ?? [])].filter(Boolean))], error: null };
+    } catch (error) {
+      return { providerId, vendorName: "", models: [], error: String(error) };
+    }
+  }));
+} }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
 
 Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
@@ -446,6 +457,25 @@ describe("App", () => {
     }), { timeout: 2000 });
     expect(screen.getByLabelText("API 地址")).toHaveValue("https://api.deepseek.example.com");
     expect(screen.queryByText("保存成功")).not.toBeInTheDocument();
+  });
+
+  it("reads each initial provider configuration only once", async () => {
+    mockWindowLabel("settings");
+    const config = deferred<{ vendorName: string; apiKey: string; baseUrl: string; model: string; models: string[] }>();
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_enabled_providers") return Promise.resolve(["deepseek"]);
+      if (command === "get_custom_providers") return Promise.resolve([]);
+      if (command === "get_provider_config") return config.promise;
+      return Promise.resolve(undefined);
+    });
+    render(<App />);
+
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(invokeMock.mock.calls.filter(([command]) => command === "get_provider_config")).toHaveLength(1);
+    await act(async () => {
+      config.resolve({ vendorName: "", apiKey: "saved", baseUrl: "https://api.deepseek.com", model: "deepseek-flash", models: ["deepseek-flash"] });
+      await config.promise;
+    });
   });
 
   it("edits an existing model only through its edit button and saves on confirmation", async () => {

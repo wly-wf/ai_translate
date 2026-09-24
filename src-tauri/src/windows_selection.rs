@@ -41,7 +41,8 @@ use windows::{
                 IUIAutomationTextRange, TextPatternRangeEndpoint_End,
                 TextPatternRangeEndpoint_Start, UIA_CONTROLTYPE_ID, UIA_CustomControlTypeId,
                 UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_GroupControlTypeId,
-                UIA_PaneControlTypeId, UIA_TextControlTypeId, UIA_TextPatternId,
+                UIA_ImageControlTypeId, UIA_PaneControlTypeId, UIA_TextControlTypeId,
+                UIA_TextPatternId,
             },
             Input::KeyboardAndMouse::{
                 SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
@@ -110,6 +111,7 @@ pub enum CaptureOutcome {
 enum UiaAttempt {
     Outcome(CaptureOutcome),
     Ignored,
+    NoTextSurface,
     PointMismatch,
     Unavailable,
     SelectionFailed(String),
@@ -176,20 +178,42 @@ pub fn capture_selection(point: POINT, start_point: POINT) -> CaptureOutcome {
         return CaptureOutcome::Empty;
     }
 
-    match capture_with_helper_process(point, start_point) {
+    #[cfg(debug_assertions)]
+    let started = Instant::now();
+    let outcome = match capture_with_helper_process(point, start_point) {
         Ok(first) => retry_failed_capture(first, || {
             thread::sleep(CAPTURE_FAILURE_RETRY_DELAY);
             capture_with_helper_process(point, start_point).unwrap_or_else(CaptureOutcome::Failed)
         }),
         Err(error) => CaptureOutcome::Failed(error),
+    };
+    #[cfg(debug_assertions)]
+    eprintln!("selection-capture outcome={} elapsed_ms={}", capture_outcome_name(&outcome), started.elapsed().as_millis());
+    outcome
+}
+
+#[cfg(debug_assertions)]
+fn capture_outcome_name(outcome: &CaptureOutcome) -> &'static str {
+    match outcome {
+        CaptureOutcome::Detected(_) => "detected",
+        CaptureOutcome::Empty => "empty",
+        CaptureOutcome::TooLong { .. } => "too-long",
+        CaptureOutcome::Failed(_) => "failed",
     }
+}
+
+fn retryable_capture_failure(error: &str) -> bool {
+    !error.starts_with("clipboard snapshot exceeds the ")
+        && !error.starts_with("clipboard contains too many formats")
+        && !error.contains(" cannot be snapshotted safely")
+        && !error.contains(" is not backed by global memory")
 }
 
 fn retry_failed_capture(
     first: CaptureOutcome,
     retry: impl FnOnce() -> CaptureOutcome,
 ) -> CaptureOutcome {
-    if matches!(first, CaptureOutcome::Failed(_)) {
+    if matches!(&first, CaptureOutcome::Failed(error) if retryable_capture_failure(error)) {
         retry()
     } else {
         first
@@ -364,8 +388,32 @@ fn capture_with_uia(point: POINT, start_point: POINT) -> Result<UiaAttempt, Capt
     };
     trace_capture_phase("uia-element-from-point");
     let element = unsafe { automation.ElementFromPoint(point)? };
+    if unsafe { element.CurrentControlType() }.is_ok_and(is_image_control_type) {
+        trace_capture_phase("uia-image-surface-ignored");
+        return Ok(UiaAttempt::Ignored);
+    }
     trace_capture_phase("uia-point-element");
     let point_attempt = capture_from_uia_element(&automation, &element, point, start_point)?;
+    // A pan can end outside the image. Check where it began before a missing
+    // text selection is allowed to trigger Ctrl+C in the image viewer.
+    if matches!(
+        &point_attempt,
+        UiaAttempt::NoTextSurface
+            | UiaAttempt::Unavailable
+            | UiaAttempt::PointMismatch
+            | UiaAttempt::SelectionFailed(_)
+            | UiaAttempt::Outcome(CaptureOutcome::Empty)
+    )
+    {
+        if (start_point.x != point.x || start_point.y != point.y)
+            && unsafe { automation.ElementFromPoint(start_point) }.is_ok_and(|start_element| {
+                unsafe { start_element.CurrentControlType() }.is_ok_and(is_image_control_type)
+            })
+        {
+            trace_capture_phase("uia-image-surface-ignored");
+            return Ok(UiaAttempt::Ignored);
+        }
+    }
     match &point_attempt {
         UiaAttempt::Ignored
         | UiaAttempt::PointMismatch
@@ -374,7 +422,9 @@ fn capture_with_uia(point: POINT, start_point: POINT) -> Result<UiaAttempt, Capt
         | UiaAttempt::Outcome(CaptureOutcome::Failed(_))
         | UiaAttempt::SelectionFailed(_)
         | UiaAttempt::Failed(_) => return Ok(point_attempt),
-        UiaAttempt::Outcome(CaptureOutcome::Empty) | UiaAttempt::Unavailable => {}
+        UiaAttempt::Outcome(CaptureOutcome::Empty)
+        | UiaAttempt::Unavailable
+        | UiaAttempt::NoTextSurface => {}
     }
 
     // Many Chromium and custom controls expose TextPattern on a focused
@@ -386,7 +436,26 @@ fn capture_with_uia(point: POINT, start_point: POINT) -> Result<UiaAttempt, Capt
         Ok(element) => element,
         Err(_) => return Ok(point_attempt),
     };
-    capture_from_uia_element(&automation, &focused, point, start_point)
+    let focused_attempt = capture_from_uia_element(&automation, &focused, point, start_point)?;
+    Ok(prefer_focused_uia_attempt(point_attempt, focused_attempt))
+}
+
+fn prefer_focused_uia_attempt(point: UiaAttempt, focused: UiaAttempt) -> UiaAttempt {
+    if matches!(point, UiaAttempt::NoTextSurface)
+        && matches!(
+            focused,
+            UiaAttempt::NoTextSurface
+                | UiaAttempt::Unavailable
+                | UiaAttempt::PointMismatch
+                | UiaAttempt::Outcome(CaptureOutcome::Empty)
+        )
+    {
+        UiaAttempt::NoTextSurface
+    } else if matches!(focused, UiaAttempt::NoTextSurface) {
+        point
+    } else {
+        focused
+    }
 }
 
 fn capture_from_uia_element(
@@ -401,29 +470,58 @@ fn capture_from_uia_element(
     }
 
     trace_capture_phase("uia-text-pattern-ancestors");
-    let Some(text_pattern) = text_pattern_from_element_or_ancestors(automation, element) else {
-        return Ok(UiaAttempt::Unavailable);
-    };
+    let (text_pattern, text_surface) =
+        match text_pattern_from_element_or_ancestors(automation, element) {
+            TextPatternSearch::Pattern(pattern, text_surface) => (pattern, text_surface),
+            TextPatternSearch::TextSurface => return Ok(UiaAttempt::Unavailable),
+            TextPatternSearch::Other => return Ok(UiaAttempt::NoTextSurface),
+        };
     // At this point the target and its ancestors have already been checked for
     // terminals and code editors. Chromium's PDF UIA provider can expose a
     // TextPattern but fail individual selection/range calls. That is safe to
     // distinguish from failures before surface classification so the guarded
     // clipboard fallback still has a chance to retrieve the selection.
-    Ok(capture_from_text_pattern(&text_pattern, point, start_point).unwrap_or_else(|error| {
-        UiaAttempt::SelectionFailed(error.to_string())
-    }))
+    let attempt = capture_from_text_pattern(&text_pattern, point, start_point)
+        .unwrap_or_else(|error| UiaAttempt::SelectionFailed(error.to_string()));
+    Ok(suppress_ambiguous_non_text_attempt(attempt, text_surface))
+}
+
+fn suppress_ambiguous_non_text_attempt(attempt: UiaAttempt, text_surface: bool) -> UiaAttempt {
+    // A generic canvas can expose TextPattern without supporting selection.
+    // Empty/failed reads alone do not justify sending Ctrl+C to that canvas.
+    if !text_surface
+        && matches!(
+            attempt,
+            UiaAttempt::Outcome(CaptureOutcome::Empty)
+                | UiaAttempt::Unavailable
+                | UiaAttempt::SelectionFailed(_)
+        )
+    {
+        UiaAttempt::NoTextSurface
+    } else {
+        attempt
+    }
+}
+
+enum TextPatternSearch {
+    Pattern(IUIAutomationTextPattern, bool),
+    TextSurface,
+    Other,
 }
 
 fn text_pattern_from_element_or_ancestors(
     automation: &IUIAutomation,
     element: &IUIAutomationElement,
-) -> Option<IUIAutomationTextPattern> {
+) -> TextPatternSearch {
     let walker = unsafe { automation.RawViewWalker() }.ok();
     let mut current = element.clone();
+    let mut text_surface = false;
 
     for depth in 0..MAX_UIA_ANCESTORS {
+        text_surface |= unsafe { current.CurrentControlType() }
+            .is_ok_and(is_text_control_type);
         if let Ok(pattern) = unsafe { current.GetCurrentPatternAs(UIA_TextPatternId) } {
-            return Some(pattern);
+            return TextPatternSearch::Pattern(pattern, text_surface);
         }
         if depth + 1 == MAX_UIA_ANCESTORS {
             break;
@@ -437,7 +535,16 @@ fn text_pattern_from_element_or_ancestors(
         current = parent;
     }
 
-    None
+    if text_surface {
+        TextPatternSearch::TextSurface
+    } else {
+        TextPatternSearch::Other
+    }
+}
+
+fn is_text_control_type(control_type: UIA_CONTROLTYPE_ID) -> bool {
+    [UIA_EditControlTypeId, UIA_DocumentControlTypeId, UIA_TextControlTypeId]
+        .contains(&control_type)
 }
 
 /// Reads the bounding rectangles UIA reports for a selected range. The
@@ -481,6 +588,10 @@ fn selection_bounding_rects(range: &IUIAutomationTextRange) -> Option<Vec<RECT>>
 fn selection_geometry_matches_drag(start: POINT, end: POINT, rects: &[RECT]) -> bool {
     rects.iter().any(|rect| point_near_selection_rect(start, rect, SELECTION_START_TOLERANCE))
         && rects.iter().any(|rect| point_near_selection_rect(end, rect, SELECTION_END_TOLERANCE))
+}
+
+fn is_image_control_type(control_type: UIA_CONTROLTYPE_ID) -> bool {
+    control_type == UIA_ImageControlTypeId
 }
 
 fn selection_rect_from_uia(values: &[f64]) -> Option<RECT> {
@@ -788,8 +899,12 @@ fn resolve_uia_attempt(
             CaptureOutcome::TooLong { characters }
         }
         UiaAttempt::Outcome(CaptureOutcome::Failed(error)) => CaptureOutcome::Failed(error),
-        // Never press Ctrl+C in explicitly ignored code editors and terminals.
+        // Never press Ctrl+C on explicitly ignored or non-text surfaces.
         UiaAttempt::Ignored => CaptureOutcome::Empty,
+        UiaAttempt::NoTextSurface => {
+            trace_capture_phase("uia-non-text-surface");
+            CaptureOutcome::Empty
+        }
         UiaAttempt::PointMismatch => {
             trace_capture_phase("uia-point-mismatch-fallback");
             fallback()
@@ -1431,6 +1546,101 @@ mod tests {
 
         assert!(!fallback_called.get());
         assert_eq!(outcome, CaptureOutcome::Empty);
+    }
+
+    #[test]
+    fn permanent_clipboard_snapshot_failure_is_not_retried() {
+        for error in [
+            "clipboard snapshot exceeds the 128 MiB safety budget",
+            "clipboard contains too many formats to snapshot safely",
+            "clipboard format 8 cannot be snapshotted safely",
+            "clipboard format 13 is not backed by global memory",
+        ] {
+            let retry_called = Cell::new(false);
+            let outcome = retry_failed_capture(CaptureOutcome::Failed(error.into()), || {
+                retry_called.set(true);
+                CaptureOutcome::Empty
+            });
+            assert!(!retry_called.get(), "unexpected retry for {error}");
+            assert_eq!(outcome, CaptureOutcome::Failed(error.into()));
+        }
+    }
+
+    #[test]
+    fn non_text_surface_does_not_send_copy_shortcut() {
+        let fallback_called = Cell::new(false);
+        let attempt = prefer_focused_uia_attempt(
+            UiaAttempt::NoTextSurface,
+            UiaAttempt::Outcome(CaptureOutcome::Empty),
+        );
+        let outcome = resolve_uia_attempt(attempt, || {
+            fallback_called.set(true);
+            CaptureOutcome::Empty
+        });
+
+        assert!(!fallback_called.get());
+        assert_eq!(outcome, CaptureOutcome::Empty);
+        assert!(!is_text_control_type(UIA_PaneControlTypeId));
+        assert!(is_text_control_type(UIA_DocumentControlTypeId));
+    }
+
+    #[test]
+    fn empty_text_pattern_on_generic_canvas_does_not_copy() {
+        let attempt = suppress_ambiguous_non_text_attempt(
+            UiaAttempt::Outcome(CaptureOutcome::Empty),
+            false,
+        );
+        let fallback_called = Cell::new(false);
+        let outcome = resolve_uia_attempt(attempt, || {
+            fallback_called.set(true);
+            CaptureOutcome::Empty
+        });
+        assert!(!fallback_called.get());
+        assert_eq!(outcome, CaptureOutcome::Empty);
+        assert!(matches!(
+            suppress_ambiguous_non_text_attempt(UiaAttempt::Outcome(CaptureOutcome::Empty), true),
+            UiaAttempt::Outcome(CaptureOutcome::Empty)
+        ));
+        assert!(matches!(
+            suppress_ambiguous_non_text_attempt(UiaAttempt::SelectionFailed("busy".into()), false),
+            UiaAttempt::NoTextSurface
+        ));
+        assert!(matches!(
+            suppress_ambiguous_non_text_attempt(UiaAttempt::SelectionFailed("busy".into()), true),
+            UiaAttempt::SelectionFailed(_)
+        ));
+    }
+
+    #[test]
+    fn focused_text_selection_is_used_on_custom_surface() {
+        let captured = CapturedSelection {
+            text: "selected text".into(),
+            anchor: Anchor { x: 1, y: 2 },
+        };
+        let attempt = prefer_focused_uia_attempt(
+            UiaAttempt::NoTextSurface,
+            UiaAttempt::Outcome(CaptureOutcome::Detected(captured.clone())),
+        );
+        let outcome = resolve_uia_attempt(attempt, || CaptureOutcome::Empty);
+        assert_eq!(outcome, CaptureOutcome::Detected(captured));
+    }
+
+    #[test]
+    fn image_surface_does_not_send_copy_shortcut() {
+        let fallback_called = Cell::new(false);
+        let attempt = if is_image_control_type(UIA_ImageControlTypeId) {
+            UiaAttempt::Ignored
+        } else {
+            UiaAttempt::Unavailable
+        };
+        let outcome = resolve_uia_attempt(attempt, || {
+            fallback_called.set(true);
+            CaptureOutcome::Empty
+        });
+
+        assert!(!fallback_called.get());
+        assert_eq!(outcome, CaptureOutcome::Empty);
+        assert!(!is_image_control_type(UIA_DocumentControlTypeId));
     }
 
     #[test]

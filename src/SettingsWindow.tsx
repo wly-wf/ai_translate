@@ -11,6 +11,9 @@ import { useWindowDrag } from "./useWindowDrag";
 
 export function SettingsWindow() {
   const { beginWindowDrag } = useWindowDrag();
+  useEffect(() => {
+    if (isTauriDesktop()) void nativeInvoke("settings_window_ready").catch((error) => console.error("Settings window ready failed:", error));
+  }, []);
   const [autostart, setAutostart] = useState(false);
   const [autostartBusy, setAutostartBusy] = useState(true);
   const [autostartError, setAutostartError] = useState("");
@@ -50,6 +53,7 @@ export function SettingsWindow() {
   const connectionRequestId = useRef(0);
   const modelFetchRequestId = useRef(0);
   const providerWrites = useRef(new ProviderWrites());
+  const initialConfigReads = useRef(new Map<SettingsProviderId, Promise<ProviderConfigResponse | null>>());
   const deletedCustomProviders = useRef(new Set<string>());
   const deletingProviders = useRef(new Set<ProviderId>());
   const providerAutoSaveTimers = useRef<Partial<Record<SettingsProviderId, number>>>({});
@@ -67,6 +71,16 @@ export function SettingsWindow() {
   const providerRowElementsRef = useRef(new Map<ProviderId, HTMLDivElement>());
   const providerRowRectsRef = useRef(new Map<ProviderId, DOMRect>());
   const providerRowAnimationsRef = useRef(new Map<ProviderId, Animation>());
+  function readInitialProviderConfig(providerId: SettingsProviderId) {
+    const pending = initialConfigReads.current.get(providerId);
+    if (pending) return pending;
+    const request = nativeInvoke<ProviderConfigResponse | null>("get_provider_config", { provider: providerId });
+    initialConfigReads.current.set(providerId, request);
+    void request.catch(() => {
+      if (initialConfigReads.current.get(providerId) === request) initialConfigReads.current.delete(providerId);
+    });
+    return request;
+  }
   providerDraftsRef.current = providerDrafts;
   useDialogLifecycle(Boolean(testModelDialogProviderId), closeTestModelDialog, testModelDialogCloseRef, testModelButtonRef);
   useDialogLifecycle(Boolean(editingModel || addingModel), closeModelNameDialog, editModelInputRef, editModelButtonRef);
@@ -160,7 +174,7 @@ export function SettingsWindow() {
     }
     let cancelled = false;
     void Promise.all(enabledProviderIds.map(async (providerId) => {
-      const config = await nativeInvoke<ProviderConfigResponse | null>("get_provider_config", { provider: providerId });
+      const config = await readInitialProviderConfig(providerId);
       return config ? [providerId, modelsFromConfig(config)] as const : null;
     })).then((entries) => {
       if (!cancelled) setSettingsEnabledProviderModels(Object.fromEntries(entries.filter((entry): entry is readonly [ProviderId, string[]] => entry !== null && entry[1].length > 0)));
@@ -291,7 +305,7 @@ export function SettingsWindow() {
     void nativeInvoke<GenericProviderId[]>("get_custom_providers").then((ids) => Promise.all((ids ?? []).filter(isCustomProvider).map(async (id) => {
       const provider = settingsProvider(id)!;
       try {
-        const config = await nativeInvoke<ProviderConfigResponse | null>("get_provider_config", { provider: provider.id });
+        const config = await readInitialProviderConfig(provider.id);
         return config ? { provider, config } : null;
       } catch {
         return null;
@@ -316,6 +330,7 @@ export function SettingsWindow() {
     void listen<string>("provider-config-created", (event) => {
       const provider = isCustomProvider(event.payload) ? settingsProvider(event.payload) : undefined;
       if (!provider) return;
+      initialConfigReads.current.delete(provider.id);
       void Promise.all([
         nativeInvoke<ProviderConfigResponse | null>("get_provider_config", { provider: provider.id }),
         nativeInvoke<SettingsProviderId[]>("get_enabled_providers"),
@@ -345,7 +360,7 @@ export function SettingsWindow() {
     if (providerDraftsRef.current[selectedSettingsProviderId]?.saved) return;
     let cancelled = false;
     const initialDraft = providerDraftsRef.current[selectedSettingsProviderId];
-    void nativeInvoke<ProviderConfigResponse | null>("get_provider_config", { provider: selectedSettingsProviderId })
+    void readInitialProviderConfig(selectedSettingsProviderId)
       .then((config) => {
         if (cancelled || !config || providerDraftsRef.current[selectedSettingsProviderId] !== initialDraft) return;
         setTestModels((models) => ({ ...models, [selectedSettingsProviderId]: config.model }));
@@ -565,6 +580,7 @@ export function SettingsWindow() {
     providerAutoSaveRequestIds.current[providerId] = requestId;
     try {
       await providerWrites.current.run(provider.id, () => nativeInvoke("save_provider_config", providerConfigPayload(provider, draft, models)));
+      initialConfigReads.current.delete(provider.id);
       if (providerAutoSaveRequestIds.current[providerId] !== requestId) return;
       setProviderDrafts((drafts) => ({
         ...drafts,
@@ -591,6 +607,7 @@ export function SettingsWindow() {
         }
         cancelProviderAutoSave(provider.id);
         await providerWrites.current.run(provider.id, () => nativeInvoke("save_provider_config", providerConfigPayload(provider, draft, models)));
+        initialConfigReads.current.delete(provider.id);
         setProviderDrafts((drafts) => ({ ...drafts, [provider.id]: { ...drafts[provider.id], model: models[0], models, saved: true } }));
       }
       const providers = await providerWrites.current.run(provider.id, () => nativeInvoke<SettingsProviderId[]>("set_provider_enabled", { provider: provider.id, enabled }));

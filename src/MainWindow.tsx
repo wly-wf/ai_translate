@@ -5,9 +5,11 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 import appIcon from "../src-tauri/icons/tray-icon.svg";
-import { type Translation, type TranslationError, type ActiveProviderChanged, type ProviderConfigResponse, translationProvider, NO_ENABLED_PROVIDER_NOTICE, SETTINGS_PROVIDERS, withCustomProviderIdentity, modelsFromConfig, translationResultKey, modelChoiceKey, AVAILABLE_TRANSLATION_PROVIDERS, DEFAULT_PROVIDER_ID, orderedProviderIds, orderProviderResults, containsCjk, translationLanguageClass, normalizeSourceText } from "./providerCatalog";
+import { type Translation, type TranslationError, type ActiveProviderChanged, translationProvider, NO_ENABLED_PROVIDER_NOTICE, SETTINGS_PROVIDERS, withCustomProviderIdentity, translationResultKey, modelChoiceKey, AVAILABLE_TRANSLATION_PROVIDERS, DEFAULT_PROVIDER_ID, orderedProviderIds, orderProviderResults, containsCjk, translationLanguageClass, normalizeSourceText } from "./providerCatalog";
 import { ProviderIcon, ModelPicker, preferenceNoticeMessage, Icon, ProviderSetupNotice, ExpandableText, QuickTranslateIcon, ReturnToFloatIcon, ModelRefreshIcon } from "./sharedUI";
 import { useWindowDrag } from "./useWindowDrag";
+
+type ProviderSummary = { providerId: ProviderId; vendorName: string; models: string[]; error: string | null };
 
 export function MainWindow() {
   const [result, setResult] = useState<Translation | null>(null);
@@ -138,17 +140,14 @@ export function MainWindow() {
     const version = ++providerLoadVersion.current;
     const orderedIds = orderedProviderIds(providerOrderRef.current, providerIds);
     setEnabledProviderIds(orderedIds);
-    const loaded = await Promise.allSettled(orderedIds.map(async (providerId) => {
-      const config = await nativeInvoke<ProviderConfigResponse | null>("get_provider_config", { provider: providerId });
-      return [providerId, config ? modelsFromConfig(config) : [], config?.vendorName?.trim()] as const;
-    }));
+    const loaded = await nativeInvoke<ProviderSummary[]>("get_provider_summaries", { providers: orderedIds });
     if (version !== providerLoadVersion.current) return;
-    const entries = loaded.flatMap((entry) => entry.status === "fulfilled" ? [entry.value] : []);
-    const failed = loaded.filter((entry) => entry.status === "rejected").length;
+    const entries = loaded ?? [];
+    const failed = entries.filter((entry) => entry.error).length;
     if (failed) setNotice(`${failed} 个供应商配置读取失败，其余模型仍可使用。`);
-    setEnabledProviderModels(Object.fromEntries(entries.flatMap(([providerId, models]) => models.length ? [[providerId, models]] : [])));
-    setEnabledProviderNames(Object.fromEntries(entries.flatMap(([providerId, , vendorName]) => vendorName ? [[providerId, vendorName]] : [])));
-    setHasApiKey(entries.some(([, models]) => models.length > 0));
+    setEnabledProviderModels(Object.fromEntries(entries.flatMap(({ providerId, models }) => models.length ? [[providerId, models]] : [])));
+    setEnabledProviderNames(Object.fromEntries(entries.flatMap(({ providerId, vendorName }) => vendorName?.trim() ? [[providerId, vendorName.trim()]] : [])));
+    setHasApiKey(entries.some(({ models }) => models.length > 0));
   }
 
   useEffect(() => {

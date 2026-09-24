@@ -174,6 +174,12 @@ struct AddProviderWindowState {
     requested: bool,
 }
 
+#[derive(Default)]
+struct SettingsWindowState {
+    ready: bool,
+    requested: bool,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 enum ProxyMode {
@@ -314,6 +320,16 @@ struct ProviderConfigResponse {
     base_url: String,
     model: String,
     models: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderSummaryResponse {
+    // The main window needs model choices, never the provider credential.
+    provider_id: String,
+    vendor_name: String,
+    models: Vec<String>,
+    error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -465,6 +481,8 @@ impl CaptureScheduler {
             .name("selection-capture".into())
             .spawn(move || loop {
                 let request = worker_pending.wait();
+                #[cfg(debug_assertions)]
+                let started = Instant::now();
                 thread::sleep(Duration::from_millis(120));
                 if !is_latest_generation(&app, request.generation) {
                     continue;
@@ -474,6 +492,8 @@ impl CaptureScheduler {
                     continue;
                 }
                 let outcome = capture_selection(request.point, request.start_point);
+                #[cfg(debug_assertions)]
+                eprintln!("selection-gesture elapsed_ms={}", started.elapsed().as_millis());
                 dispatch_mouse_up(&app, request.generation, outcome, false);
             })
             .map_err(|error| format!("could not start selection capture worker: {error}"))?;
@@ -1411,38 +1431,59 @@ async fn create_custom_provider(
     Ok(provider.0)
 }
 
+fn provider_config_for_editor(provider: &str) -> Result<Option<ProviderConfigResponse>, String> {
+    let entry = provider_keyring_entry(provider)?;
+    let Ok(password) = entry.get_password() else {
+        if provider == "deepseek" {
+            if let Ok(api_key) = legacy_api_key() {
+                return Ok(Some(ProviderConfigResponse {
+                    vendor_name: String::new(),
+                    api_key,
+                    base_url: DEEPSEEK_BASE_URL.to_string(),
+                    model: DEEPSEEK_MODEL.to_string(),
+                    models: vec![DEEPSEEK_MODEL.to_string()],
+                }));
+            }
+        }
+        return Ok(None);
+    };
+    let config: StoredProviderConfig = serde_json::from_str(&password)
+        .map_err(|error| format!("无法读取 {provider} 配置：{error}"))?;
+    let models = normalize_models(&config.model, &config.models);
+    let model = models.first().cloned().unwrap_or_default();
+    Ok(Some(ProviderConfigResponse {
+        vendor_name: config.vendor_name,
+        api_key: config.api_key,
+        base_url: normalize_provider_base_url(provider, &config.base_url),
+        model,
+        models,
+    }))
+}
+
 #[tauri::command]
 async fn get_provider_config(provider: String) -> Result<Option<ProviderConfigResponse>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let entry = provider_keyring_entry(&provider)?;
-        let Ok(password) = entry.get_password() else {
-            if provider == "deepseek" {
-                if let Ok(api_key) = legacy_api_key() {
-                    return Ok(Some(ProviderConfigResponse {
-                        vendor_name: String::new(),
-                        api_key,
-                        base_url: DEEPSEEK_BASE_URL.to_string(),
-                        model: DEEPSEEK_MODEL.to_string(),
-                        models: vec![DEEPSEEK_MODEL.to_string()],
-                    }));
-                }
-            }
-            return Ok(None);
-        };
-        let config: StoredProviderConfig = serde_json::from_str(&password)
-            .map_err(|error| format!("无法读取 {provider} 配置：{error}"))?;
-        let models = normalize_models(&config.model, &config.models);
-        let model = models.first().cloned().unwrap_or_default();
-        Ok(Some(ProviderConfigResponse {
-            vendor_name: config.vendor_name,
-            api_key: config.api_key,
-            base_url: normalize_provider_base_url(&provider, &config.base_url),
-            model,
-            models,
-        }))
-    })
+    tauri::async_runtime::spawn_blocking(move || provider_config_for_editor(&provider))
     .await
     .map_err(|error| format!("读取配置任务失败：{error}"))?
+}
+
+#[tauri::command]
+async fn get_provider_summaries(providers: Vec<String>) -> Result<Vec<ProviderSummaryResponse>, String> {
+    let tasks = providers.into_iter().map(|provider_id| {
+        tauri::async_runtime::spawn_blocking(move || {
+            let (vendor_name, models, error) = match provider_config_for_editor(&provider_id) {
+                Ok(Some(config)) => (config.vendor_name, config.models, None),
+                Ok(None) => (String::new(), Vec::new(), None),
+                Err(error) => (String::new(), Vec::new(), Some(error)),
+            };
+            ProviderSummaryResponse { provider_id, vendor_name, models, error }
+        })
+    }).collect::<Vec<_>>();
+    let mut summaries = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        summaries.push(task.await.map_err(|error| format!("读取模型摘要任务失败：{error}"))?);
+    }
+    Ok(summaries)
 }
 
 #[tauri::command]
@@ -1837,21 +1878,43 @@ fn set_window_appearance(
 }
 
 fn show_settings_window(app: &AppHandle) -> Result<(), String> {
+    ensure_settings_window(app, true)
+}
+
+fn reveal_settings_window(app: &AppHandle, window: &WebviewWindow) -> Result<(), String> {
     let appearance = current_window_appearance(app);
     let dark = appearance.dark;
     let follow_system = appearance.follow_system;
+    fit_settings_window(window, 1120.0, 760.0)?;
+    window.set_resizable(false).map_err(|error| error.to_string())?;
+    window.set_minimizable(true).map_err(|error| error.to_string())?;
+    configure_standard_window_frame(window, dark, follow_system)?;
+    window.set_always_on_top(false).map_err(|error| error.to_string())?;
+    window.unminimize().map_err(|error| error.to_string())?;
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())?;
+    prewarm_add_provider_window(app);
+    Ok(())
+}
+
+fn ensure_settings_window(app: &AppHandle, requested: bool) -> Result<(), String> {
+    let state = app.state::<Mutex<SettingsWindowState>>();
+    let mut state = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(window) = app.get_webview_window("settings") {
-        fit_settings_window(&window, 1120.0, 760.0)?;
-        window.set_resizable(false).map_err(|error| error.to_string())?;
-        window.set_minimizable(true).map_err(|error| error.to_string())?;
-        configure_standard_window_frame(&window, dark, follow_system)?;
-        window.set_always_on_top(false).map_err(|error| error.to_string())?;
-        window.unminimize().map_err(|error| error.to_string())?;
-        window.show().map_err(|error| error.to_string())?;
-        window.set_focus().map_err(|error| error.to_string())?;
-        prewarm_add_provider_window(app);
+        if requested {
+            state.requested = true;
+            if state.ready {
+                reveal_settings_window(app, &window)?;
+                state.requested = false;
+            }
+        }
         return Ok(());
     }
+
+    *state = SettingsWindowState { ready: false, requested };
+    let appearance = current_window_appearance(app);
+    let dark = appearance.dark;
+    let follow_system = appearance.follow_system;
 
     let window = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
         .inner_size(1120.0, 760.0)
@@ -1892,13 +1955,6 @@ fn show_settings_window(app: &AppHandle) -> Result<(), String> {
                 if let Err(error) = window.set_always_on_top(false) {
                     eprintln!("Settings window topmost reset after page load failed: {error}");
                 }
-                if let Err(error) = window.show() {
-                    eprintln!("Settings window show after page load failed: {error}");
-                }
-                if let Err(error) = window.set_focus() {
-                    eprintln!("Settings window focus after page load failed: {error}");
-                }
-                prewarm_add_provider_window(window.app_handle());
             }
         })
         .build()
@@ -1924,6 +1980,15 @@ fn prewarm_add_provider_window(app: &AppHandle) {
     thread::spawn(move || {
         if let Err(error) = show_add_provider_window(&app, false) {
             eprintln!("Add-provider window preload failed: {error}");
+        }
+    });
+}
+
+fn prewarm_settings_window(app: &AppHandle) {
+    let app = app.clone();
+    thread::spawn(move || {
+        if let Err(error) = ensure_settings_window(&app, false) {
+            eprintln!("Settings window preload failed: {error}");
         }
     });
 }
@@ -1988,6 +2053,21 @@ fn spawn_settings_window(app: &AppHandle) {
 #[tauri::command]
 async fn open_settings_window(app: AppHandle) -> Result<(), String> {
     show_settings_window(&app)
+}
+
+#[tauri::command]
+fn settings_window_ready(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
+    if window.label() != "settings" {
+        return Err("Only the settings window can report readiness.".to_string());
+    }
+    let state = app.state::<Mutex<SettingsWindowState>>();
+    let mut state = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.ready = true;
+    if state.requested {
+        reveal_settings_window(&app, &window)?;
+        state.requested = false;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -2268,6 +2348,7 @@ pub fn run() {
         .manage(EnabledProvidersUpdateLock(Mutex::new(())))
         .manage(PreferencesUpdateLock(Mutex::new(())))
         .manage(Mutex::<AddProviderWindowState>::default())
+        .manage(Mutex::<SettingsWindowState>::default())
         .manage(translation_runtime::TranslationRuntime::default())
         .setup(move |app| {
             if let Some(window) = app.get_webview_window("main") {
@@ -2284,6 +2365,7 @@ pub fn run() {
                     eprintln!("Selection float disabled: {error}");
                 }
             }
+            prewarm_settings_window(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -2297,6 +2379,7 @@ pub fn run() {
             create_custom_provider,
             get_custom_providers,
             get_provider_config,
+            get_provider_summaries,
             delete_custom_provider,
             test_provider_connection,
             fetch_provider_models,
@@ -2309,6 +2392,7 @@ pub fn run() {
             minimize_window,
             set_window_appearance,
             open_settings_window,
+            settings_window_ready,
             open_add_provider_window,
             add_provider_window_ready,
             return_to_settings_window,
